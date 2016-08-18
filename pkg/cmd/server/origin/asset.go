@@ -13,35 +13,39 @@ import (
 	"github.com/emicklei/go-restful"
 	"github.com/golang/glog"
 
+	"github.com/openshift/origin/pkg/api"
 	"github.com/openshift/origin/pkg/api/latest"
 	"github.com/openshift/origin/pkg/assets"
 	"github.com/openshift/origin/pkg/assets/java"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	"github.com/openshift/origin/pkg/cmd/server/crypto"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
-	"github.com/openshift/origin/pkg/version"
+	oversion "github.com/openshift/origin/pkg/version"
 
-	"k8s.io/kubernetes/pkg/api"
-	klatest "k8s.io/kubernetes/pkg/api/latest"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	"k8s.io/kubernetes/pkg/util/sets"
+	utilwait "k8s.io/kubernetes/pkg/util/wait"
+	kversion "k8s.io/kubernetes/pkg/version"
 )
 
 // InstallAPI adds handlers for serving static assets into the provided mux,
 // then returns an array of strings indicating what endpoints were started
 // (these are format strings that will expect to be sent a single string value).
-func (c *AssetConfig) InstallAPI(container *restful.Container) []string {
+func (c *AssetConfig) InstallAPI(container *restful.Container) ([]string, error) {
 	publicURL, err := url.Parse(c.Options.PublicURL)
 	if err != nil {
-		glog.Fatal(err)
+		return nil, err
 	}
 
 	err = c.addHandlers(container.ServeMux)
 	if err != nil {
-		glog.Fatal(err)
+		return nil, err
 	}
 
-	return []string{fmt.Sprintf("Started Web Console %%s%s", publicURL.Path)}
+	return []string{fmt.Sprintf("Started Web Console %%s%s", publicURL.Path)}, nil
 }
 
 // Run starts an http server for the static assets listening on the configured
@@ -79,12 +83,16 @@ func (c *AssetConfig) Run() {
 
 	isTLS := configapi.UseTLS(c.Options.ServingInfo.ServingInfo)
 
-	go util.Forever(func() {
+	go utilwait.Forever(func() {
 		if isTLS {
-			server.TLSConfig = &tls.Config{
-				// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability)
-				MinVersion: tls.VersionTLS10,
+			extraCerts, err := configapi.GetNamedCertificateMap(c.Options.ServingInfo.NamedCertificates)
+			if err != nil {
+				glog.Fatal(err)
 			}
+			server.TLSConfig = crypto.SecureTLSConfig(&tls.Config{
+				// Set SNI certificate func
+				GetCertificate: cmdutil.GetCertificateFunc(extraCerts),
+			})
 			glog.Infof("Web console listening at https://%s", c.Options.ServingInfo.BindAddress)
 			glog.Fatal(cmdutil.ListenAndServeTLS(server, c.Options.ServingInfo.BindNetwork, c.Options.ServingInfo.ServerCert.CertFile, c.Options.ServingInfo.ServerCert.KeyFile))
 		} else {
@@ -125,12 +133,25 @@ func (c *AssetConfig) buildAssetHandler() (http.Handler, error) {
 
 	// Cache control should happen after all Vary headers are added, but before
 	// any asset related routing (HTML5ModeHandler and FileServer)
-	handler = assets.CacheControlHandler(version.Get().GitCommit, handler)
+	handler = assets.CacheControlHandler(oversion.Get().GitCommit, handler)
 
 	// Gzip first so that inner handlers can react to the addition of the Vary header
 	handler = assets.GzipHandler(handler)
 
 	return handler, nil
+}
+
+// Have to convert to arrays because go templates are limited and we need to be able to know
+// if we are on the last index for trailing commas in JSON
+func extensionPropertyArray(extensionProperties map[string]string) []assets.WebConsoleExtensionProperty {
+	extensionPropsArray := []assets.WebConsoleExtensionProperty{}
+	for key, value := range extensionProperties {
+		extensionPropsArray = append(extensionPropsArray, assets.WebConsoleExtensionProperty{
+			Key:   key,
+			Value: value,
+		})
+	}
+	return extensionPropsArray
 }
 
 func (c *AssetConfig) addHandlers(mux *http.ServeMux) error {
@@ -155,22 +176,25 @@ func (c *AssetConfig) addHandlers(mux *http.ServeMux) error {
 	originResources := sets.NewString()
 	k8sResources := sets.NewString()
 
-	versions := sets.NewString()
-	versions.Insert(latest.Versions...)
-	versions.Insert(klatest.Versions...)
-	for _, version := range versions.List() {
-		for kind, t := range api.Scheme.KnownTypes(version) {
-			if strings.Contains(t.PkgPath(), "kubernetes/pkg/expapi") {
-				continue
-			}
+	versions := []unversioned.GroupVersion{}
+	versions = append(versions, registered.GroupOrDie(api.GroupName).GroupVersions...)
+	versions = append(versions, registered.GroupOrDie(kapi.GroupName).GroupVersions...)
+	deadOriginVersions := sets.NewString(configapi.DeadOpenShiftAPILevels...)
+	deadKubernetesVersions := sets.NewString(configapi.DeadKubernetesAPILevels...)
+	for _, version := range versions {
+		for kind := range kapi.Scheme.KnownTypes(version) {
 			if strings.HasSuffix(kind, "List") {
 				continue
 			}
-			resource, _ := meta.KindToResource(kind, false)
-			if latest.OriginKind(kind, version) {
-				originResources.Insert(resource)
+			resource, _ := meta.KindToResource(version.WithKind(kind))
+			if latest.OriginKind(version.WithKind(kind)) {
+				if !deadOriginVersions.Has(version.String()) {
+					originResources.Insert(resource.Resource)
+				}
 			} else {
-				k8sResources.Insert(resource)
+				if !deadKubernetesVersions.Has(version.String()) {
+					k8sResources.Insert(resource.Resource)
+				}
 			}
 		}
 	}
@@ -185,22 +209,36 @@ func (c *AssetConfig) addHandlers(mux *http.ServeMux) error {
 		return fmt.Errorf("Resources for kubernetes and origin types intersect: %v", commonResources.List())
 	}
 
-	// Generated web console config
+	// Generated web console config and server version
 	config := assets.WebConsoleConfig{
-		MasterAddr:          masterURL.Host,
-		MasterPrefix:        OpenShiftAPIPrefix,
-		MasterLegacyPrefix:  LegacyOpenShiftAPIPrefix,
-		MasterResources:     originResources.List(),
-		KubernetesAddr:      masterURL.Host,
-		KubernetesPrefix:    KubernetesAPIPrefix,
-		KubernetesResources: k8sResources.List(),
-		OAuthAuthorizeURI:   OpenShiftOAuthAuthorizeURL(masterURL.String()),
-		OAuthRedirectBase:   c.Options.PublicURL,
-		OAuthClientID:       OpenShiftWebConsoleClientID,
-		LogoutURI:           c.Options.LogoutURL,
+		APIGroupAddr:          masterURL.Host,
+		APIGroupPrefix:        KubernetesAPIGroupPrefix,
+		MasterAddr:            masterURL.Host,
+		MasterPrefix:          OpenShiftAPIPrefix,
+		MasterResources:       originResources.List(),
+		KubernetesAddr:        masterURL.Host,
+		KubernetesPrefix:      KubernetesAPIPrefix,
+		KubernetesResources:   k8sResources.List(),
+		OAuthAuthorizeURI:     OpenShiftOAuthAuthorizeURL(masterURL.String()),
+		OAuthRedirectBase:     c.Options.PublicURL,
+		OAuthClientID:         OpenShiftWebConsoleClientID,
+		LogoutURI:             c.Options.LogoutURL,
+		LoggingURL:            c.Options.LoggingPublicURL,
+		MetricsURL:            c.Options.MetricsPublicURL,
+		LimitRequestOverrides: c.LimitRequestOverrides,
+	}
+	kVersionInfo := kversion.Get()
+	oVersionInfo := oversion.Get()
+	versionInfo := assets.WebConsoleVersion{
+		KubernetesVersion: kVersionInfo.GitVersion,
+		OpenShiftVersion:  oVersionInfo.GitVersion,
+	}
+
+	extensionProps := assets.WebConsoleExtensionProperties{
+		ExtensionProperties: extensionPropertyArray(c.Options.ExtensionProperties),
 	}
 	configPath := path.Join(publicURL.Path, "config.js")
-	configHandler, err := assets.GeneratedConfigHandler(config)
+	configHandler, err := assets.GeneratedConfigHandler(config, versionInfo, extensionProps)
 	if err != nil {
 		return err
 	}

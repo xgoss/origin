@@ -5,12 +5,14 @@ import (
 	"sort"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 
 	osgraph "github.com/openshift/origin/pkg/api/graph"
 	kubeedges "github.com/openshift/origin/pkg/api/kubegraph"
 	kubegraph "github.com/openshift/origin/pkg/api/kubegraph/nodes"
 	deploygraph "github.com/openshift/origin/pkg/deploy/graph/nodes"
+	routeedges "github.com/openshift/origin/pkg/route/graph"
+	routegraph "github.com/openshift/origin/pkg/route/graph/nodes"
 )
 
 // ServiceGroup is a service, the DeploymentConfigPipelines it covers, and lists of the other nodes that fulfill it
@@ -19,10 +21,15 @@ type ServiceGroup struct {
 
 	DeploymentConfigPipelines []DeploymentConfigPipeline
 	ReplicationControllers    []ReplicationController
+	PetSets                   []PetSet
 
-	FulfillingDCs  []*deploygraph.DeploymentConfigNode
-	FulfillingRCs  []*kubegraph.ReplicationControllerNode
-	FulfillingPods []*kubegraph.PodNode
+	// TODO: this has to stop
+	FulfillingPetSets []*kubegraph.PetSetNode
+	FulfillingDCs     []*deploygraph.DeploymentConfigNode
+	FulfillingRCs     []*kubegraph.ReplicationControllerNode
+	FulfillingPods    []*kubegraph.PodNode
+
+	ExposingRoutes []*routegraph.RouteNode
 }
 
 // AllServiceGroups returns all the ServiceGroups that aren't in the excludes set and the set of covered NodeIDs
@@ -40,11 +47,11 @@ func AllServiceGroups(g osgraph.Graph, excludeNodeIDs IntSet) ([]ServiceGroup, I
 		services = append(services, service)
 	}
 
-	sort.Sort(SortedServiceGroups(services))
+	sort.Sort(ServiceGroupByObjectMeta(services))
 	return services, covered
 }
 
-// NewServiceGroup returns the ServiceGroup and a set of all the NodeIDs covered by the service service
+// NewServiceGroup returns the ServiceGroup and a set of all the NodeIDs covered by the service
 func NewServiceGroup(g osgraph.Graph, serviceNode *kubegraph.ServiceNode) (ServiceGroup, IntSet) {
 	covered := IntSet{}
 	covered.Insert(serviceNode.ID())
@@ -62,9 +69,21 @@ func NewServiceGroup(g osgraph.Graph, serviceNode *kubegraph.ServiceNode) (Servi
 			service.FulfillingRCs = append(service.FulfillingRCs, castContainer)
 		case *kubegraph.PodNode:
 			service.FulfillingPods = append(service.FulfillingPods, castContainer)
-
+		case *kubegraph.PetSetNode:
+			service.FulfillingPetSets = append(service.FulfillingPetSets, castContainer)
 		default:
-			util.HandleError(fmt.Errorf("unrecognized container: %v", castContainer))
+			utilruntime.HandleError(fmt.Errorf("unrecognized container: %v", castContainer))
+		}
+	}
+
+	for _, uncastServiceFulfiller := range g.PredecessorNodesByEdgeKind(serviceNode, routeedges.ExposedThroughRouteEdgeKind) {
+		container := osgraph.GetTopLevelContainerNode(g, uncastServiceFulfiller)
+
+		switch castContainer := container.(type) {
+		case *routegraph.RouteNode:
+			service.ExposingRoutes = append(service.ExposingRoutes, castContainer)
+		default:
+			utilruntime.HandleError(fmt.Errorf("unrecognized container: %v", castContainer))
 		}
 	}
 
@@ -83,14 +102,26 @@ func NewServiceGroup(g osgraph.Graph, serviceNode *kubegraph.ServiceNode) (Servi
 		service.ReplicationControllers = append(service.ReplicationControllers, rcView)
 	}
 
+	for _, fulfillingPetSet := range service.FulfillingPetSets {
+		view, covers := NewPetSet(g, fulfillingPetSet)
+
+		covered.Insert(covers.List()...)
+		service.PetSets = append(service.PetSets, view)
+	}
+
+	for _, fulfillingPod := range service.FulfillingPods {
+		_, podCovers := NewPod(g, fulfillingPod)
+		covered.Insert(podCovers.List()...)
+	}
+
 	return service, covered
 }
 
-type SortedServiceGroups []ServiceGroup
+type ServiceGroupByObjectMeta []ServiceGroup
 
-func (m SortedServiceGroups) Len() int      { return len(m) }
-func (m SortedServiceGroups) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
-func (m SortedServiceGroups) Less(i, j int) bool {
+func (m ServiceGroupByObjectMeta) Len() int      { return len(m) }
+func (m ServiceGroupByObjectMeta) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
+func (m ServiceGroupByObjectMeta) Less(i, j int) bool {
 	a, b := m[i], m[j]
 	return CompareObjectMeta(&a.Service.Service.ObjectMeta, &b.Service.Service.ObjectMeta)
 }

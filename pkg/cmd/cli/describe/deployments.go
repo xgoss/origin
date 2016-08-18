@@ -8,139 +8,83 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/openshift/origin/pkg/api/graph"
-
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
+	rcutils "k8s.io/kubernetes/pkg/controller/replication"
 	kctl "k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/labels"
 
+	"github.com/openshift/origin/pkg/api/graph"
 	kubegraph "github.com/openshift/origin/pkg/api/kubegraph/nodes"
 	"github.com/openshift/origin/pkg/client"
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	deployedges "github.com/openshift/origin/pkg/deploy/graph"
 	deploygraph "github.com/openshift/origin/pkg/deploy/graph/nodes"
 	deployutil "github.com/openshift/origin/pkg/deploy/util"
+	imageapi "github.com/openshift/origin/pkg/image/api"
+)
+
+const (
+	// maxDisplayDeployments is the number of deployments to show when describing
+	// deployment configuration.
+	maxDisplayDeployments = 3
+
+	// maxDisplayDeploymentsEvents is the number of events to display when
+	// describing the deployment configuration.
+	// TODO: Make the estimation of this number more sophisticated and make this
+	// number configurable via DescriberSettings
+	maxDisplayDeploymentsEvents = 8
 )
 
 // DeploymentConfigDescriber generates information about a DeploymentConfig
 type DeploymentConfigDescriber struct {
-	client deploymentDescriberClient
-}
+	osClient   client.Interface
+	kubeClient kclient.Interface
 
-type deploymentDescriberClient interface {
-	getDeploymentConfig(namespace, name string) (*deployapi.DeploymentConfig, error)
-	getDeployment(namespace, name string) (*kapi.ReplicationController, error)
-	listDeployments(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error)
-	listPods(namespace string, selector labels.Selector) (*kapi.PodList, error)
-	listEvents(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error)
-}
-
-type genericDeploymentDescriberClient struct {
-	getDeploymentConfigFunc func(namespace, name string) (*deployapi.DeploymentConfig, error)
-	getDeploymentFunc       func(namespace, name string) (*kapi.ReplicationController, error)
-	listDeploymentsFunc     func(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error)
-	listPodsFunc            func(namespace string, selector labels.Selector) (*kapi.PodList, error)
-	listEventsFunc          func(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error)
-}
-
-func (c *genericDeploymentDescriberClient) getDeploymentConfig(namespace, name string) (*deployapi.DeploymentConfig, error) {
-	return c.getDeploymentConfigFunc(namespace, name)
-}
-
-func (c *genericDeploymentDescriberClient) getDeployment(namespace, name string) (*kapi.ReplicationController, error) {
-	return c.getDeploymentFunc(namespace, name)
-}
-
-func (c *genericDeploymentDescriberClient) listDeployments(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error) {
-	return c.listDeploymentsFunc(namespace, selector)
-}
-
-func (c *genericDeploymentDescriberClient) listPods(namespace string, selector labels.Selector) (*kapi.PodList, error) {
-	return c.listPodsFunc(namespace, selector)
-}
-
-func (c *genericDeploymentDescriberClient) listEvents(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error) {
-	return c.listEventsFunc(deploymentConfig)
-}
-
-// NewDeploymentConfigDescriberForConfig returns a new DeploymentConfigDescriber
-// for a DeploymentConfig
-func NewDeploymentConfigDescriberForConfig(client client.Interface, kclient kclient.Interface, config *deployapi.DeploymentConfig) *DeploymentConfigDescriber {
-	return &DeploymentConfigDescriber{
-		client: &genericDeploymentDescriberClient{
-			getDeploymentConfigFunc: func(namespace, name string) (*deployapi.DeploymentConfig, error) {
-				return config, nil
-			},
-			getDeploymentFunc: func(namespace, name string) (*kapi.ReplicationController, error) {
-				return nil, kerrors.NewNotFound("ReplicatonController", name)
-			},
-			listDeploymentsFunc: func(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error) {
-				return nil, kerrors.NewNotFound("ReplicationControllerList", fmt.Sprintf("%v", selector))
-			},
-			listPodsFunc: func(namespace string, selector labels.Selector) (*kapi.PodList, error) {
-				return nil, kerrors.NewNotFound("PodList", fmt.Sprintf("%v", selector))
-			},
-			listEventsFunc: func(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error) {
-				return kclient.Events(config.Namespace).Search(config)
-			},
-		},
-	}
+	config *deployapi.DeploymentConfig
 }
 
 // NewDeploymentConfigDescriber returns a new DeploymentConfigDescriber
-func NewDeploymentConfigDescriber(client client.Interface, kclient kclient.Interface) *DeploymentConfigDescriber {
+func NewDeploymentConfigDescriber(client client.Interface, kclient kclient.Interface, config *deployapi.DeploymentConfig) *DeploymentConfigDescriber {
 	return &DeploymentConfigDescriber{
-		client: &genericDeploymentDescriberClient{
-			getDeploymentConfigFunc: func(namespace, name string) (*deployapi.DeploymentConfig, error) {
-				return client.DeploymentConfigs(namespace).Get(name)
-			},
-			getDeploymentFunc: func(namespace, name string) (*kapi.ReplicationController, error) {
-				return kclient.ReplicationControllers(namespace).Get(name)
-			},
-			listDeploymentsFunc: func(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error) {
-				return kclient.ReplicationControllers(namespace).List(selector)
-			},
-			listPodsFunc: func(namespace string, selector labels.Selector) (*kapi.PodList, error) {
-				return kclient.Pods(namespace).List(selector, fields.Everything())
-			},
-			listEventsFunc: func(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error) {
-				return kclient.Events(deploymentConfig.Namespace).Search(deploymentConfig)
-			},
-		},
+		osClient:   client,
+		kubeClient: kclient,
+		config:     config,
 	}
 }
 
 // Describe returns the description of a DeploymentConfig
-func (d *DeploymentConfigDescriber) Describe(namespace, name string) (string, error) {
-	deploymentConfig, err := d.client.getDeploymentConfig(namespace, name)
-	if err != nil {
-		return "", err
-	}
-	events, err := d.client.listEvents(deploymentConfig)
-	if err != nil {
-		return "", err
+func (d *DeploymentConfigDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+	var deploymentConfig *deployapi.DeploymentConfig
+	if d.config != nil {
+		// If a deployment config is already provided use that.
+		// This is used by `oc rollback --dry-run`.
+		deploymentConfig = d.config
+	} else {
+		var err error
+		deploymentConfig, err = d.osClient.DeploymentConfigs(namespace).Get(name)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	return tabbedString(func(out *tabwriter.Writer) error {
 		formatMeta(out, deploymentConfig.ObjectMeta)
 
-		if deploymentConfig.LatestVersion == 0 {
+		if deploymentConfig.Status.LatestVersion == 0 {
 			formatString(out, "Latest Version", "Not deployed")
 		} else {
-			formatString(out, "Latest Version", strconv.Itoa(deploymentConfig.LatestVersion))
+			formatString(out, "Latest Version", strconv.FormatInt(deploymentConfig.Status.LatestVersion, 10))
 		}
 
-		printTriggers(deploymentConfig.Triggers, out)
-
-		formatString(out, "Strategy", deploymentConfig.Template.Strategy.Type)
-		printStrategy(deploymentConfig.Template.Strategy, out)
-		printReplicationControllerSpec(deploymentConfig.Template.ControllerTemplate, out)
+		printDeploymentConfigSpec(d.kubeClient, *deploymentConfig, out)
+		fmt.Fprintln(out)
 
 		deploymentName := deployutil.LatestDeploymentNameForConfig(deploymentConfig)
-		deployment, err := d.client.getDeployment(namespace, deploymentName)
+		deployment, err := d.kubeClient.ReplicationControllers(namespace).Get(deploymentName)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				formatString(out, "Latest Deployment", "<none>")
@@ -149,71 +93,115 @@ func (d *DeploymentConfigDescriber) Describe(namespace, name string) (string, er
 			}
 		} else {
 			header := fmt.Sprintf("Deployment #%d (latest)", deployutil.DeploymentVersionFor(deployment))
-			printDeploymentRc(deployment, d.client, out, header, true)
+			printDeploymentRc(deployment, d.kubeClient, out, header, true)
 		}
-		deploymentsHistory, err := d.client.listDeployments(namespace, labels.Everything())
-		if err == nil {
-			sorted := rcSorter{}
-			sorted = append(sorted, deploymentsHistory.Items...)
-			sort.Sort(sorted)
-			for _, item := range sorted {
-				if item.Name != deploymentName && deploymentConfig.Name == deployutil.DeploymentConfigNameFor(&item) {
-					header := fmt.Sprintf("Deployment #%d", deployutil.DeploymentVersionFor(&item))
-					printDeploymentRc(&item, d.client, out, header, false)
+		// We don't show the deployment history when running `oc rollback --dry-run`.
+		if d.config == nil {
+			deploymentsHistory, err := d.kubeClient.ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: labels.Everything()})
+			if err == nil {
+				sorted := deploymentsHistory.Items
+				sort.Sort(sort.Reverse(rcutils.OverlappingControllers(sorted)))
+				counter := 1
+				for _, item := range sorted {
+					if item.Name != deploymentName && deploymentConfig.Name == deployutil.DeploymentConfigNameFor(&item) {
+						header := fmt.Sprintf("Deployment #%d", deployutil.DeploymentVersionFor(&item))
+						printDeploymentRc(&item, d.kubeClient, out, header, false)
+						counter++
+					}
+					if counter == maxDisplayDeployments {
+						break
+					}
 				}
 			}
 		}
 
-		if events != nil {
-			kctl.DescribeEvents(events, out)
+		if settings.ShowEvents {
+			// Events
+			if events, err := d.kubeClient.Events(deploymentConfig.Namespace).Search(deploymentConfig); err == nil && events != nil {
+				latestDeploymentEvents := &kapi.EventList{Items: []kapi.Event{}}
+				for i := len(events.Items); i != 0 && i > len(events.Items)-maxDisplayDeploymentsEvents; i-- {
+					latestDeploymentEvents.Items = append(latestDeploymentEvents.Items, events.Items[i-1])
+				}
+				fmt.Fprintln(out)
+				kctl.DescribeEvents(latestDeploymentEvents, out)
+			}
 		}
 		return nil
 	})
 }
 
-func printStrategy(strategy deployapi.DeploymentStrategy, w *tabwriter.Writer) {
-	switch strategy.Type {
-	case deployapi.DeploymentStrategyTypeRecreate:
-		if strategy.RecreateParams != nil {
-			pre := strategy.RecreateParams.Pre
-			post := strategy.RecreateParams.Post
-			if pre != nil {
-				printHook("Pre-deployment", pre, w)
-			}
-			if post != nil {
-				printHook("Post-deployment", post, w)
-			}
+func multilineStringArray(sep, indent string, args ...string) string {
+	for i, s := range args {
+		if strings.HasSuffix(s, "\n") {
+			s = strings.TrimSuffix(s, "\n")
 		}
-	case deployapi.DeploymentStrategyTypeRolling:
-		if strategy.RollingParams != nil {
-			pre := strategy.RollingParams.Pre
-			post := strategy.RollingParams.Post
-			if pre != nil {
-				printHook("Pre-deployment", pre, w)
-			}
-			if post != nil {
-				printHook("Post-deployment", post, w)
-			}
+		if strings.Contains(s, "\n") {
+			s = "\n" + indent + strings.Join(strings.Split(s, "\n"), "\n"+indent)
 		}
-	case deployapi.DeploymentStrategyTypeCustom:
-		fmt.Fprintf(w, "\t  Image:\t%s\n", strategy.CustomParams.Image)
+		args[i] = s
+	}
+	strings.TrimRight(args[len(args)-1], "\n ")
+	return strings.Join(args, " ")
+}
+
+func printStrategy(strategy deployapi.DeploymentStrategy, indent string, w *tabwriter.Writer) {
+	if strategy.CustomParams != nil {
+		if len(strategy.CustomParams.Image) == 0 {
+			fmt.Fprintf(w, "%sImage:\t%s\n", indent, "<default>")
+		} else {
+			fmt.Fprintf(w, "%sImage:\t%s\n", indent, strategy.CustomParams.Image)
+		}
 
 		if len(strategy.CustomParams.Environment) > 0 {
-			fmt.Fprintf(w, "\t  Environment:\t%s\n", formatLabels(convertEnv(strategy.CustomParams.Environment)))
+			fmt.Fprintf(w, "%sEnvironment:\t%s\n", indent, formatLabels(convertEnv(strategy.CustomParams.Environment)))
 		}
 
 		if len(strategy.CustomParams.Command) > 0 {
-			fmt.Fprintf(w, "\t  Command:\t%v\n", strings.Join(strategy.CustomParams.Command, " "))
+			fmt.Fprintf(w, "%sCommand:\t%v\n", indent, multilineStringArray(" ", "\t  ", strategy.CustomParams.Command...))
+		}
+	}
+
+	if strategy.RecreateParams != nil {
+		pre := strategy.RecreateParams.Pre
+		mid := strategy.RecreateParams.Mid
+		post := strategy.RecreateParams.Post
+		if pre != nil {
+			printHook("Pre-deployment", pre, indent, w)
+		}
+		if mid != nil {
+			printHook("Mid-deployment", mid, indent, w)
+		}
+		if post != nil {
+			printHook("Post-deployment", post, indent, w)
+		}
+	}
+
+	if strategy.RollingParams != nil {
+		pre := strategy.RollingParams.Pre
+		post := strategy.RollingParams.Post
+		if pre != nil {
+			printHook("Pre-deployment", pre, indent, w)
+		}
+		if post != nil {
+			printHook("Post-deployment", post, indent, w)
 		}
 	}
 }
 
-func printHook(prefix string, hook *deployapi.LifecycleHook, w io.Writer) {
+func printHook(prefix string, hook *deployapi.LifecycleHook, indent string, w io.Writer) {
 	if hook.ExecNewPod != nil {
-		fmt.Fprintf(w, "\t  %s hook (pod type, failure policy: %s)\n", prefix, hook.FailurePolicy)
-		fmt.Fprintf(w, "\t    Container:\t%s\n", hook.ExecNewPod.ContainerName)
-		fmt.Fprintf(w, "\t    Command:\t%v\n", strings.Join(hook.ExecNewPod.Command, " "))
-		fmt.Fprintf(w, "\t    Env:\t%s\n", formatLabels(convertEnv(hook.ExecNewPod.Env)))
+		fmt.Fprintf(w, "%s%s hook (pod type, failure policy: %s):\n", indent, prefix, hook.FailurePolicy)
+		fmt.Fprintf(w, "%s  Container:\t%s\n", indent, hook.ExecNewPod.ContainerName)
+		fmt.Fprintf(w, "%s  Command:\t%v\n", indent, multilineStringArray(" ", "\t  ", hook.ExecNewPod.Command...))
+		if len(hook.ExecNewPod.Env) > 0 {
+			fmt.Fprintf(w, "%s  Env:\t%s\n", indent, formatLabels(convertEnv(hook.ExecNewPod.Env)))
+		}
+	}
+	if len(hook.TagImages) > 0 {
+		fmt.Fprintf(w, "%s%s hook (tag images, failure policy: %s):\n", indent, prefix, hook.FailurePolicy)
+		for _, image := range hook.TagImages {
+			fmt.Fprintf(w, "%s  Tag:\tcontainer %s to %s %s %s\n", indent, image.ContainerName, image.To.Kind, image.To.Name, image.To.Namespace)
+		}
 	}
 }
 
@@ -230,10 +218,9 @@ func printTriggers(triggers []deployapi.DeploymentTriggerPolicy, w *tabwriter.Wr
 		case deployapi.DeploymentTriggerOnConfigChange:
 			labels = append(labels, "Config")
 		case deployapi.DeploymentTriggerOnImageChange:
-			if len(t.ImageChangeParams.RepositoryName) > 0 {
-				labels = append(labels, fmt.Sprintf("Image(%s@%s, auto=%v)", t.ImageChangeParams.RepositoryName, t.ImageChangeParams.Tag, t.ImageChangeParams.Automatic))
-			} else if len(t.ImageChangeParams.From.Name) > 0 {
-				labels = append(labels, fmt.Sprintf("Image(%s@%s, auto=%v)", t.ImageChangeParams.From.Name, t.ImageChangeParams.Tag, t.ImageChangeParams.Automatic))
+			if len(t.ImageChangeParams.From.Name) > 0 {
+				name, tag, _ := imageapi.SplitImageStreamTag(t.ImageChangeParams.From.Name)
+				labels = append(labels, fmt.Sprintf("Image(%s@%s, auto=%v)", name, tag, t.ImageChangeParams.Automatic))
 			}
 		}
 	}
@@ -242,24 +229,70 @@ func printTriggers(triggers []deployapi.DeploymentTriggerPolicy, w *tabwriter.Wr
 	formatString(w, "Triggers", desc)
 }
 
-func printReplicationControllerSpec(spec kapi.ReplicationControllerSpec, w io.Writer) error {
-	fmt.Fprint(w, "Template:\n")
+func printDeploymentConfigSpec(kc kclient.Interface, dc deployapi.DeploymentConfig, w *tabwriter.Writer) error {
+	spec := dc.Spec
+	// Selector
+	formatString(w, "Selector", formatLabels(spec.Selector))
 
-	fmt.Fprintf(w, "  Selector:\t%s\n  Replicas:\t%d\n",
-		formatLabels(spec.Selector),
-		spec.Replicas)
-
-	fmt.Fprintf(w, "  Containers:\n  NAME\tIMAGE\tENV\n")
-	for _, container := range spec.Template.Spec.Containers {
-		fmt.Fprintf(w, "  %s\t%s\t%s\n",
-			container.Name,
-			container.Image,
-			formatLabels(convertEnv(container.Env)))
+	// Replicas
+	test := ""
+	if spec.Test {
+		test = " (test, will be scaled down between deployments)"
 	}
+	formatString(w, "Replicas", fmt.Sprintf("%d%s", spec.Replicas, test))
+
+	if spec.Paused {
+		formatString(w, "Paused", "yes")
+	}
+
+	// Autoscaling info
+	printAutoscalingInfo(deployapi.Resource("DeploymentConfig"), dc.Namespace, dc.Name, kc, w)
+
+	// Triggers
+	printTriggers(spec.Triggers, w)
+
+	// Strategy
+	formatString(w, "Strategy", spec.Strategy.Type)
+	printStrategy(spec.Strategy, "  ", w)
+
+	if dc.Spec.MinReadySeconds > 0 {
+		formatString(w, "MinReadySeconds", fmt.Sprintf("%d", spec.MinReadySeconds))
+	}
+
+	// Pod template
+	fmt.Fprintf(w, "Template:\n")
+	kctl.DescribePodTemplate(spec.Template, w)
+
 	return nil
 }
 
-func printDeploymentRc(deployment *kapi.ReplicationController, client deploymentDescriberClient, w io.Writer, header string, verbose bool) error {
+// TODO: Move this upstream
+func printAutoscalingInfo(res unversioned.GroupResource, namespace, name string, kclient kclient.Interface, w *tabwriter.Writer) {
+	hpaList, err := kclient.Autoscaling().HorizontalPodAutoscalers(namespace).List(kapi.ListOptions{LabelSelector: labels.Everything()})
+	if err != nil {
+		return
+	}
+
+	scaledBy := []autoscaling.HorizontalPodAutoscaler{}
+	for _, hpa := range hpaList.Items {
+		if hpa.Spec.ScaleTargetRef.Name == name && hpa.Spec.ScaleTargetRef.Kind == res.String() {
+			scaledBy = append(scaledBy, hpa)
+		}
+	}
+
+	for _, hpa := range scaledBy {
+		cpuUtil := ""
+		if hpa.Spec.TargetCPUUtilizationPercentage != nil {
+			cpuUtil = fmt.Sprintf(", triggered at %d%% CPU usage", *hpa.Spec.TargetCPUUtilizationPercentage)
+		}
+		fmt.Fprintf(w, "Autoscaling:\tbetween %d and %d replicas%s\n", *hpa.Spec.MinReplicas, hpa.Spec.MaxReplicas, cpuUtil)
+		// TODO: Print a warning in case of multiple hpas.
+		// Related oc status PR: https://github.com/openshift/origin/pull/7799
+		break
+	}
+}
+
+func printDeploymentRc(deployment *kapi.ReplicationController, kubeClient kclient.Interface, w io.Writer, header string, verbose bool) error {
 	if len(header) > 0 {
 		fmt.Fprintf(w, "%v:\n", header)
 	}
@@ -275,7 +308,7 @@ func printDeploymentRc(deployment *kapi.ReplicationController, client deployment
 	if verbose {
 		fmt.Fprintf(w, "\tSelector:\t%s\n", formatLabels(deployment.Spec.Selector))
 		fmt.Fprintf(w, "\tLabels:\t%s\n", formatLabels(deployment.Labels))
-		running, waiting, succeeded, failed, err := getPodStatusForDeployment(deployment, client)
+		running, waiting, succeeded, failed, err := getPodStatusForDeployment(deployment, kubeClient)
 		if err != nil {
 			return err
 		}
@@ -285,8 +318,8 @@ func printDeploymentRc(deployment *kapi.ReplicationController, client deployment
 	return nil
 }
 
-func getPodStatusForDeployment(deployment *kapi.ReplicationController, client deploymentDescriberClient) (running, waiting, succeeded, failed int, err error) {
-	rcPods, err := client.listPods(deployment.Namespace, labels.SelectorFromSet(deployment.Spec.Selector))
+func getPodStatusForDeployment(deployment *kapi.ReplicationController, kubeClient kclient.Interface) (running, waiting, succeeded, failed int, err error) {
+	rcPods, err := kubeClient.Pods(deployment.Namespace).List(kapi.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector).AsSelector()})
 	if err != nil {
 		return
 	}
@@ -306,51 +339,39 @@ func getPodStatusForDeployment(deployment *kapi.ReplicationController, client de
 }
 
 type LatestDeploymentsDescriber struct {
-	count  int
-	client deploymentDescriberClient
+	count      int
+	osClient   client.Interface
+	kubeClient kclient.Interface
 }
 
 // NewLatestDeploymentsDescriber lists the latest deployments limited to "count". In case count == -1, list back to the last successful.
 func NewLatestDeploymentsDescriber(client client.Interface, kclient kclient.Interface, count int) *LatestDeploymentsDescriber {
 	return &LatestDeploymentsDescriber{
-		count: count,
-		client: &genericDeploymentDescriberClient{
-			getDeploymentConfigFunc: func(namespace, name string) (*deployapi.DeploymentConfig, error) {
-				return client.DeploymentConfigs(namespace).Get(name)
-			},
-			getDeploymentFunc: func(namespace, name string) (*kapi.ReplicationController, error) {
-				return kclient.ReplicationControllers(namespace).Get(name)
-			},
-			listDeploymentsFunc: func(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error) {
-				return kclient.ReplicationControllers(namespace).List(selector)
-			},
-			listPodsFunc: func(namespace string, selector labels.Selector) (*kapi.PodList, error) {
-				return kclient.Pods(namespace).List(selector, fields.Everything())
-			},
-			listEventsFunc: func(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error) {
-				return kclient.Events(deploymentConfig.Namespace).Search(deploymentConfig)
-			},
-		},
+		count:      count,
+		osClient:   client,
+		kubeClient: kclient,
 	}
 }
 
 // Describe returns the description of the latest deployments for a config
 func (d *LatestDeploymentsDescriber) Describe(namespace, name string) (string, error) {
-	config, err := d.client.getDeploymentConfig(namespace, name)
+	var f formatter
+
+	config, err := d.osClient.DeploymentConfigs(namespace).Get(name)
 	if err != nil {
 		return "", err
 	}
 
 	var deployments []kapi.ReplicationController
 	if d.count == -1 || d.count > 1 {
-		list, err := d.client.listDeployments(namespace, labels.Everything())
+		list, err := d.kubeClient.ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: deployutil.ConfigSelector(name)})
 		if err != nil && !kerrors.IsNotFound(err) {
 			return "", err
 		}
 		deployments = list.Items
 	} else {
 		deploymentName := deployutil.LatestDeploymentNameForConfig(config)
-		deployment, err := d.client.getDeployment(config.Namespace, deploymentName)
+		deployment, err := d.kubeClient.ReplicationControllers(config.Namespace).Get(deploymentName)
 		if err != nil && !kerrors.IsNotFound(err) {
 			return "", err
 		}
@@ -369,23 +390,11 @@ func (d *LatestDeploymentsDescriber) Describe(namespace, name string) (string, e
 	activeDeployment, inactiveDeployments := deployedges.RelevantDeployments(g, dcNode)
 
 	return tabbedString(func(out *tabwriter.Writer) error {
-		descriptions := describeDeployments(dcNode, activeDeployment, inactiveDeployments, d.count)
+		descriptions := describeDeployments(f, dcNode, activeDeployment, inactiveDeployments, nil, d.count)
 		for i, description := range descriptions {
 			descriptions[i] = fmt.Sprintf("%v %v", name, description)
 		}
 		printLines(out, "", 0, descriptions...)
 		return nil
 	})
-}
-
-type rcSorter []kapi.ReplicationController
-
-func (s rcSorter) Len() int {
-	return len(s)
-}
-func (s rcSorter) Less(i, j int) bool {
-	return s[i].CreationTimestamp.Unix() > s[j].CreationTimestamp.Unix()
-}
-func (s rcSorter) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
 }

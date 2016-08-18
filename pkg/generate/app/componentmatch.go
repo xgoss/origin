@@ -7,20 +7,33 @@ import (
 
 // ComponentMatch is a match to a provided component
 type ComponentMatch struct {
-	Value       string
-	Argument    string
+	// what this is a match for (the value that was searched on)
+	Value string
+	// the argument to use to specify this match explicitly
+	Argument string
+	// the exact name of this match
 	Name        string
 	Description string
 	Score       float32
 	Insecure    bool
 	LocalOnly   bool
+	NoTagsFound bool
+	// this match represents a scratch image, there is no
+	// actual image/pullspec.
+	Virtual bool
 
-	Builder     bool
+	// The source of the match. Generally only a single source is
+	// available.
 	Image       *imageapi.DockerImage
 	ImageStream *imageapi.ImageStream
 	ImageTag    string
 	Template    *templateapi.Template
 
+	// Input to generators extracted from the source
+	Builder        bool
+	GeneratorInput GeneratorInput
+
+	// TODO: remove me
 	Meta map[string]string
 }
 

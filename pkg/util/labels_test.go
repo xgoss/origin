@@ -6,17 +6,18 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kmeta "k8s.io/kubernetes/pkg/api/meta"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 )
 
 type FakeLabelsResource struct {
-	kapi.TypeMeta   `json:",inline"`
-	kapi.ObjectMeta `json:"metadata,omitempty"`
+	unversioned.TypeMeta `json:",inline"`
+	kapi.ObjectMeta      `json:"metadata,omitempty"`
 }
 
-func (*FakeLabelsResource) IsAnAPIObject() {}
+func (obj *FakeLabelsResource) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }
 
 func TestAddConfigLabels(t *testing.T) {
 	var nilLabels map[string]string
@@ -82,8 +83,8 @@ func TestAddConfigLabels(t *testing.T) {
 				ObjectMeta: kapi.ObjectMeta{Labels: map[string]string{"foo": "first value"}},
 			},
 			addLabels:      map[string]string{"foo": "second value"},
-			err:            true,
-			expectedLabels: map[string]string{"foo": "first value"},
+			err:            false,
+			expectedLabels: map[string]string{"foo": "second value"},
 		},
 		{ // [8] Test conflicting keys with the same value in ReplicationController nested labels
 			obj: &kapi.ReplicationController{
@@ -107,12 +108,10 @@ func TestAddConfigLabels(t *testing.T) {
 				ObjectMeta: kapi.ObjectMeta{
 					Labels: map[string]string{"foo": "first value"},
 				},
-				Template: deployapi.DeploymentTemplate{
-					ControllerTemplate: kapi.ReplicationControllerSpec{
-						Template: &kapi.PodTemplateSpec{
-							ObjectMeta: kapi.ObjectMeta{
-								Labels: map[string]string{"foo": "first value"},
-							},
+				Spec: deployapi.DeploymentConfigSpec{
+					Template: &kapi.PodTemplateSpec{
+						ObjectMeta: kapi.ObjectMeta{
+							Labels: map[string]string{"foo": "first value"},
 						},
 					},
 				},
@@ -143,7 +142,7 @@ func TestAddConfigLabels(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		metaLabels := accessor.Labels()
+		metaLabels := accessor.GetLabels()
 		if e, a := test.expectedLabels, metaLabels; !reflect.DeepEqual(e, a) {
 			t.Errorf("Unexpected labels on testCase[%v]. Expected: %#v, got: %#v.", i, e, a)
 		}
@@ -155,7 +154,7 @@ func TestAddConfigLabels(t *testing.T) {
 				t.Errorf("Unexpected labels on testCase[%v]. Expected: %#v, got: %#v.", i, e, a)
 			}
 		case *deployapi.DeploymentConfig:
-			if e, a := test.expectedLabels, objType.Template.ControllerTemplate.Template.Labels; !reflect.DeepEqual(e, a) {
+			if e, a := test.expectedLabels, objType.Spec.Template.Labels; !reflect.DeepEqual(e, a) {
 				t.Errorf("Unexpected labels on testCase[%v]. Expected: %#v, got: %#v.", i, e, a)
 			}
 		}

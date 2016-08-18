@@ -6,16 +6,16 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kapierrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/watch"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	policybindingregistry "github.com/openshift/origin/pkg/authorization/registry/policybinding"
+	"github.com/openshift/origin/pkg/client"
 )
 
 type PolicyBindingRegistry struct {
-	// PolicyBindings is a of namespace->name->PolicyBinding
-	PolicyBindings map[string]map[string]authorizationapi.PolicyBinding
+	// policyBindings is a of namespace->name->PolicyBinding
+	policyBindings map[string]map[string]authorizationapi.PolicyBinding
 	Err            error
 }
 
@@ -29,8 +29,25 @@ func NewPolicyBindingRegistry(bindings []authorizationapi.PolicyBinding, err err
 	return &PolicyBindingRegistry{bindingMap, err}
 }
 
+func (r *PolicyBindingRegistry) PolicyBindings(namespace string) client.PolicyBindingLister {
+	return policyBindingLister{registry: r, namespace: namespace}
+}
+
+type policyBindingLister struct {
+	registry  policybindingregistry.Registry
+	namespace string
+}
+
+func (s policyBindingLister) List(options kapi.ListOptions) (*authorizationapi.PolicyBindingList, error) {
+	return s.registry.ListPolicyBindings(kapi.WithNamespace(kapi.NewContext(), s.namespace), &options)
+}
+
+func (s policyBindingLister) Get(name string) (*authorizationapi.PolicyBinding, error) {
+	return s.registry.GetPolicyBinding(kapi.WithNamespace(kapi.NewContext(), s.namespace), name)
+}
+
 // ListPolicyBindings obtains a list of policyBinding that match a selector.
-func (r *PolicyBindingRegistry) ListPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyBindingList, error) {
+func (r *PolicyBindingRegistry) ListPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.PolicyBindingList, error) {
 	if r.Err != nil {
 		return nil, r.Err
 	}
@@ -39,14 +56,14 @@ func (r *PolicyBindingRegistry) ListPolicyBindings(ctx kapi.Context, label label
 	list := make([]authorizationapi.PolicyBinding, 0)
 
 	if namespace == kapi.NamespaceAll {
-		for _, curr := range r.PolicyBindings {
+		for _, curr := range r.policyBindings {
 			for _, binding := range curr {
 				list = append(list, binding)
 			}
 		}
 
 	} else {
-		if namespacedBindings, ok := r.PolicyBindings[namespace]; ok {
+		if namespacedBindings, ok := r.policyBindings[namespace]; ok {
 			for _, curr := range namespacedBindings {
 				list = append(list, curr)
 			}
@@ -70,13 +87,13 @@ func (r *PolicyBindingRegistry) GetPolicyBinding(ctx kapi.Context, id string) (*
 		return nil, errors.New("invalid request.  Namespace parameter required.")
 	}
 
-	if namespacedBindings, ok := r.PolicyBindings[namespace]; ok {
+	if namespacedBindings, ok := r.policyBindings[namespace]; ok {
 		if binding, ok := namespacedBindings[id]; ok {
 			return &binding, nil
 		}
 	}
 
-	return nil, kapierrors.NewNotFound("PolicyBinding", id)
+	return nil, kapierrors.NewNotFound(authorizationapi.Resource("policybinding"), id)
 }
 
 // CreatePolicyBinding creates a new policyBinding.
@@ -93,7 +110,7 @@ func (r *PolicyBindingRegistry) CreatePolicyBinding(ctx kapi.Context, policyBind
 		return fmt.Errorf("PolicyBinding %v::%v already exists", namespace, policyBinding.Name)
 	}
 
-	addPolicyBinding(r.PolicyBindings, *policyBinding)
+	addPolicyBinding(r.policyBindings, *policyBinding)
 
 	return nil
 }
@@ -109,10 +126,10 @@ func (r *PolicyBindingRegistry) UpdatePolicyBinding(ctx kapi.Context, policyBind
 		return errors.New("invalid request.  Namespace parameter required.")
 	}
 	if existing, _ := r.GetPolicyBinding(ctx, policyBinding.Name); existing == nil {
-		return kapierrors.NewNotFound("PolicyBinding", policyBinding.Name)
+		return kapierrors.NewNotFound(authorizationapi.Resource("policybinding"), policyBinding.Name)
 	}
 
-	addPolicyBinding(r.PolicyBindings, *policyBinding)
+	addPolicyBinding(r.policyBindings, *policyBinding)
 
 	return nil
 }
@@ -128,7 +145,7 @@ func (r *PolicyBindingRegistry) DeletePolicyBinding(ctx kapi.Context, id string)
 		return errors.New("invalid request.  Namespace parameter required.")
 	}
 
-	namespacedBindings, ok := r.PolicyBindings[namespace]
+	namespacedBindings, ok := r.policyBindings[namespace]
 	if ok {
 		delete(namespacedBindings, id)
 	}
@@ -136,7 +153,7 @@ func (r *PolicyBindingRegistry) DeletePolicyBinding(ctx kapi.Context, id string)
 	return nil
 }
 
-func (r *PolicyBindingRegistry) WatchPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
+func (r *PolicyBindingRegistry) WatchPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error) {
 	return nil, errors.New("unsupported action for test registry")
 }
 

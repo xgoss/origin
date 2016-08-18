@@ -3,8 +3,6 @@ package oauthaccesstoken
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	"github.com/openshift/origin/pkg/oauth/api"
 )
@@ -12,7 +10,7 @@ import (
 // Registry is an interface for things that know how to store AccessToken objects.
 type Registry interface {
 	// ListAccessTokens obtains a list of access tokens that match a selector.
-	ListAccessTokens(ctx kapi.Context, selector labels.Selector) (*api.OAuthAccessTokenList, error)
+	ListAccessTokens(ctx kapi.Context, options *kapi.ListOptions) (*api.OAuthAccessTokenList, error)
 	// GetAccessToken retrieves a specific access token.
 	GetAccessToken(ctx kapi.Context, name string) (*api.OAuthAccessToken, error)
 	// CreateAccessToken creates a new access token.
@@ -40,8 +38,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListAccessTokens(ctx kapi.Context, label labels.Selector) (*api.OAuthAccessTokenList, error) {
-	obj, err := s.List(ctx, label, fields.Everything())
+func (s *storage) ListAccessTokens(ctx kapi.Context, options *kapi.ListOptions) (*api.OAuthAccessTokenList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}

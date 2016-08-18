@@ -3,11 +3,11 @@ package test
 import (
 	"sync"
 
-	"github.com/openshift/origin/pkg/build/api"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	kapierrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/watch"
+
+	"github.com/openshift/origin/pkg/build/api"
 )
 
 type BuildConfigRegistry struct {
@@ -18,7 +18,7 @@ type BuildConfigRegistry struct {
 	sync.Mutex
 }
 
-func (r *BuildConfigRegistry) ListBuildConfigs(ctx kapi.Context, labels labels.Selector, field fields.Selector) (*api.BuildConfigList, error) {
+func (r *BuildConfigRegistry) ListBuildConfigs(ctx kapi.Context, options *kapi.ListOptions) (*api.BuildConfigList, error) {
 	r.Lock()
 	defer r.Unlock()
 	return r.BuildConfigs, r.Err
@@ -27,7 +27,10 @@ func (r *BuildConfigRegistry) ListBuildConfigs(ctx kapi.Context, labels labels.S
 func (r *BuildConfigRegistry) GetBuildConfig(ctx kapi.Context, id string) (*api.BuildConfig, error) {
 	r.Lock()
 	defer r.Unlock()
-	return r.BuildConfig, r.Err
+	if r.BuildConfig != nil && r.BuildConfig.Name == id {
+		return r.BuildConfig, r.Err
+	}
+	return nil, kapierrors.NewNotFound(api.Resource("buildconfig"), id)
 }
 
 func (r *BuildConfigRegistry) CreateBuildConfig(ctx kapi.Context, config *api.BuildConfig) error {
@@ -52,6 +55,6 @@ func (r *BuildConfigRegistry) DeleteBuildConfig(ctx kapi.Context, id string) err
 	return r.Err
 }
 
-func (r *BuildConfigRegistry) WatchBuildConfigs(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
+func (r *BuildConfigRegistry) WatchBuildConfigs(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error) {
 	return nil, r.Err
 }

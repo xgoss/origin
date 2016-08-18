@@ -1,76 +1,74 @@
-/*
-Copyright 2015 The Kubernetes Authors All rights reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package admission
 
 import (
 	"io"
 
-	"k8s.io/kubernetes/pkg/admission"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
+	"github.com/openshift/origin/pkg/controller/shared"
+	kadmission "k8s.io/kubernetes/pkg/admission"
+	kapi "k8s.io/kubernetes/pkg/api"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 )
 
 func init() {
-	admission.RegisterPlugin("SCCExecRestrictions", func(client client.Interface, config io.Reader) (admission.Interface, error) {
+	kadmission.RegisterPlugin("SCCExecRestrictions", func(client clientset.Interface, config io.Reader) (kadmission.Interface, error) {
 		execAdmitter := NewSCCExecRestrictions(client)
-		execAdmitter.constraintAdmission.Run()
 		return execAdmitter, nil
 	})
 }
 
+var _ kadmission.Interface = &sccExecRestrictions{}
+var _ = oadmission.WantsInformers(&sccExecRestrictions{})
+
 // sccExecRestrictions is an implementation of admission.Interface which says no to a pod/exec on
 // a pod that the user would not be allowed to create
 type sccExecRestrictions struct {
-	*admission.Handler
+	*kadmission.Handler
 	constraintAdmission *constraint
-	client              client.Interface
+	client              clientset.Interface
 }
 
-func (d *sccExecRestrictions) Admit(a admission.Attributes) (err error) {
-	if a.GetOperation() != admission.Connect {
+func (d *sccExecRestrictions) Admit(a kadmission.Attributes) (err error) {
+	if a.GetOperation() != kadmission.Connect {
 		return nil
 	}
-	if a.GetResource() != "pods" {
+	if a.GetResource().GroupResource() != kapi.Resource("pods") {
 		return nil
 	}
 	if a.GetSubresource() != "attach" && a.GetSubresource() != "exec" {
 		return nil
 	}
 
-	pod, err := d.client.Pods(a.GetNamespace()).Get(a.GetName())
+	pod, err := d.client.Core().Pods(a.GetNamespace()).Get(a.GetName())
 	if err != nil {
-		return admission.NewForbidden(a, err)
+		return kadmission.NewForbidden(a, err)
 	}
 
-	// create a synthentic admission attribute to check SCC admission status for this pod
-	// clear the SA name, so that any permissions MUST be based on your user's power, not the SAs power.
-	pod.Spec.ServiceAccountName = ""
-	createAttributes := admission.NewAttributesRecord(pod, "pods", a.GetNamespace(), a.GetName(), a.GetResource(), a.GetSubresource(), admission.Create, a.GetUserInfo())
+	// TODO, if we want to actually limit who can use which service account, then we'll need to add logic here to make sure that
+	// we're allowed to use the SA the pod is using.  Otherwise, user-A creates pod and user-B (who can't use the SA) can exec into it.
+	createAttributes := kadmission.NewAttributesRecord(pod, pod, kapi.Kind("Pod").WithVersion(""), a.GetNamespace(), a.GetName(), a.GetResource(), "", kadmission.Create, a.GetUserInfo())
 	if err := d.constraintAdmission.Admit(createAttributes); err != nil {
-		return admission.NewForbidden(a, err)
+		return kadmission.NewForbidden(a, err)
 	}
 
 	return nil
 }
 
 // NewSCCExecRestrictions creates a new admission controller that denies an exec operation on a privileged pod
-func NewSCCExecRestrictions(client client.Interface) *sccExecRestrictions {
+func NewSCCExecRestrictions(client clientset.Interface) *sccExecRestrictions {
 	return &sccExecRestrictions{
-		Handler:             admission.NewHandler(admission.Connect),
+		Handler:             kadmission.NewHandler(kadmission.Connect),
 		constraintAdmission: NewConstraint(client),
 		client:              client,
 	}
+}
+
+// SetInformers implements WantsInformers interface for sccExecRestrictions.
+func (d *sccExecRestrictions) SetInformers(informers shared.InformerFactory) {
+	d.constraintAdmission.sccLister = informers.SecurityContextConstraints().Lister()
+}
+
+// Validate defines actions to validate sccExecRestrictions
+func (d *sccExecRestrictions) Validate() error {
+	return d.constraintAdmission.Validate()
 }

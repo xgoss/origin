@@ -3,20 +3,24 @@ package router
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"time"
 
+	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	ktypes "k8s.io/kubernetes/pkg/types"
 
+	ocmd "github.com/openshift/origin/pkg/cmd/cli/cmd"
 	"github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/openshift/origin/pkg/router"
 	"github.com/openshift/origin/pkg/router/controller"
+	templateplugin "github.com/openshift/origin/pkg/router/template"
 	"github.com/openshift/origin/pkg/util/proc"
-	"github.com/openshift/origin/pkg/version"
-	templateplugin "github.com/openshift/origin/plugins/router/template"
 )
 
 const (
@@ -32,6 +36,8 @@ You may restrict the set of routes exposed to a single project (with --namespace
 access to with a set of labels (--project-labels), namespaces matching a label (--namespace-labels), or all
 namespaces (no argument). You can limit the routes to those matching a --labels or --fields selector. Note
 that you must have a cluster-wide administrative role to view all namespaces.`
+	// defaultReloadInterval is how often to do reloads in seconds.
+	defaultReloadInterval = 5
 )
 
 type TemplateRouterOptions struct {
@@ -43,18 +49,38 @@ type TemplateRouterOptions struct {
 }
 
 type TemplateRouter struct {
-	WorkingDir         string
-	TemplateFile       string
-	ReloadScript       string
-	DefaultCertificate string
-	RouterService      *ktypes.NamespacedName
+	RouterName             string
+	WorkingDir             string
+	TemplateFile           string
+	ReloadScript           string
+	ReloadInterval         time.Duration
+	DefaultCertificate     string
+	DefaultCertificatePath string
+	ExtendedValidation     bool
+	RouterService          *ktypes.NamespacedName
+}
+
+// reloadInterval returns how often to run the router reloads. The interval
+// value is based on an environment variable or the default.
+func reloadInterval() time.Duration {
+	interval := util.Env("RELOAD_INTERVAL", fmt.Sprintf("%vs", defaultReloadInterval))
+	value, err := time.ParseDuration(interval)
+	if err != nil {
+		glog.Warningf("Invalid RELOAD_INTERVAL %q, using default value %v ...", interval, defaultReloadInterval)
+		value = time.Duration(defaultReloadInterval * time.Second)
+	}
+	return value
 }
 
 func (o *TemplateRouter) Bind(flag *pflag.FlagSet) {
-	flag.StringVar(&o.WorkingDir, "working-dir", "/var/lib/containers/router", "The working directory for the router plugin")
-	flag.StringVar(&o.DefaultCertificate, "default-certificate", util.Env("DEFAULT_CERTIFICATE", ""), "A path to default certificate to use for routes that don't expose a TLS server cert; in PEM format")
+	flag.StringVar(&o.RouterName, "name", util.Env("ROUTER_SERVICE_NAME", "public"), "The name the router will identify itself with in the route status")
+	flag.StringVar(&o.WorkingDir, "working-dir", "/var/lib/haproxy/router", "The working directory for the router plugin")
+	flag.StringVar(&o.DefaultCertificate, "default-certificate", util.Env("DEFAULT_CERTIFICATE", ""), "The contents of a default certificate to use for routes that don't expose a TLS server cert; in PEM format")
+	flag.StringVar(&o.DefaultCertificatePath, "default-certificate-path", util.Env("DEFAULT_CERTIFICATE_PATH", ""), "A path to default certificate to use for routes that don't expose a TLS server cert; in PEM format")
 	flag.StringVar(&o.TemplateFile, "template", util.Env("TEMPLATE_FILE", ""), "The path to the template file to use")
 	flag.StringVar(&o.ReloadScript, "reload", util.Env("RELOAD_SCRIPT", ""), "The path to the reload script to use")
+	flag.DurationVar(&o.ReloadInterval, "interval", reloadInterval(), "Controls how often router reloads are invoked. Mutiple router reload requests are coalesced for the duration of this interval since the last reload time.")
+	flag.BoolVar(&o.ExtendedValidation, "extended-validation", util.Env("EXTENDED_VALIDATION", "") == "true", "If set, then an additional extended validation step is performed on all routes admitted in by this router.")
 }
 
 type RouterStats struct {
@@ -90,7 +116,7 @@ func NewCommandTemplateRouter(name string) *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(version.NewVersionCommand(name))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 
 	flag := cmd.Flags()
 	options.Config.Bind(flag)
@@ -121,10 +147,18 @@ func (o *TemplateRouterOptions) Complete() error {
 		}
 		o.StatsPort = statsPort
 	}
+
+	if nsecs := int(o.ReloadInterval.Seconds()); nsecs < 1 {
+		return fmt.Errorf("invalid reload interval: %v - must be a positive duration", nsecs)
+	}
+
 	return o.RouterSelection.Complete()
 }
 
 func (o *TemplateRouterOptions) Validate() error {
+	if len(o.RouterName) == 0 {
+		return errors.New("router must have a name to identify itself in route status")
+	}
 	if len(o.TemplateFile) == 0 {
 		return errors.New("template file must be specified")
 	}
@@ -138,28 +172,36 @@ func (o *TemplateRouterOptions) Validate() error {
 // Run launches a template router using the provided options. It never exits.
 func (o *TemplateRouterOptions) Run() error {
 	pluginCfg := templateplugin.TemplatePluginConfig{
-		WorkingDir:         o.WorkingDir,
-		TemplatePath:       o.TemplateFile,
-		ReloadScriptPath:   o.ReloadScript,
-		DefaultCertificate: o.DefaultCertificate,
-		StatsPort:          o.StatsPort,
-		StatsUsername:      o.StatsUsername,
-		StatsPassword:      o.StatsPassword,
-		PeerService:        o.RouterService,
-		IncludeUDP:         o.RouterSelection.IncludeUDP,
+		WorkingDir:             o.WorkingDir,
+		TemplatePath:           o.TemplateFile,
+		ReloadScriptPath:       o.ReloadScript,
+		ReloadInterval:         o.ReloadInterval,
+		DefaultCertificate:     o.DefaultCertificate,
+		DefaultCertificatePath: o.DefaultCertificatePath,
+		StatsPort:              o.StatsPort,
+		StatsUsername:          o.StatsUsername,
+		StatsPassword:          o.StatsPassword,
+		PeerService:            o.RouterService,
+		IncludeUDP:             o.RouterSelection.IncludeUDP,
 	}
-
-	templatePlugin, err := templateplugin.NewTemplatePlugin(pluginCfg)
-	if err != nil {
-		return err
-	}
-
-	plugin := controller.NewUniqueHost(templatePlugin, controller.HostForRoute)
 
 	oc, kc, err := o.Config.Clients()
 	if err != nil {
 		return err
 	}
+
+	svcFetcher := templateplugin.NewListWatchServiceLookup(kc, 10*time.Minute)
+	templatePlugin, err := templateplugin.NewTemplatePlugin(pluginCfg, svcFetcher)
+	if err != nil {
+		return err
+	}
+
+	statusPlugin := controller.NewStatusAdmitter(templatePlugin, oc, o.RouterName)
+	var nextPlugin router.Plugin = statusPlugin
+	if o.ExtendedValidation {
+		nextPlugin = controller.NewExtendedValidator(nextPlugin, controller.RejectionRecorder(statusPlugin))
+	}
+	plugin := controller.NewUniqueHost(nextPlugin, o.RouteSelectionFunc(), controller.RejectionRecorder(statusPlugin))
 
 	factory := o.RouterSelection.NewFactory(oc, kc)
 	controller := factory.Create(plugin)

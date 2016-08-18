@@ -1,16 +1,14 @@
 package proxy
 
 import (
-	//  "fmt"
 	"strings"
 	"testing"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/auth/user"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	"github.com/openshift/origin/pkg/project/api"
 )
@@ -43,7 +41,7 @@ func TestListProjects(t *testing.T) {
 		Groups: []string{"test-groups"},
 	}
 	ctx := kapi.WithUser(kapi.NewContext(), user)
-	response, err := storage.List(ctx, labels.Everything(), fields.Everything())
+	response, err := storage.List(ctx, nil)
 	if err != nil {
 		t.Errorf("%#v should be nil.", err)
 	}
@@ -71,7 +69,7 @@ func TestCreateProjectBadObject(t *testing.T) {
 
 func TestCreateInvalidProject(t *testing.T) {
 	mockClient := &testclient.Fake{}
-	storage := NewREST(mockClient.Namespaces(), &mockLister{})
+	storage := NewREST(mockClient.Namespaces(), &mockLister{}, nil, nil)
 	_, err := storage.Create(nil, &api.Project{
 		ObjectMeta: kapi.ObjectMeta{
 			Annotations: map[string]string{"openshift.io/display-name": "h\t\ni"},
@@ -84,7 +82,7 @@ func TestCreateInvalidProject(t *testing.T) {
 
 func TestCreateProjectOK(t *testing.T) {
 	mockClient := &testclient.Fake{}
-	storage := NewREST(mockClient.Namespaces(), &mockLister{})
+	storage := NewREST(mockClient.Namespaces(), &mockLister{}, nil, nil)
 	_, err := storage.Create(kapi.NewContext(), &api.Project{
 		ObjectMeta: kapi.ObjectMeta{Name: "foo"},
 	})
@@ -101,7 +99,7 @@ func TestCreateProjectOK(t *testing.T) {
 
 func TestGetProjectOK(t *testing.T) {
 	mockClient := testclient.NewSimpleFake(&kapi.Namespace{ObjectMeta: kapi.ObjectMeta{Name: "foo"}})
-	storage := NewREST(mockClient.Namespaces(), &mockLister{})
+	storage := NewREST(mockClient.Namespaces(), &mockLister{}, nil, nil)
 	project, err := storage.Get(kapi.NewContext(), "foo")
 	if project == nil {
 		t.Error("Unexpected nil project")
@@ -126,11 +124,11 @@ func TestDeleteProject(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
-	status, ok := obj.(*kapi.Status)
+	status, ok := obj.(*unversioned.Status)
 	if !ok {
 		t.Errorf("Expected status type, got: %#v", obj)
 	}
-	if status.Status != kapi.StatusSuccess {
+	if status.Status != unversioned.StatusSuccess {
 		t.Errorf("Expected status=success, got: %#v", status)
 	}
 	if len(mockClient.Actions()) != 1 {

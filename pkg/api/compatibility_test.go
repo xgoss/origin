@@ -10,9 +10,10 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 func TestCompatibility_v1_Pod(t *testing.T) {
@@ -44,7 +45,7 @@ func TestCompatibility_v1_Pod(t *testing.T) {
 	t.Log("Testing 1.0.0 v1 migration added in PR #3592")
 	testCompatibility(
 		t, "v1", input,
-		func(obj runtime.Object) fielderrors.ValidationErrorList {
+		func(obj runtime.Object) field.ErrorList {
 			return validation.ValidatePod(obj.(*api.Pod))
 		},
 		map[string]string{
@@ -106,7 +107,7 @@ func TestCompatibility_v1_VolumeSource(t *testing.T) {
 	t.Log("Testing 1.0.6 v1 migration added in PR #4663")
 	testCompatibility(
 		t, "v1", metadata,
-		func(obj runtime.Object) fielderrors.ValidationErrorList {
+		func(obj runtime.Object) field.ErrorList {
 			return validation.ValidatePod(obj.(*api.Pod))
 		},
 		map[string]string{
@@ -116,7 +117,7 @@ func TestCompatibility_v1_VolumeSource(t *testing.T) {
 	)
 	testCompatibility(
 		t, "v1", downward,
-		func(obj runtime.Object) fielderrors.ValidationErrorList {
+		func(obj runtime.Object) field.ErrorList {
 			return validation.ValidatePod(obj.(*api.Pod))
 		},
 		map[string]string{
@@ -148,7 +149,7 @@ func TestCompatibility_v1_Service(t *testing.T) {
 	t.Log("Testing 1.0.0 v1 migration added in PR #3592")
 	testCompatibility(
 		t, "v1", input,
-		func(obj runtime.Object) fielderrors.ValidationErrorList {
+		func(obj runtime.Object) field.ErrorList {
 			return validation.ValidateService(obj.(*api.Service))
 		},
 		map[string]string{
@@ -179,7 +180,7 @@ func TestCompatibility_v1_Endpoints(t *testing.T) {
 	t.Log("Testing 1.0.0 v1 migration added in PR #3592")
 	testCompatibility(
 		t, "v1", input,
-		func(obj runtime.Object) fielderrors.ValidationErrorList {
+		func(obj runtime.Object) field.ErrorList {
 			return validation.ValidateEndpoints(obj.(*api.Endpoints))
 		},
 		map[string]string{
@@ -192,13 +193,12 @@ func testCompatibility(
 	t *testing.T,
 	version string,
 	input []byte,
-	validator func(obj runtime.Object) fielderrors.ValidationErrorList,
+	validator func(obj runtime.Object) field.ErrorList,
 	serialized map[string]string,
 ) {
 
 	// Decode
-	codec := runtime.CodecFor(api.Scheme, version)
-	obj, err := codec.Decode(input)
+	obj, err := runtime.Decode(api.Codecs.UniversalDecoder(), input)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -210,14 +210,11 @@ func testCompatibility(
 	}
 
 	// Encode
-	output, err := codec.Encode(obj)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	output := runtime.EncodeOrDie(api.Codecs.LegacyCodec(unversioned.GroupVersion{Group: "", Version: version}), obj)
 
 	// Validate old and new fields are encoded
 	generic := map[string]interface{}{}
-	if err := json.Unmarshal(output, &generic); err != nil {
+	if err := json.Unmarshal([]byte(output), &generic); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	for k, expectedValue := range serialized {
@@ -226,6 +223,30 @@ func testCompatibility(
 			t.Errorf("Unexpected error for %s: %v", k, err)
 		} else if !reflect.DeepEqual(expectedValue, actualValue) {
 			t.Errorf("Expected %v, got %v", expectedValue, actualValue)
+		}
+	}
+}
+
+func TestAllowedGrouplessVersion(t *testing.T) {
+	versions := map[string]unversioned.GroupVersion{
+		"v1":      {Group: "", Version: "v1"},
+		"v1beta3": {Group: "", Version: "v1beta3"},
+		"1.0":     {Group: "", Version: "1.0"},
+		"pre012":  {Group: "", Version: "pre012"},
+	}
+	for apiVersion, expectedGroupVersion := range versions {
+		groupVersion, err := unversioned.ParseGroupVersion(apiVersion)
+		if err != nil {
+			t.Errorf("%s: unexpected error parsing: %v", apiVersion, err)
+			continue
+		}
+		if groupVersion != expectedGroupVersion {
+			t.Errorf("%s: expected %#v, got %#v", apiVersion, expectedGroupVersion, groupVersion)
+			continue
+		}
+		if groupVersion.String() != apiVersion {
+			t.Errorf("%s: expected GroupVersion.String() to be %q, got %q", apiVersion, apiVersion, groupVersion.String())
+			continue
 		}
 	}
 }

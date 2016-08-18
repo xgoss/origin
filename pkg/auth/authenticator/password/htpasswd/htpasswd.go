@@ -5,7 +5,6 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -39,7 +38,9 @@ func New(providerName string, file string, mapper authapi.UserIdentityMapper) (a
 }
 
 func (a *Authenticator) AuthenticatePassword(username, password string) (user.Info, bool, error) {
-	a.loadIfNeeded()
+	if err := a.loadIfNeeded(); err != nil {
+		return nil, false, err
+	}
 
 	if len(username) > 255 {
 		username = username[:255]
@@ -57,10 +58,11 @@ func (a *Authenticator) AuthenticatePassword(username, password string) (user.In
 
 	identity := authapi.NewDefaultUserIdentityInfo(a.providerName, username)
 	user, err := a.mapper.UserFor(identity)
-	glog.V(4).Infof("Got userIdentityMapping: %#v", user)
 	if err != nil {
-		return nil, false, fmt.Errorf("Error creating or updating mapping for: %#v due to %v", identity, err)
+		glog.V(4).Infof("Error creating or updating mapping for: %#v due to %v", identity, err)
+		return nil, false, err
 	}
+	glog.V(4).Infof("Got userIdentityMapping: %#v", user)
 
 	return user, true, nil
 
@@ -112,8 +114,13 @@ func (a *Authenticator) loadIfNeeded() error {
 	}
 	if a.fileInfo == nil || a.fileInfo.ModTime() != info.ModTime() {
 		glog.V(4).Infof("Loading htpasswd file %s...", a.file)
+		loadingErr := a.load()
+		if loadingErr != nil {
+			return err
+		}
+
 		a.fileInfo = info
-		return a.load()
+		return nil
 	}
 	return nil
 }

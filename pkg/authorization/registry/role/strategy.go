@@ -8,7 +8,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	"github.com/openshift/origin/pkg/authorization/api/validation"
@@ -35,7 +35,7 @@ func (s strategy) AllowCreateOnUpdate() bool {
 }
 
 func (strategy) AllowUnconditionalUpdate() bool {
-	return false
+	return true
 }
 
 func (s strategy) GenerateName(base string) string {
@@ -52,13 +52,17 @@ func (s strategy) PrepareForUpdate(obj, old runtime.Object) {
 	_ = obj.(*authorizationapi.Role)
 }
 
+// Canonicalize normalizes the object after validation.
+func (strategy) Canonicalize(obj runtime.Object) {
+}
+
 // Validate validates a new role.
-func (s strategy) Validate(ctx kapi.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (s strategy) Validate(ctx kapi.Context, obj runtime.Object) field.ErrorList {
 	return validation.ValidateRole(obj.(*authorizationapi.Role), s.namespaced)
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (s strategy) ValidateUpdate(ctx kapi.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (s strategy) ValidateUpdate(ctx kapi.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateRoleUpdate(obj.(*authorizationapi.Role), old.(*authorizationapi.Role), s.namespaced)
 }
 
@@ -72,14 +76,7 @@ func Matcher(label labels.Selector, field fields.Selector) generic.Matcher {
 			if !ok {
 				return nil, nil, fmt.Errorf("not a role")
 			}
-			return labels.Set(role.ObjectMeta.Labels), SelectableFields(role), nil
+			return labels.Set(role.ObjectMeta.Labels), authorizationapi.RoleToSelectableFields(role), nil
 		},
-	}
-}
-
-// SelectableFields returns a label set that represents the object
-func SelectableFields(role *authorizationapi.Role) fields.Set {
-	return fields.Set{
-		"name": role.Name,
 	}
 }

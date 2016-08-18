@@ -1,13 +1,10 @@
-// +build integration,etcd
-
 package integration
 
 import (
 	"testing"
 
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/restclient"
 
 	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
 	testutil "github.com/openshift/origin/test/util"
@@ -15,6 +12,8 @@ import (
 )
 
 func TestOAuthDisabled(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	// Build master config
 	masterOptions, err := testserver.DefaultMasterOptions()
 	if err != nil {
@@ -41,7 +40,7 @@ func TestOAuthDisabled(t *testing.T) {
 	}
 
 	// Make sure cert auth still works
-	namespaces, err := client.Namespaces().List(labels.Everything(), fields.Everything())
+	namespaces, err := client.Namespaces().List(kapi.ListOptions{})
 	if err != nil {
 		t.Fatalf("Unexpected error %v", err)
 	}
@@ -50,7 +49,7 @@ func TestOAuthDisabled(t *testing.T) {
 	}
 
 	// Use the server and CA info
-	anonConfig := kclient.Config{}
+	anonConfig := restclient.Config{}
 	anonConfig.Host = clientConfig.Host
 	anonConfig.CAFile = clientConfig.CAFile
 	anonConfig.CAData = clientConfig.CAData

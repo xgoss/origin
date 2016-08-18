@@ -22,7 +22,7 @@ func BuildConfigNodeName(o *buildapi.BuildConfig) osgraph.UniqueName {
 
 type BuildConfigNode struct {
 	osgraph.Node
-	*buildapi.BuildConfig
+	BuildConfig *buildapi.BuildConfig
 }
 
 func (n BuildConfigNode) Object() interface{} {
@@ -33,8 +33,8 @@ func (n BuildConfigNode) String() string {
 	return string(BuildConfigNodeName(n.BuildConfig))
 }
 
-func (n BuildConfigNode) ResourceString() string {
-	return "bc/" + n.Name
+func (n BuildConfigNode) UniqueName() osgraph.UniqueName {
+	return BuildConfigNodeName(n.BuildConfig)
 }
 
 func (*BuildConfigNode) Kind() string {
@@ -81,8 +81,8 @@ func (n BuildNode) String() string {
 	return string(BuildNodeName(n.Build))
 }
 
-func (n BuildNode) ResourceString() string {
-	return "build/" + n.Build.Name
+func (n BuildNode) UniqueName() osgraph.UniqueName {
+	return BuildNodeName(n.Build)
 }
 
 func (*BuildNode) Kind() string {

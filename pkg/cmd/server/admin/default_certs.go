@@ -13,6 +13,7 @@ import (
 
 const (
 	CAFilePrefix     = "ca"
+	CABundlePrefix   = "ca-bundle"
 	MasterFilePrefix = "master"
 )
 
@@ -25,6 +26,14 @@ type ClientCertInfo struct {
 
 func DefaultSignerName() string {
 	return fmt.Sprintf("%s@%d", "openshift-signer", time.Now().Unix())
+}
+
+func DefaultCABundleFile(certDir string) string {
+	return DefaultCertFilename(certDir, CABundlePrefix)
+}
+
+func DefaultServiceServingCertSignerName() string {
+	return fmt.Sprintf("%s@%d", "openshift-service-serving-signer", time.Now().Unix())
 }
 
 func DefaultRootCAFile(certDir string) string {
@@ -69,6 +78,21 @@ func DefaultMasterEtcdClientCertInfo(certDir string) ClientCertInfo {
 			KeyFile:  path.Join(certDir, MasterFilePrefix+".etcd-client.key"),
 		},
 		User: "system:master",
+	}
+}
+
+func DefaultProxyClientCerts(certDir string) []ClientCertInfo {
+	return []ClientCertInfo{
+		DefaultProxyClientCertInfo(certDir),
+	}
+}
+func DefaultProxyClientCertInfo(certDir string) ClientCertInfo {
+	return ClientCertInfo{
+		CertLocation: configapi.CertInfo{
+			CertFile: path.Join(certDir, MasterFilePrefix+".proxy-client.crt"),
+			KeyFile:  path.Join(certDir, MasterFilePrefix+".proxy-client.key"),
+		},
+		User: bootstrappolicy.MasterProxyUsername,
 	}
 }
 
@@ -185,6 +209,13 @@ func DefaultNodeClientCertInfo(nodeDir string) configapi.CertInfo {
 }
 func DefaultNodeKubeConfigFile(nodeDir string) string {
 	return path.Join(nodeDir, "node.kubeconfig")
+}
+
+func DefaultServiceSignerCAInfo(certDir string) configapi.CertInfo {
+	caInfo := configapi.CertInfo{}
+	caInfo.CertFile = DefaultCAFilename(certDir, "service-signer")
+	caInfo.KeyFile = DefaultKeyFilename(certDir, "service-signer")
+	return caInfo
 }
 
 func DefaultCAFilename(certDir, prefix string) string {

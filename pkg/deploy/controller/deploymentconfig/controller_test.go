@@ -1,403 +1,740 @@
 package deploymentconfig
 
 import (
-	"fmt"
-	"reflect"
 	"sort"
+	"strconv"
 	"testing"
+	"time"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	kerrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/client/record"
+	"k8s.io/kubernetes/pkg/client/cache"
+	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/controller/framework"
+	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util/diff"
+	"k8s.io/kubernetes/pkg/watch"
 
-	api "github.com/openshift/origin/pkg/api/latest"
+	"github.com/openshift/origin/pkg/client/testclient"
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	_ "github.com/openshift/origin/pkg/deploy/api/install"
 	deploytest "github.com/openshift/origin/pkg/deploy/api/test"
+	deployv1 "github.com/openshift/origin/pkg/deploy/api/v1"
 	deployutil "github.com/openshift/origin/pkg/deploy/util"
 )
 
-// TestHandle_initialOk ensures that an initial config (version 0) doesn't result
-// in a new deployment.
-func TestHandle_initialOk(t *testing.T) {
-	controller := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected call with deployment %v", deployment)
-				return nil, nil
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				t.Fatalf("unexpected call to list deployments")
-				return nil, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-		recorder: &record.FakeRecorder{},
+func TestHandleScenarios(t *testing.T) {
+	type deployment struct {
+		// version is the deployment version
+		version int64
+		// replicas is the spec replicas of the deployment
+		replicas int32
+		// test is whether this is a test deployment config
+		test bool
+		// replicasA is the annotated replica value for backwards compat checks
+		replicasA *int32
+		desiredA  *int32
+		status    deployapi.DeploymentStatus
+		cancelled bool
 	}
 
-	err := controller.Handle(deploytest.OkDeploymentConfig(0))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestHandle_updateOk ensures that an updated config (version >0) results in
-// a new deployment with the appropriate replica count based on a variety of
-// existing prior deployments.
-func TestHandle_updateOk(t *testing.T) {
-	var (
-		config              *deployapi.DeploymentConfig
-		deployed            *kapi.ReplicationController
-		existingDeployments *kapi.ReplicationControllerList
-	)
-
-	controller := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				deployed = deployment
-				return deployment, nil
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				return existingDeployments, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-		recorder: &record.FakeRecorder{},
-	}
-
-	type existing struct {
-		version  int
-		replicas int
-		status   deployapi.DeploymentStatus
-	}
-
-	type scenario struct {
-		version          int
-		expectedReplicas int
-		existing         []existing
-	}
-
-	scenarios := []scenario{
-		{1, 1, []existing{}},
-		{2, 1, []existing{
-			{1, 1, deployapi.DeploymentStatusComplete},
-		}},
-		{3, 4, []existing{
-			{1, 0, deployapi.DeploymentStatusComplete},
-			{2, 4, deployapi.DeploymentStatusComplete},
-		}},
-		{3, 4, []existing{
-			{1, 4, deployapi.DeploymentStatusComplete},
-			{2, 1, deployapi.DeploymentStatusFailed},
-		}},
-		{4, 2, []existing{
-			{1, 0, deployapi.DeploymentStatusComplete},
-			{2, 0, deployapi.DeploymentStatusFailed},
-			{3, 2, deployapi.DeploymentStatusComplete},
-		}},
-		// Scramble the order of the previous to ensure we still get it right.
-		{4, 2, []existing{
-			{2, 0, deployapi.DeploymentStatusFailed},
-			{3, 2, deployapi.DeploymentStatusComplete},
-			{1, 0, deployapi.DeploymentStatusComplete},
-		}},
-	}
-
-	for _, scenario := range scenarios {
-		deployed = nil
-		config = deploytest.OkDeploymentConfig(scenario.version)
-		existingDeployments = &kapi.ReplicationControllerList{}
-		for _, e := range scenario.existing {
-			d, _ := deployutil.MakeDeployment(deploytest.OkDeploymentConfig(e.version), api.Codec)
-			d.Spec.Replicas = e.replicas
-			d.Annotations[deployapi.DeploymentStatusAnnotation] = string(e.status)
-			existingDeployments.Items = append(existingDeployments.Items, *d)
+	mkdeployment := func(d deployment) kapi.ReplicationController {
+		config := deploytest.OkDeploymentConfig(d.version)
+		if d.test {
+			config = deploytest.TestDeploymentConfig(config)
 		}
-		err := controller.Handle(config)
-
-		if deployed == nil {
-			t.Fatalf("expected a deployment")
+		deployment, _ := deployutil.MakeDeployment(config, kapi.Codecs.LegacyCodec(deployv1.SchemeGroupVersion))
+		deployment.Annotations[deployapi.DeploymentStatusAnnotation] = string(d.status)
+		if d.cancelled {
+			deployment.Annotations[deployapi.DeploymentCancelledAnnotation] = deployapi.DeploymentCancelledAnnotationValue
+			deployment.Annotations[deployapi.DeploymentStatusReasonAnnotation] = deployapi.DeploymentCancelledNewerDeploymentExists
 		}
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		desired, hasDesired := deployutil.DeploymentDesiredReplicas(deployed)
-		if !hasDesired {
-			t.Fatalf("expected desired replicas")
-		}
-		if e, a := scenario.expectedReplicas, desired; e != a {
-			t.Errorf("expected desired replicas %d, got %d", e, a)
-		}
-	}
-}
-
-// TestHandle_nonfatalLookupError ensures that an API failure to look up the
-// existing deployment for an updated config results in a nonfatal error.
-func TestHandle_nonfatalLookupError(t *testing.T) {
-	configController := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected call with deployment %v", deployment)
-				return nil, nil
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				return nil, kerrors.NewInternalError(fmt.Errorf("fatal test error"))
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-	}
-
-	err := configController.Handle(deploytest.OkDeploymentConfig(1))
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if _, isFatal := err.(fatalError); isFatal {
-		t.Fatalf("expected a retryable error, got a fatal error: %v", err)
-	}
-}
-
-// TestHandle_configAlreadyDeployed ensures that an attempt to create a
-// deployment for an updated config for which the deployment was already
-// created results in a no-op.
-func TestHandle_configAlreadyDeployed(t *testing.T) {
-	deploymentConfig := deploytest.OkDeploymentConfig(0)
-
-	controller := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected call to to create deployment: %v", deployment)
-				return nil, nil
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				existingDeployments := []kapi.ReplicationController{}
-				deployment, _ := deployutil.MakeDeployment(deploymentConfig, kapi.Codec)
-				existingDeployments = append(existingDeployments, *deployment)
-				return &kapi.ReplicationControllerList{Items: existingDeployments}, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-	}
-
-	err := controller.Handle(deploymentConfig)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestHandle_nonfatalCreateError ensures that a failed API attempt to create
-// a new deployment for an updated config results in a nonfatal error.
-func TestHandle_nonfatalCreateError(t *testing.T) {
-	configController := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				return nil, kerrors.NewInternalError(fmt.Errorf("test error"))
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				return &kapi.ReplicationControllerList{}, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-		recorder: &record.FakeRecorder{},
-	}
-
-	err := configController.Handle(deploytest.OkDeploymentConfig(1))
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if _, isFatal := err.(fatalError); isFatal {
-		t.Fatalf("expected a nonfatal error, got a fatal error: %v", err)
-	}
-}
-
-// TestHandle_fatalError ensures that in internal (not API) failure to make a
-// deployment from an updated config results in a fatal error.
-func TestHandle_fatalError(t *testing.T) {
-	configController := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return nil, fmt.Errorf("couldn't make deployment")
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected call to create")
-				return nil, kerrors.NewInternalError(fmt.Errorf("test error"))
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				return &kapi.ReplicationControllerList{}, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				t.Fatalf("unexpected update call with deployment %v", deployment)
-				return nil, nil
-			},
-		},
-	}
-
-	err := configController.Handle(deploytest.OkDeploymentConfig(1))
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if _, isFatal := err.(fatalError); !isFatal {
-		t.Fatalf("expected a fatal error, got: %v", err)
-	}
-}
-
-// TestHandle_existingDeployments ensures that an attempt to create a
-// new deployment for a config that has existing deployments succeeds of fails
-// depending upon the state of the existing deployments
-func TestHandle_existingDeployments(t *testing.T) {
-	var updatedDeployments []kapi.ReplicationController
-	var (
-		config              *deployapi.DeploymentConfig
-		deployed            *kapi.ReplicationController
-		existingDeployments *kapi.ReplicationControllerList
-	)
-
-	controller := &DeploymentConfigController{
-		makeDeployment: func(config *deployapi.DeploymentConfig) (*kapi.ReplicationController, error) {
-			return deployutil.MakeDeployment(config, api.Codec)
-		},
-		deploymentClient: &deploymentClientImpl{
-			createDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				deployed = deployment
-				return deployment, nil
-			},
-			listDeploymentsForConfigFunc: func(namespace, configName string) (*kapi.ReplicationControllerList, error) {
-				return existingDeployments, nil
-			},
-			updateDeploymentFunc: func(namespace string, deployment *kapi.ReplicationController) (*kapi.ReplicationController, error) {
-				updatedDeployments = append(updatedDeployments, *deployment)
-				//t.Fatalf("unexpected update call with deployment %v", deployment)
-				return deployment, nil
-			},
-		},
-		recorder: &record.FakeRecorder{},
-	}
-
-	type existing struct {
-		version      int
-		status       deployapi.DeploymentStatus
-		shouldCancel bool
-	}
-
-	type scenario struct {
-		version          int
-		existing         []existing
-		errorType        reflect.Type
-		expectDeployment bool
-	}
-
-	transientErrorType := reflect.TypeOf(transientError(""))
-	scenarios := []scenario{
-		// No existing deployments
-		{1, []existing{}, nil, true},
-		// A single existing completed deployment
-		{2, []existing{{1, deployapi.DeploymentStatusComplete, false}}, nil, true},
-		// A single existing failed deployment
-		{2, []existing{{1, deployapi.DeploymentStatusFailed, false}}, nil, true},
-		// Multiple existing completed/failed deployments
-		{3, []existing{{2, deployapi.DeploymentStatusFailed, false}, {1, deployapi.DeploymentStatusComplete, false}}, nil, true},
-
-		// A single existing deployment in the default state
-		{2, []existing{{1, "", false}}, transientErrorType, false},
-		// A single existing new deployment
-		{2, []existing{{1, deployapi.DeploymentStatusNew, false}}, transientErrorType, false},
-		// A single existing pending deployment
-		{2, []existing{{1, deployapi.DeploymentStatusPending, false}}, transientErrorType, false},
-		// A single existing running deployment
-		{2, []existing{{1, deployapi.DeploymentStatusRunning, false}}, transientErrorType, false},
-		// Multiple existing deployments with one in new/pending/running
-		{4, []existing{{3, deployapi.DeploymentStatusRunning, false}, {2, deployapi.DeploymentStatusComplete, false}, {1, deployapi.DeploymentStatusFailed, false}}, transientErrorType, false},
-
-		// Latest deployment exists and has already failed/completed
-		{2, []existing{{2, deployapi.DeploymentStatusFailed, false}, {1, deployapi.DeploymentStatusComplete, false}}, nil, false},
-		// Latest deployment exists and is in new/pending/running state
-		{2, []existing{{2, deployapi.DeploymentStatusRunning, false}, {1, deployapi.DeploymentStatusComplete, false}}, nil, false},
-
-		// Multiple existing deployments with more than one in new/pending/running
-		{4, []existing{{3, deployapi.DeploymentStatusNew, false}, {2, deployapi.DeploymentStatusRunning, true}, {1, deployapi.DeploymentStatusFailed, false}}, transientErrorType, false},
-		// Multiple existing deployments with more than one in new/pending/running
-		// Latest deployment has already failed
-		{6, []existing{{5, deployapi.DeploymentStatusFailed, false}, {4, deployapi.DeploymentStatusRunning, false}, {3, deployapi.DeploymentStatusNew, true}, {2, deployapi.DeploymentStatusComplete, false}, {1, deployapi.DeploymentStatusNew, true}}, transientErrorType, false},
-	}
-
-	for _, scenario := range scenarios {
-		updatedDeployments = []kapi.ReplicationController{}
-		deployed = nil
-		config = deploytest.OkDeploymentConfig(scenario.version)
-		existingDeployments = &kapi.ReplicationControllerList{}
-		for _, e := range scenario.existing {
-			d, _ := deployutil.MakeDeployment(deploytest.OkDeploymentConfig(e.version), api.Codec)
-			if e.status != "" {
-				d.Annotations[deployapi.DeploymentStatusAnnotation] = string(e.status)
-			}
-			existingDeployments.Items = append(existingDeployments.Items, *d)
-		}
-		err := controller.Handle(config)
-
-		if scenario.expectDeployment && deployed == nil {
-			t.Fatalf("expected a deployment")
-		}
-
-		if scenario.errorType == nil {
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+		if d.replicasA != nil {
+			deployment.Annotations[deployapi.DeploymentReplicasAnnotation] = strconv.Itoa(int(*d.replicasA))
 		} else {
-			if err == nil {
-				t.Fatalf("expected error")
-			}
-			if reflect.TypeOf(err) != scenario.errorType {
-				t.Fatalf("error expected: %s, got: %s", scenario.errorType, reflect.TypeOf(err))
-			}
+			delete(deployment.Annotations, deployapi.DeploymentReplicasAnnotation)
+		}
+		if d.desiredA != nil {
+			deployment.Annotations[deployapi.DesiredReplicasAnnotation] = strconv.Itoa(int(*d.desiredA))
+		} else {
+			delete(deployment.Annotations, deployapi.DesiredReplicasAnnotation)
+		}
+		deployment.Spec.Replicas = d.replicas
+		return *deployment
+	}
+
+	tests := []struct {
+		name string
+		// replicas is the config replicas prior to the update
+		replicas int32
+		// test is whether this is a test deployment config
+		test bool
+		// newVersion is the version of the config at the time of the update
+		newVersion int64
+		// expectedReplicas is the expected config replica count after the update
+		expectedReplicas int32
+		// before is the state of all deployments prior to the update
+		before []deployment
+		// after is the expected state of all deployments after the update
+		after []deployment
+		// errExpected is whether the update should produce an error
+		errExpected bool
+	}{
+		{
+			name:             "version is zero",
+			replicas:         1,
+			newVersion:       0,
+			expectedReplicas: 1,
+			before:           []deployment{},
+			after:            []deployment{},
+			errExpected:      false,
+		},
+		{
+			name:             "first deployment",
+			replicas:         1,
+			newVersion:       1,
+			expectedReplicas: 1,
+			before:           []deployment{},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "initial deployment already in progress",
+			replicas:         1,
+			newVersion:       1,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "new version",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "already in progress",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "already deployed",
+			replicas:         1,
+			newVersion:       1,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "awaiting cancellation of older deployments",
+			replicas:         1,
+			newVersion:       3,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), desiredA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), desiredA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			errExpected: true,
+		},
+		{
+			name:             "awaiting cancellation of older deployments (already cancelled)",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			errExpected: true,
+		},
+		{
+			name:             "steady state replica corrections (latest == active)",
+			replicas:         1,
+			newVersion:       5,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 5, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 5, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "steady state replica corrections (latest != active)",
+			replicas:         1,
+			newVersion:       5,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 5, replicas: 1, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 5, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "already deployed, no active deployment",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "scale up latest/active completed deployment",
+			replicas:         5,
+			newVersion:       2,
+			expectedReplicas: 5,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "scale up active (not latest) completed deployment",
+			replicas:         5,
+			newVersion:       2,
+			expectedReplicas: 5,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "scale down latest/active completed deployment",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "scale down active (not latest) completed deployment",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "fallback to last completed deployment",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "fallback to last completed deployment (partial rollout)",
+			replicas:         5,
+			newVersion:       2,
+			expectedReplicas: 5,
+			before: []deployment{
+				{version: 1, replicas: 2, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 2, replicasA: newInt32(0), desiredA: newInt32(5), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(5), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		// The cases below will exercise backwards compatibility for resources
+		// which predate the use of the replica annotation.
+		{
+			name:             "(compat) initial deployment already in progress",
+			replicas:         1,
+			newVersion:       1,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) new version",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) already in progress",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusNew, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) already deployed",
+			replicas:         1,
+			newVersion:       1,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) awaiting cancellation of older deployments",
+			replicas:         1,
+			newVersion:       3,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			errExpected: true,
+		},
+		{
+			name:             "(compat) awaiting cancellation of older deployments (already cancelled)",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusRunning, cancelled: true},
+			},
+			errExpected: true,
+		},
+		{
+			name:             "(compat) steady state replica corrections (latest == active)",
+			replicas:         5,
+			newVersion:       5,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 5, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 5, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) steady state replica corrections of a test config (latest == active)",
+			test:             true,
+			replicas:         5,
+			newVersion:       5,
+			expectedReplicas: 5,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 3, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true, test: true},
+				{version: 4, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false, test: true},
+				{version: 5, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 3, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true, test: true},
+				{version: 4, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false, test: true},
+				{version: 5, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) steady state replica corrections (latest != active)",
+			replicas:         5,
+			newVersion:       5,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 1, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 1, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 5, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 3, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+				{version: 4, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 5, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) already deployed, no active deployment",
+			replicas:         2,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 2, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) scale up latest/active completed deployment",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 5,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 5, status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 5, replicasA: newInt32(5), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) scale up latest/active completed test deployment",
+			test:             true,
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 5, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) scale up latest/active running test deployment",
+			test:             true,
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 5, status: deployapi.DeploymentStatusRunning, cancelled: false, test: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: nil, status: deployapi.DeploymentStatusComplete, cancelled: false, test: true},
+				{version: 2, replicas: 5, replicasA: nil, status: deployapi.DeploymentStatusRunning, cancelled: false, test: true},
+			},
+			errExpected: false,
+		},
+		// No longer supported.
+		{
+			name:             "(compat) scale up active (not latest) completed deployment (RC targetted directly)",
+			replicas:         2,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 5, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) scale up active (not latest) completed deployment (RC targetted via oc)",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 2,
+			before: []deployment{
+				{version: 1, replicas: 2, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 5, desiredA: newInt32(2), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 2, replicasA: newInt32(2), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(2), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat) fallback to last completed deployment",
+			replicas:         3,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 0, status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+		// The cases below exercise old clients performing scaling operations
+		// against new resources and controller behavior.
+		{
+			name:             "(compat-2) scale up latest/active completed deployment (via oc)",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 2,
+			before: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 2, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			after: []deployment{
+				{version: 1, replicas: 0, replicasA: newInt32(0), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 2, replicasA: newInt32(2), status: deployapi.DeploymentStatusComplete, cancelled: false},
+			},
+			errExpected: false,
+		},
+		{
+			name:             "(compat-2) scale up active (not latest) completed deployment (via oc)",
+			replicas:         1,
+			newVersion:       2,
+			expectedReplicas: 1,
+			before: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 2, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			after: []deployment{
+				{version: 1, replicas: 1, replicasA: newInt32(1), status: deployapi.DeploymentStatusComplete, cancelled: false},
+				{version: 2, replicas: 0, replicasA: newInt32(0), desiredA: newInt32(1), status: deployapi.DeploymentStatusFailed, cancelled: true},
+			},
+			errExpected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Logf("evaluating test: %s", test.name)
+
+		var updatedConfig *deployapi.DeploymentConfig
+		deployments := map[string]kapi.ReplicationController{}
+		toStore := []kapi.ReplicationController{}
+		for _, template := range test.before {
+			deployment := mkdeployment(template)
+			deployments[deployment.Name] = deployment
+			toStore = append(toStore, deployment)
 		}
 
-		expectedCancellations := []int{}
-		actualCancellations := []int{}
-		for _, e := range scenario.existing {
-			if e.shouldCancel {
-				expectedCancellations = append(expectedCancellations, e.version)
-			}
-		}
-		for _, d := range updatedDeployments {
-			actualCancellations = append(actualCancellations, deployutil.DeploymentVersionFor(&d))
+		oc := &testclient.Fake{}
+		oc.AddReactor("update", "deploymentconfigs", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			dc := action.(ktestclient.UpdateAction).GetObject().(*deployapi.DeploymentConfig)
+			updatedConfig = dc
+			return true, dc, nil
+		})
+		kc := &ktestclient.Fake{}
+		kc.AddReactor("create", "replicationcontrollers", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			rc := action.(ktestclient.CreateAction).GetObject().(*kapi.ReplicationController)
+			deployments[rc.Name] = *rc
+			return true, rc, nil
+		})
+		kc.AddReactor("update", "replicationcontrollers", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			rc := action.(ktestclient.UpdateAction).GetObject().(*kapi.ReplicationController)
+			deployments[rc.Name] = *rc
+			return true, rc, nil
+		})
+		codec := kapi.Codecs.LegacyCodec(deployv1.SchemeGroupVersion)
+
+		dcInformer := framework.NewSharedIndexInformer(
+			&cache.ListWatch{
+				ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+					return oc.DeploymentConfigs(kapi.NamespaceAll).List(options)
+				},
+				WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+					return oc.DeploymentConfigs(kapi.NamespaceAll).Watch(options)
+				},
+			},
+			&deployapi.DeploymentConfig{},
+			2*time.Minute,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		)
+		rcInformer := framework.NewSharedIndexInformer(
+			&cache.ListWatch{
+				ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+					return kc.ReplicationControllers(kapi.NamespaceAll).List(options)
+				},
+				WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+					return kc.ReplicationControllers(kapi.NamespaceAll).Watch(options)
+				},
+			},
+			&kapi.ReplicationController{},
+			2*time.Minute,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		)
+		podInformer := framework.NewSharedIndexInformer(
+			&cache.ListWatch{
+				ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+					return kc.Pods(kapi.NamespaceAll).List(options)
+				},
+				WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+					return kc.Pods(kapi.NamespaceAll).Watch(options)
+				},
+			},
+			&kapi.Pod{},
+			2*time.Minute,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		)
+		c := NewDeploymentConfigController(dcInformer, rcInformer, podInformer, oc, kc, codec)
+
+		for i := range toStore {
+			c.rcStore.Add(&toStore[i])
 		}
 
-		sort.Ints(actualCancellations)
-		sort.Ints(expectedCancellations)
-		if !reflect.DeepEqual(actualCancellations, expectedCancellations) {
-			t.Fatalf("expected cancellations: %v, actual: %v", expectedCancellations, actualCancellations)
+		config := deploytest.OkDeploymentConfig(test.newVersion)
+		if test.test {
+			config = deploytest.TestDeploymentConfig(config)
+		}
+		config.Spec.Replicas = test.replicas
+
+		if err := c.Handle(config); err != nil && !test.errExpected {
+			t.Errorf("unexpected error: %s", err)
+			continue
+		}
+
+		expectedDeployments := []kapi.ReplicationController{}
+		for _, template := range test.after {
+			expectedDeployments = append(expectedDeployments, mkdeployment(template))
+		}
+		actualDeployments := []kapi.ReplicationController{}
+		for _, deployment := range deployments {
+			actualDeployments = append(actualDeployments, deployment)
+		}
+		sort.Sort(deployutil.ByLatestVersionDesc(expectedDeployments))
+		sort.Sort(deployutil.ByLatestVersionDesc(actualDeployments))
+
+		if updatedConfig != nil {
+			config = updatedConfig
+		}
+
+		if e, a := test.expectedReplicas, config.Spec.Replicas; e != a {
+			t.Errorf("expected config replicas to be %d, got %d", e, a)
+			continue
+		}
+		for i := 0; i < len(expectedDeployments); i++ {
+			expected, actual := expectedDeployments[i], actualDeployments[i]
+			if !kapi.Semantic.DeepEqual(expected, actual) {
+				t.Errorf("actual deployment don't match expected: %v", diff.ObjectDiff(expected, actual))
+			}
 		}
 	}
+}
+
+func newInt32(i int32) *int32 {
+	return &i
 }

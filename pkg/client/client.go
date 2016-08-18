@@ -7,7 +7,10 @@ import (
 	"runtime"
 	"strings"
 
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/kubernetes/pkg/client/typed/discovery"
 
 	"github.com/openshift/origin/pkg/api/latest"
 	"github.com/openshift/origin/pkg/version"
@@ -19,15 +22,19 @@ type Interface interface {
 	BuildConfigsNamespacer
 	BuildLogsNamespacer
 	ImagesInterfacer
+	ImageSignaturesInterfacer
 	ImageStreamsNamespacer
 	ImageStreamMappingsNamespacer
 	ImageStreamTagsNamespacer
 	ImageStreamImagesNamespacer
+	ImageStreamSecretsNamespacer
 	DeploymentConfigsNamespacer
+	DeploymentLogsNamespacer
 	RoutesNamespacer
 	HostSubnetsInterface
 	NetNamespacesInterface
 	ClusterNetworkingInterface
+	EgressNetworkPoliciesNamespacer
 	IdentitiesInterface
 	UsersInterface
 	GroupsInterface
@@ -40,9 +47,13 @@ type Interface interface {
 	ResourceAccessReviews
 	SubjectAccessReviews
 	LocalSubjectAccessReviewsNamespacer
+	SelfSubjectRulesReviewsNamespacer
 	TemplatesNamespacer
 	TemplateConfigsNamespacer
+	OAuthClientsInterface
+	OAuthClientAuthorizationsInterface
 	OAuthAccessTokensInterface
+	OAuthAuthorizeTokensInterface
 	PoliciesNamespacer
 	PolicyBindingsNamespacer
 	RolesNamespacer
@@ -51,6 +62,8 @@ type Interface interface {
 	ClusterPolicyBindingsInterface
 	ClusterRolesInterface
 	ClusterRoleBindingsInterface
+	ClusterResourceQuotasInterface
+	AppliedClusterResourceQuotasNamespacer
 }
 
 // Builds provides a REST client for Builds
@@ -71,6 +84,16 @@ func (c *Client) BuildLogs(namespace string) BuildLogsInterface {
 // Images provides a REST client for Images
 func (c *Client) Images() ImageInterface {
 	return newImages(c)
+}
+
+// ImageSignatures provides a REST client for ImageSignatures
+func (c *Client) ImageSignatures() ImageSignatureInterface {
+	return newImageSignatures(c)
+}
+
+// ImageStreamImages provides a REST client for retrieving image secrets in a namespace
+func (c *Client) ImageStreamSecrets(namespace string) ImageStreamSecretInterface {
+	return newImageStreamSecrets(c, namespace)
 }
 
 // ImageStreams provides a REST client for ImageStream
@@ -98,6 +121,11 @@ func (c *Client) DeploymentConfigs(namespace string) DeploymentConfigInterface {
 	return newDeploymentConfigs(c, namespace)
 }
 
+// DeploymentLogs provides a REST client for DeploymentLog
+func (c *Client) DeploymentLogs(namespace string) DeploymentLogInterface {
+	return newDeploymentLogs(c, namespace)
+}
+
 // Routes provides a REST client for Route
 func (c *Client) Routes(namespace string) RouteInterface {
 	return newRoutes(c, namespace)
@@ -116,6 +144,11 @@ func (c *Client) NetNamespaces() NetNamespaceInterface {
 // ClusterNetwork provides a REST client for ClusterNetworking
 func (c *Client) ClusterNetwork() ClusterNetworkInterface {
 	return newClusterNetwork(c)
+}
+
+// EgressNetworkPolicies provides a REST client for EgressNetworkPolicy
+func (c *Client) EgressNetworkPolicies(namespace string) EgressNetworkPolicyInterface {
+	return newEgressNetworkPolicy(c, namespace)
 }
 
 // Users provides a REST client for User
@@ -208,9 +241,24 @@ func (c *Client) SubjectAccessReviews() SubjectAccessReviewInterface {
 	return newSubjectAccessReviews(c)
 }
 
-// OAuthAccessTokens provides a REST client for OAuthAccessTokens
+func (c *Client) SelfSubjectRulesReviews(namespace string) SelfSubjectRulesReviewInterface {
+	return newSelfSubjectRulesReviews(c, namespace)
+}
+
+func (c *Client) OAuthClients() OAuthClientInterface {
+	return newOAuthClients(c)
+}
+
+func (c *Client) OAuthClientAuthorizations() OAuthClientAuthorizationInterface {
+	return newOAuthClientAuthorizations(c)
+}
+
 func (c *Client) OAuthAccessTokens() OAuthAccessTokenInterface {
 	return newOAuthAccessTokens(c)
+}
+
+func (c *Client) OAuthAuthorizeTokens() OAuthAuthorizeTokenInterface {
+	return newOAuthAuthorizeTokens(c)
 }
 
 func (c *Client) ClusterPolicies() ClusterPolicyInterface {
@@ -229,20 +277,28 @@ func (c *Client) ClusterRoleBindings() ClusterRoleBindingInterface {
 	return newClusterRoleBindings(c)
 }
 
+func (c *Client) ClusterResourceQuotas() ClusterResourceQuotaInterface {
+	return newClusterResourceQuotas(c)
+}
+
+func (c *Client) AppliedClusterResourceQuotas(namespace string) AppliedClusterResourceQuotaInterface {
+	return newAppliedClusterResourceQuotas(c, namespace)
+}
+
 // Client is an OpenShift client object
 type Client struct {
-	*kclient.RESTClient
+	*restclient.RESTClient
 }
 
 // New creates an OpenShift client for the given config. This client works with builds, deployments,
 // templates, routes, and images. It allows operations such as list, get, update and delete on these
 // objects. An error is returned if the provided configuration is not valid.
-func New(c *kclient.Config) (*Client, error) {
+func New(c *restclient.Config) (*Client, error) {
 	config := *c
 	if err := SetOpenShiftDefaults(&config); err != nil {
 		return nil, err
 	}
-	client, err := kclient.RESTClientFor(&config)
+	client, err := restclient.RESTClientFor(&config)
 	if err != nil {
 		return nil, err
 	}
@@ -250,38 +306,34 @@ func New(c *kclient.Config) (*Client, error) {
 	return &Client{client}, nil
 }
 
+// DiscoveryClient returns a discovery client.
+func (c *Client) Discovery() discovery.DiscoveryInterface {
+	d := NewDiscoveryClient(c.RESTClient)
+	return d
+}
+
 // SetOpenShiftDefaults sets the default settings on the passed
 // client configuration
-func SetOpenShiftDefaults(config *kclient.Config) error {
+func SetOpenShiftDefaults(config *restclient.Config) error {
 	if len(config.UserAgent) == 0 {
 		config.UserAgent = DefaultOpenShiftUserAgent()
 	}
-	if config.Version == "" {
+	if config.GroupVersion == nil {
 		// Clients default to the preferred code API version
-		// TODO: implement version negotiation (highest version supported by server)
-		config.Version = latest.Version
+		groupVersionCopy := latest.Version
+		config.GroupVersion = &groupVersionCopy
 	}
-	if config.Prefix == "" {
-		switch config.Version {
-		case "v1beta3":
-			config.Prefix = "/osapi"
-		default:
-			config.Prefix = "/oapi"
-		}
+	if config.APIPath == "" {
+		config.APIPath = "/oapi"
 	}
-	version := config.Version
-	versionInterfaces, err := latest.InterfacesFor(version)
-	if err != nil {
-		return fmt.Errorf("API version '%s' is not recognized (valid values: %s)", version, strings.Join(latest.Versions, ", "))
-	}
-	if config.Codec == nil {
-		config.Codec = versionInterfaces.Codec
+	if config.NegotiatedSerializer == nil {
+		config.NegotiatedSerializer = kapi.Codecs
 	}
 	return nil
 }
 
 // NewOrDie creates an OpenShift client and panics if the provided API version is not recognized.
-func NewOrDie(c *kclient.Config) *Client {
+func NewOrDie(c *restclient.Config) *Client {
 	client, err := New(c)
 	if err != nil {
 		panic(err)
@@ -302,4 +354,14 @@ func DefaultOpenShiftUserAgent() string {
 	seg := strings.SplitN(version, "-", 2)
 	version = seg[0]
 	return fmt.Sprintf("%s/%s (%s/%s) openshift/%s", path.Base(os.Args[0]), version, runtime.GOOS, runtime.GOARCH, commit)
+}
+
+// IsStatusErrorKind returns true if this error describes the provided kind.
+func IsStatusErrorKind(err error, kind string) bool {
+	if s, ok := err.(errors.APIStatus); ok {
+		if details := s.Status().Details; details != nil {
+			return kind == details.Kind
+		}
+	}
+	return false
 }

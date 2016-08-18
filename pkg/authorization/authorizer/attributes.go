@@ -21,11 +21,13 @@ type DefaultAuthorizationAttributes struct {
 	URL               string
 }
 
-// ToDefaultAuthorizationAttributes coerces AuthorizationAttributes to DefaultAuthorizationAttributes.  Namespace is not included
+// ToDefaultAuthorizationAttributes coerces Action to DefaultAuthorizationAttributes.  Namespace is not included
 // because the authorizer takes that information on the context
-func ToDefaultAuthorizationAttributes(in authorizationapi.AuthorizationAttributes) DefaultAuthorizationAttributes {
+func ToDefaultAuthorizationAttributes(in authorizationapi.Action) DefaultAuthorizationAttributes {
 	return DefaultAuthorizationAttributes{
 		Verb:         in.Verb,
+		APIGroup:     in.Group,
+		APIVersion:   in.Version,
 		Resource:     in.Resource,
 		ResourceName: in.ResourceName,
 	}
@@ -45,16 +47,16 @@ func (a DefaultAuthorizationAttributes) RuleMatches(rule authorizationapi.Policy
 	if a.verbMatches(rule.Verbs) {
 		if a.apiGroupMatches(rule.APIGroups) {
 
-			allowedResourceTypes := authorizationapi.ExpandResources(rule.Resources)
+			allowedResourceTypes := authorizationapi.NormalizeResources(rule.Resources)
 			if a.resourceMatches(allowedResourceTypes) {
 				if a.nameMatches(rule.ResourceNames) {
 					// this rule matches the request, so we should check the additional restrictions to be sure that it's allowed
-					if rule.AttributeRestrictions.Object != nil {
-						switch rule.AttributeRestrictions.Object.(type) {
+					if rule.AttributeRestrictions != nil {
+						switch rule.AttributeRestrictions.(type) {
 						case (*authorizationapi.IsPersonalSubjectAccessReview):
 							return IsPersonalAccessReview(a)
 						default:
-							return false, fmt.Errorf("unable to interpret: %#v", rule.AttributeRestrictions.Object)
+							return false, fmt.Errorf("unable to interpret: %#v", rule.AttributeRestrictions)
 						}
 					}
 
@@ -68,11 +70,6 @@ func (a DefaultAuthorizationAttributes) RuleMatches(rule authorizationapi.Policy
 }
 
 func (a DefaultAuthorizationAttributes) apiGroupMatches(allowedGroups []string) bool {
-	// if no APIGroups are specified, then the default APIGroup of "" is assumed.
-	if len(allowedGroups) == 0 && len(a.GetAPIGroup()) == 0 {
-		return true
-	}
-
 	// allowedGroups is expected to be small, so I don't feel bad about this.
 	for _, allowedGroup := range allowedGroups {
 		if allowedGroup == authorizationapi.APIGroupAll {
@@ -138,6 +135,9 @@ func splitPath(thePath string) []string {
 	}
 	return strings.Split(thePath, "/")
 }
+
+// DefaultAuthorizationAttributes satisfies the Action interface
+var _ Action = DefaultAuthorizationAttributes{}
 
 func (a DefaultAuthorizationAttributes) GetAPIVersion() string {
 	return a.APIVersion

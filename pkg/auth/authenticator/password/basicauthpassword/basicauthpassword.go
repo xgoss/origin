@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 
 	"github.com/golang/glog"
 
@@ -51,6 +52,8 @@ type RemoteError struct {
 	Error string
 }
 
+var RedirectAttemptedError = errors.New("Redirect attempted")
+
 // New returns an authenticator which will make a basic auth call to the given url.
 // A custom transport can be provided (typically to customize TLS options like trusted roots or present a client certificate).
 // If no transport is provided, http.DefaultTransport is used
@@ -59,6 +62,13 @@ func New(providerName string, url string, transport http.RoundTripper, mapper au
 		transport = http.DefaultTransport
 	}
 	client := &http.Client{Transport: transport}
+
+	// We don't support redirects in the basic auth provider because it could be a malicious attempt to send credentials to
+	// another site.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return RedirectAttemptedError
+	}
+
 	return &Authenticator{providerName, url, client, mapper}
 }
 
@@ -66,6 +76,12 @@ func (a *Authenticator) AuthenticatePassword(username, password string) (user.In
 	req, err := http.NewRequest("GET", a.url, nil)
 	if err != nil {
 		return nil, false, err
+	}
+
+	// Basic auth does not support usernames containing colons
+	// http://tools.ietf.org/html/rfc2617#section-2
+	if strings.Contains(username, ":") {
+		return nil, false, fmt.Errorf("invalid username")
 	}
 
 	req.SetBasicAuth(username, password)
@@ -118,10 +134,11 @@ func (a *Authenticator) AuthenticatePassword(username, password string) (user.In
 	}
 
 	user, err := a.mapper.UserFor(identity)
-	glog.V(4).Infof("Got userIdentityMapping: %#v", user)
 	if err != nil {
-		return nil, false, fmt.Errorf("Error creating or updating mapping for: %#v due to %v", identity, err)
+		glog.V(4).Infof("Error creating or updating mapping for: %#v due to %v", identity, err)
+		return nil, false, err
 	}
+	glog.V(4).Infof("Got userIdentityMapping: %#v", user)
 
 	return user, true, nil
 }

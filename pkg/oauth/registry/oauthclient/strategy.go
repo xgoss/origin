@@ -10,7 +10,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // strategy implements behavior for OAuthClient objects
@@ -36,14 +36,18 @@ func (strategy) GenerateName(base string) string {
 func (strategy) PrepareForCreate(obj runtime.Object) {
 }
 
+// Canonicalize normalizes the object after validation.
+func (strategy) Canonicalize(obj runtime.Object) {
+}
+
 // Validate validates a new client
-func (strategy) Validate(ctx kapi.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (strategy) Validate(ctx kapi.Context, obj runtime.Object) field.ErrorList {
 	token := obj.(*api.OAuthClient)
 	return validation.ValidateClient(token)
 }
 
 // ValidateUpdate validates a client update
-func (strategy) ValidateUpdate(ctx kapi.Context, obj runtime.Object, old runtime.Object) fielderrors.ValidationErrorList {
+func (strategy) ValidateUpdate(ctx kapi.Context, obj runtime.Object, old runtime.Object) field.ErrorList {
 	client := obj.(*api.OAuthClient)
 	oldClient := old.(*api.OAuthClient)
 	return validation.ValidateClientUpdate(client, oldClient)
@@ -65,14 +69,7 @@ func Matcher(label labels.Selector, field fields.Selector) generic.Matcher {
 		if !ok {
 			return false, fmt.Errorf("not a client")
 		}
-		fields := SelectableFields(clientObj)
+		fields := api.OAuthClientToSelectableFields(clientObj)
 		return label.Matches(labels.Set(clientObj.Labels)) && field.Matches(fields), nil
 	})
-}
-
-// SelectableFields returns a label set that represents the object
-func SelectableFields(obj *api.OAuthClient) labels.Set {
-	return labels.Set{
-		"name": obj.Name,
-	}
 }

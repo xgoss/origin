@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -7,8 +5,7 @@ import (
 	"os"
 	"testing"
 
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/client/restclient"
 
 	"github.com/openshift/origin/pkg/client"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
@@ -17,13 +14,15 @@ import (
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
-func TestHTPasswd(t *testing.T) {
+func TestOAuthHTPasswd(t *testing.T) {
 	htpasswdFile, err := ioutil.TempFile("", "test.htpasswd")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer os.Remove(htpasswdFile.Name())
 
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	masterOptions, err := testserver.DefaultMasterOptions()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -33,10 +32,9 @@ func TestHTPasswd(t *testing.T) {
 		Name:            "htpasswd",
 		UseAsChallenger: true,
 		UseAsLogin:      true,
-		Provider: runtime.EmbeddedObject{
-			Object: &configapi.HTPasswdPasswordIdentityProvider{
-				File: htpasswdFile.Name(),
-			},
+		MappingMethod:   "claim",
+		Provider: &configapi.HTPasswdPasswordIdentityProvider{
+			File: htpasswdFile.Name(),
 		},
 	}
 
@@ -51,7 +49,7 @@ func TestHTPasswd(t *testing.T) {
 	}
 
 	// Use the server and CA info
-	anonConfig := kclient.Config{}
+	anonConfig := restclient.Config{}
 	anonConfig.Host = clientConfig.Host
 	anonConfig.CAFile = clientConfig.CAFile
 	anonConfig.CAData = clientConfig.CAData

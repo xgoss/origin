@@ -3,8 +3,6 @@ package policybinding
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/watch"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -13,7 +11,7 @@ import (
 // Registry is an interface for things that know how to store PolicyBindings.
 type Registry interface {
 	// ListPolicyBindings obtains list of policyBindings that match a selector.
-	ListPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyBindingList, error)
+	ListPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.PolicyBindingList, error)
 	// GetPolicyBinding retrieves a specific policyBinding.
 	GetPolicyBinding(ctx kapi.Context, name string) (*authorizationapi.PolicyBinding, error)
 	// CreatePolicyBinding creates a new policyBinding.
@@ -27,7 +25,7 @@ type Registry interface {
 type WatchingRegistry interface {
 	Registry
 	// WatchPolicyBindings watches policyBindings.
-	WatchPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error)
+	WatchPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error)
 }
 
 // Storage is an interface for a standard REST Storage backend
@@ -46,8 +44,8 @@ func NewRegistry(s Storage) WatchingRegistry {
 	return &storage{s}
 }
 
-func (s *storage) ListPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyBindingList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.PolicyBindingList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -61,12 +59,12 @@ func (s *storage) CreatePolicyBinding(ctx kapi.Context, policyBinding *authoriza
 }
 
 func (s *storage) UpdatePolicyBinding(ctx kapi.Context, policyBinding *authorizationapi.PolicyBinding) error {
-	_, _, err := s.Update(ctx, policyBinding)
+	_, _, err := s.Update(ctx, policyBinding.Name, rest.DefaultUpdatedObjectInfo(policyBinding, kapi.Scheme))
 	return err
 }
 
-func (s *storage) WatchPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
-	return s.Watch(ctx, label, field, resourceVersion)
+func (s *storage) WatchPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error) {
+	return s.Watch(ctx, options)
 }
 
 func (s *storage) GetPolicyBinding(ctx kapi.Context, name string) (*authorizationapi.PolicyBinding, error) {

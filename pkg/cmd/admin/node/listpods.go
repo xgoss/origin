@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/kubectl"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
@@ -31,7 +32,7 @@ func (l *ListPodsOptions) Run() error {
 	if l.Options.CmdPrinterOutput {
 		printer = l.Options.CmdPrinter
 	} else {
-		printer, _, err = l.Options.GetPrintersByResource("pod")
+		printer, _, err = l.Options.GetPrintersByResource(unversioned.GroupVersionResource{Resource: "pod"})
 		if err != nil {
 			return err
 		}
@@ -56,11 +57,11 @@ func (l *ListPodsOptions) runListPods(node *kapi.Node, printer kubectl.ResourceP
 	fieldSelector := fields.Set{GetPodHostFieldLabel(node.TypeMeta.APIVersion): node.ObjectMeta.Name}.AsSelector()
 
 	// Filter all pods that satisfies pod label selector and belongs to the given node
-	pods, err := l.Options.Kclient.Pods(kapi.NamespaceAll).List(labelSelector, fieldSelector)
+	pods, err := l.Options.Kclient.Pods(kapi.NamespaceAll).List(kapi.ListOptions{LabelSelector: labelSelector, FieldSelector: fieldSelector})
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(l.Options.Writer, "\nListing matched pods on node: ", node.ObjectMeta.Name, "\n\n")
+	fmt.Fprint(l.Options.ErrWriter, "\nListing matched pods on node: ", node.ObjectMeta.Name, "\n\n")
 	printer.PrintObj(pods, l.Options.Writer)
 
 	return err

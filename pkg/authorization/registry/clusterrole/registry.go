@@ -1,10 +1,8 @@
-package role
+package clusterrole
 
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 )
@@ -12,7 +10,7 @@ import (
 // Registry is an interface for things that know how to store ClusterRoles.
 type Registry interface {
 	// ListClusterRoles obtains list of policyClusterRoles that match a selector.
-	ListClusterRoles(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterRoleList, error)
+	ListClusterRoles(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterRoleList, error)
 	// GetClusterRole retrieves a specific policyClusterRole.
 	GetClusterRole(ctx kapi.Context, id string) (*authorizationapi.ClusterRole, error)
 	// CreateClusterRole creates a new policyClusterRole.
@@ -29,6 +27,11 @@ type Storage interface {
 	rest.Lister
 	rest.CreaterUpdater
 	rest.GracefulDeleter
+
+	// CreateRoleWithEscalation creates a new policyRole.  Skipping the escalation check should only be done during bootstrapping procedures where no users are currently bound.
+	CreateRoleWithEscalation(ctx kapi.Context, policyRole *authorizationapi.Role) (*authorizationapi.Role, error)
+	// UpdateRoleWithEscalation updates a policyRole.  Skipping the escalation check should only be done during bootstrapping procedures where no users are currently bound.
+	UpdateRoleWithEscalation(ctx kapi.Context, policyRole *authorizationapi.Role) (*authorizationapi.Role, bool, error)
 }
 
 // storage puts strong typing around storage calls
@@ -42,8 +45,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListClusterRoles(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterRoleList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListClusterRoles(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterRoleList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +64,7 @@ func (s *storage) CreateClusterRole(ctx kapi.Context, node *authorizationapi.Clu
 }
 
 func (s *storage) UpdateClusterRole(ctx kapi.Context, node *authorizationapi.ClusterRole) (*authorizationapi.ClusterRole, bool, error) {
-	obj, created, err := s.Update(ctx, node)
+	obj, created, err := s.Update(ctx, node.Name, rest.DefaultUpdatedObjectInfo(node, kapi.Scheme))
 	if err != nil {
 		return nil, created, err
 	}

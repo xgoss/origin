@@ -7,11 +7,16 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/golang/glog"
 
 	"github.com/openshift/origin/pkg/cmd/util"
 )
+
+func BasicEnabled() bool {
+	return true
+}
 
 type BasicChallengeHandler struct {
 	// Host is the server being authenticated to. Used only for displaying messages when prompting for username/password
@@ -37,13 +42,13 @@ func (c *BasicChallengeHandler) CanHandle(headers http.Header) bool {
 	isBasic, _ := basicRealm(headers)
 	return isBasic
 }
-func (c *BasicChallengeHandler) HandleChallenge(headers http.Header) (http.Header, bool, error) {
+func (c *BasicChallengeHandler) HandleChallenge(requestURL string, headers http.Header) (http.Header, bool, error) {
 	if c.prompted {
 		glog.V(2).Info("already prompted for challenge, won't prompt again")
 		return nil, false, nil
 	}
-	if c.Reader == nil && c.handled {
-		glog.V(2).Info("already handled basic challenge, no reader to alter inputs")
+	if c.handled {
+		glog.V(2).Info("already handled basic challenge")
 		return nil, false, nil
 	}
 
@@ -77,6 +82,11 @@ func (c *BasicChallengeHandler) HandleChallenge(headers http.Header) (http.Heade
 	}
 
 	if len(username) > 0 || len(password) > 0 {
+		// Basic auth does not support usernames containing colons
+		// http://tools.ietf.org/html/rfc2617#section-2
+		if strings.Contains(username, ":") {
+			return nil, false, fmt.Errorf("username %s is invalid for basic auth", username)
+		}
 		responseHeaders := http.Header{}
 		responseHeaders.Set("Authorization", getBasicHeader(username, password))
 		// remember so we don't re-handle non-interactively
@@ -86,6 +96,13 @@ func (c *BasicChallengeHandler) HandleChallenge(headers http.Header) (http.Heade
 
 	glog.V(2).Info("no username or password available")
 	return nil, false, nil
+}
+func (c *BasicChallengeHandler) CompleteChallenge(requestURL string, headers http.Header) error {
+	return nil
+}
+
+func (c *BasicChallengeHandler) Release() error {
+	return nil
 }
 
 // if any of these match a WWW-Authenticate header, it is a basic challenge

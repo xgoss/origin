@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/util"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 )
 
 // ExtensionScriptsHandler concatenates and serves extension JavaScript files as one HTTP response.
@@ -30,7 +30,7 @@ func concatHandler(files []string, developmentMode bool, mediaType, separator st
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			bytes, err := concatAll(files, separator)
 			if err != nil {
-				util.HandleError(fmt.Errorf("Error serving extension content: %v", err))
+				utilruntime.HandleError(fmt.Errorf("Error serving extension content: %v", err))
 				http.Error(w, "Internal server error", http.StatusInternalServerError)
 			}
 			serve(w, r, bytes, mediaType, "")
@@ -117,7 +117,7 @@ func serve(w http.ResponseWriter, r *http.Request, bytes []byte, mediaType, hash
 	w.Header().Set("Content-Type", mediaType)
 	_, err := w.Write(bytes)
 	if err != nil {
-		util.HandleError(fmt.Errorf("Error serving extension content: %v", err))
+		utilruntime.HandleError(fmt.Errorf("Error serving extension content: %v", err))
 	}
 }
 
@@ -144,7 +144,7 @@ func serveIndex(w http.ResponseWriter, r *http.Request, path, base string) {
 	content = bytes.Replace(content, []byte(`<base href="/">`), []byte(fmt.Sprintf(`<base href="%s">`, base)), 1)
 
 	w.Header().Add("Cache-Control", "no-cache, no-store")
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
 
 	w.Write(content)
 }
@@ -175,7 +175,7 @@ func serveExtensionFile(w http.ResponseWriter, r *http.Request, sourceDir, conte
 				return
 			}
 
-			util.HandleError(fmt.Errorf("Error serving extension file: %v", err))
+			utilruntime.HandleError(fmt.Errorf("Error serving extension file: %v", err))
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}

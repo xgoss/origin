@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -12,12 +10,11 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
-	"k8s.io/kubernetes/pkg/controller/serviceaccount"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/serviceaccount"
 	"k8s.io/kubernetes/pkg/util/wait"
 	serviceaccountadmission "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 
@@ -28,6 +25,8 @@ import (
 )
 
 func TestServiceAccountAuthorization(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	saNamespace := api.NamespaceDefault
 	saName := serviceaccountadmission.DefaultServiceAccountName
 	saUsername := serviceaccount.MakeUsername(saNamespace, saName)
@@ -58,11 +57,10 @@ func TestServiceAccountAuthorization(t *testing.T) {
 	if len(saToken) == 0 {
 		t.Fatalf("token was not created")
 	}
-	cluster1SAClientConfig := kclient.Config{
+	cluster1SAClientConfig := restclient.Config{
 		Host:        cluster1AdminConfig.Host,
-		Prefix:      cluster1AdminConfig.Prefix,
 		BearerToken: saToken,
-		TLSClientConfig: kclient.TLSClientConfig{
+		TLSClientConfig: restclient.TLSClientConfig{
 			CAFile: cluster1AdminConfig.CAFile,
 			CAData: cluster1AdminConfig.CAData,
 		},
@@ -88,7 +86,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 		t.Fatalf("could not add role to service account")
 	}
 
-	// Give the policy cache a second to catch it's breath
+	// Give the policy cache a second to catch its breath
 	time.Sleep(time.Second)
 
 	// Make sure the service account now has access
@@ -134,7 +132,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 	cluster2MasterConfig.DNSConfig = nil
 
 	// Start cluster 2 (without clearing etcd) and get admin client configs and clients
-	cluster2Options := testserver.TestOptions{DeleteAllEtcdKeys: false}
+	cluster2Options := testserver.TestOptions{EnableControllers: true}
 	cluster2AdminConfigFile, err := testserver.StartConfiguredMasterWithOptions(cluster2MasterConfig, cluster2Options)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -175,7 +173,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 		t.Fatalf("could not add role to service account")
 	}
 
-	// Give the policy cache a second to catch it's breath
+	// Give the policy cache a second to catch its breath
 	time.Sleep(time.Second)
 
 	// Make sure the service account now has access to cluster2
@@ -190,7 +188,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 	}
 }
 
-func writeClientConfigToKubeConfig(config kclient.Config, path string) error {
+func writeClientConfigToKubeConfig(config restclient.Config, path string) error {
 	kubeConfig := &clientcmdapi.Config{
 		Clusters:       map[string]*clientcmdapi.Cluster{"myserver": {Server: config.Host, CertificateAuthority: config.CAFile, CertificateAuthorityData: config.CAData}},
 		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"myuser": {Token: config.BearerToken}},
@@ -221,7 +219,7 @@ func waitForServiceAccountToken(client *kclient.Client, ns, name string, attempt
 }
 
 func getServiceAccountToken(client *kclient.Client, ns, name string) (string, error) {
-	secrets, err := client.Secrets(ns).List(labels.Everything(), fields.Everything())
+	secrets, err := client.Secrets(ns).List(api.ListOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -248,6 +246,8 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	saNamespace := api.NamespaceDefault
 	saName := serviceaccountadmission.DefaultServiceAccountName
 
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	_, clusterAdminConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -291,7 +291,7 @@ func waitForServiceAccountPullSecret(client *kclient.Client, ns, name string, at
 }
 
 func getServiceAccountPullSecret(client *kclient.Client, ns, name string) (string, error) {
-	secrets, err := client.Secrets(ns).List(labels.Everything(), fields.Everything())
+	secrets, err := client.Secrets(ns).List(api.ListOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -304,6 +304,8 @@ func getServiceAccountPullSecret(client *kclient.Client, ns, name string) (strin
 }
 
 func TestEnforcingServiceAccount(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	masterConfig, err := testserver.DefaultMasterOptions()
 	masterConfig.ServiceAccountConfig.LimitSecretReferences = false
 	if err != nil {
@@ -375,7 +377,10 @@ func TestEnforcingServiceAccount(t *testing.T) {
 
 	time.Sleep(5)
 
-	_, err = clusterAdminKubeClient.ServiceAccounts(api.NamespaceDefault).Update(sa)
+	err = kclient.RetryOnConflict(kclient.DefaultBackoff, func() error {
+		_, err := clusterAdminKubeClient.ServiceAccounts(api.NamespaceDefault).Update(sa)
+		return err
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

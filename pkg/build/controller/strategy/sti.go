@@ -2,23 +2,20 @@ package strategy
 
 import (
 	"fmt"
-	"io/ioutil"
+	"strings"
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/admission"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/controller/serviceaccount"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
-	buildutil "github.com/openshift/origin/pkg/build/util"
-	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 )
 
 // SourceBuildStrategy creates STI(source to image) builds
 type SourceBuildStrategy struct {
-	Image                string
-	TempDirectoryCreator TempDirectoryCreator
+	Image string
 	// Codec is the codec to use for encoding the output pod.
 	// IMPORTANT: This may break backwards compatibility when
 	// it changes.
@@ -26,32 +23,29 @@ type SourceBuildStrategy struct {
 	AdmissionControl admission.Interface
 }
 
-type TempDirectoryCreator interface {
-	CreateTempDirectory() (string, error)
+// DefaultDropCaps is the list of capabilities to drop if the current user cannot run as root
+var DefaultDropCaps = []string{
+	"KILL",
+	"MKNOD",
+	"SETGID",
+	"SETUID",
+	"SYS_CHROOT",
 }
-
-type tempDirectoryCreator struct{}
-
-func (tc *tempDirectoryCreator) CreateTempDirectory() (string, error) {
-	return ioutil.TempDir("", "stibuild")
-}
-
-var STITempDirectoryCreator = &tempDirectoryCreator{}
 
 // CreateBuildPod creates a pod that will execute the STI build
 // TODO: Make the Pod definition configurable
 func (bs *SourceBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod, error) {
-	data, err := bs.Codec.Encode(build)
+	data, err := runtime.Encode(bs.Codec, build)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the Build %s/%s: %v", build.Namespace, build.Name, err)
 	}
 
 	containerEnv := []kapi.EnvVar{
 		{Name: "BUILD", Value: string(data)},
-		{Name: "BUILD_LOGLEVEL", Value: fmt.Sprintf("%d", cmdutil.GetLogLevel())},
 	}
 
 	addSourceEnvVars(build.Spec.Source, &containerEnv)
+	addOriginVersionVar(&containerEnv)
 
 	strategy := build.Spec.Strategy.SourceStrategy
 	if len(strategy.Env) > 0 {
@@ -60,13 +54,18 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 
 	// check if can run container as root
 	if !bs.canRunAsRoot(build) {
-		containerEnv = append(containerEnv, kapi.EnvVar{Name: "ALLOWED_UIDS", Value: "1-"})
+		// TODO: both AllowedUIDs and DropCapabilities should
+		// be controlled via the SCC that's in effect for the build service account
+		// For now, both are hard-coded based on whether the build service account can
+		// run as root.
+		containerEnv = append(containerEnv, kapi.EnvVar{Name: buildapi.AllowedUIDs, Value: "1-"})
+		containerEnv = append(containerEnv, kapi.EnvVar{Name: buildapi.DropCapabilities, Value: strings.Join(DefaultDropCaps, ",")})
 	}
 
 	privileged := true
 	pod := &kapi.Pod{
 		ObjectMeta: kapi.ObjectMeta{
-			Name:      buildutil.GetBuildPodName(build),
+			Name:      buildapi.GetBuildPodName(build),
 			Namespace: build.Namespace,
 			Labels:    getPodLabels(build),
 		},
@@ -81,7 +80,7 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 					SecurityContext: &kapi.SecurityContext{
 						Privileged: &privileged,
 					},
-					Args: []string{"--loglevel=" + getContainerVerbosity(containerEnv)},
+					Args: []string{},
 				},
 			},
 			RestartPolicy: kapi.RestartPolicyNever,
@@ -90,9 +89,18 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 	pod.Spec.Containers[0].ImagePullPolicy = kapi.PullIfNotPresent
 	pod.Spec.Containers[0].Resources = build.Spec.Resources
 
+	if build.Spec.CompletionDeadlineSeconds != nil {
+		pod.Spec.ActiveDeadlineSeconds = build.Spec.CompletionDeadlineSeconds
+	}
+	if build.Spec.Source.Binary != nil {
+		pod.Spec.Containers[0].Stdin = true
+		pod.Spec.Containers[0].StdinOnce = true
+	}
+
 	setupDockerSocket(pod)
-	setupDockerSecrets(pod, build.Spec.Output.PushSecret, strategy.PullSecret)
+	setupDockerSecrets(pod, build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
 	setupSourceSecrets(pod, build.Spec.Source.SourceSecret)
+	setupSecrets(pod, build.Spec.Source.Secrets)
 	return pod, nil
 }
 
@@ -101,7 +109,7 @@ func (bs *SourceBuildStrategy) canRunAsRoot(build *buildapi.Build) bool {
 	rootUser = 0
 	pod := &kapi.Pod{
 		ObjectMeta: kapi.ObjectMeta{
-			Name:      buildutil.GetBuildPodName(build),
+			Name:      buildapi.GetBuildPodName(build),
 			Namespace: build.Namespace,
 		},
 		Spec: kapi.PodSpec{
@@ -119,7 +127,7 @@ func (bs *SourceBuildStrategy) canRunAsRoot(build *buildapi.Build) bool {
 		},
 	}
 	userInfo := serviceaccount.UserInfo(build.Namespace, build.Spec.ServiceAccount, "")
-	attrs := admission.NewAttributesRecord(pod, "Pod", pod.Namespace, pod.Name, "pods", "", admission.Create, userInfo)
+	attrs := admission.NewAttributesRecord(pod, pod, kapi.Kind("Pod").WithVersion(""), pod.Namespace, pod.Name, kapi.Resource("pods").WithVersion(""), "", admission.Create, userInfo)
 	err := bs.AdmissionControl.Admit(attrs)
 	if err != nil {
 		glog.V(2).Infof("Admit for root user returned error: %v", err)

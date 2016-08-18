@@ -6,24 +6,23 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	kapierror "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	kerrors "k8s.io/kubernetes/pkg/util/errors"
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	authorizationinterfaces "github.com/openshift/origin/pkg/authorization/interfaces"
+	"github.com/openshift/origin/pkg/client"
 )
 
 type DefaultRuleResolver struct {
-	policyGetter  PolicyGetter
-	bindingLister BindingLister
+	policyGetter  client.PoliciesListerNamespacer
+	bindingLister client.PolicyBindingsListerNamespacer
 
-	clusterPolicyGetter  ClusterPolicyGetter
-	clusterBindingLister ClusterBindingLister
+	clusterPolicyGetter  client.ClusterPolicyLister
+	clusterBindingLister client.ClusterPolicyBindingLister
 }
 
-func NewDefaultRuleResolver(policyGetter PolicyGetter, bindingLister BindingLister, clusterPolicyGetter ClusterPolicyGetter, clusterBindingLister ClusterBindingLister) *DefaultRuleResolver {
+func NewDefaultRuleResolver(policyGetter client.PoliciesListerNamespacer, bindingLister client.PolicyBindingsListerNamespacer, clusterPolicyGetter client.ClusterPolicyLister, clusterBindingLister client.ClusterPolicyBindingLister) *DefaultRuleResolver {
 	return &DefaultRuleResolver{policyGetter, bindingLister, clusterPolicyGetter, clusterBindingLister}
 }
 
@@ -36,27 +35,11 @@ type AuthorizationRuleResolver interface {
 	GetEffectivePolicyRules(ctx kapi.Context) ([]authorizationapi.PolicyRule, error)
 }
 
-type PolicyGetter interface {
-	GetPolicy(ctx kapi.Context, id string) (*authorizationapi.Policy, error)
-}
-
-type BindingLister interface {
-	ListPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyBindingList, error)
-}
-
-type ClusterPolicyGetter interface {
-	GetClusterPolicy(ctx kapi.Context, id string) (*authorizationapi.ClusterPolicy, error)
-}
-
-type ClusterBindingLister interface {
-	ListClusterPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterPolicyBindingList, error)
-}
-
 func (a *DefaultRuleResolver) GetRoleBindings(ctx kapi.Context) ([]authorizationinterfaces.RoleBinding, error) {
 	namespace := kapi.NamespaceValue(ctx)
 
 	if len(namespace) == 0 {
-		policyBindingList, err := a.clusterBindingLister.ListClusterPolicyBindings(ctx, labels.Everything(), fields.Everything())
+		policyBindingList, err := a.clusterBindingLister.List(kapi.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +53,11 @@ func (a *DefaultRuleResolver) GetRoleBindings(ctx kapi.Context) ([]authorization
 		return ret, nil
 	}
 
-	policyBindingList, err := a.bindingLister.ListPolicyBindings(ctx, labels.Everything(), fields.Everything())
+	if a.bindingLister == nil {
+		return nil, nil
+	}
+
+	policyBindingList, err := a.bindingLister.PolicyBindings(namespace).List(kapi.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -87,13 +74,11 @@ func (a *DefaultRuleResolver) GetRoleBindings(ctx kapi.Context) ([]authorization
 func (a *DefaultRuleResolver) GetRole(roleBinding authorizationinterfaces.RoleBinding) (authorizationinterfaces.Role, error) {
 	namespace := roleBinding.RoleRef().Namespace
 	name := roleBinding.RoleRef().Name
-	ctx := kapi.WithNamespace(kapi.NewContext(), namespace)
 
 	if len(namespace) == 0 {
-
-		policy, err := a.clusterPolicyGetter.GetClusterPolicy(ctx, authorizationapi.PolicyName)
+		policy, err := a.clusterPolicyGetter.Get(authorizationapi.PolicyName)
 		if kapierror.IsNotFound(err) {
-			return nil, kapierror.NewNotFound("role", name)
+			return nil, kapierror.NewNotFound(authorizationapi.Resource("role"), name)
 		}
 		if err != nil {
 			return nil, err
@@ -101,15 +86,19 @@ func (a *DefaultRuleResolver) GetRole(roleBinding authorizationinterfaces.RoleBi
 
 		role, exists := policy.Roles[name]
 		if !exists {
-			return nil, kapierror.NewNotFound("role", name)
+			return nil, kapierror.NewNotFound(authorizationapi.Resource("role"), name)
 		}
 
 		return authorizationinterfaces.NewClusterRoleAdapter(role), nil
 	}
 
-	policy, err := a.policyGetter.GetPolicy(ctx, authorizationapi.PolicyName)
+	if a.policyGetter == nil {
+		return nil, kapierror.NewNotFound(authorizationapi.Resource("role"), name)
+	}
+
+	policy, err := a.policyGetter.Policies(namespace).Get(authorizationapi.PolicyName)
 	if kapierror.IsNotFound(err) {
-		return nil, kapierror.NewNotFound("role", name)
+		return nil, kapierror.NewNotFound(authorizationapi.Resource("role"), name)
 	}
 	if err != nil {
 		return nil, err
@@ -117,7 +106,7 @@ func (a *DefaultRuleResolver) GetRole(roleBinding authorizationinterfaces.RoleBi
 
 	role, exists := policy.Roles[name]
 	if !exists {
-		return nil, kapierror.NewNotFound("role", name)
+		return nil, kapierror.NewNotFound(authorizationapi.Resource("role"), name)
 	}
 
 	return authorizationinterfaces.NewLocalRoleAdapter(role), nil
@@ -140,7 +129,7 @@ func (a *DefaultRuleResolver) GetEffectivePolicyRules(ctx kapi.Context) ([]autho
 	errs := []error{}
 	rules := make([]authorizationapi.PolicyRule, 0, len(roleBindings))
 	for _, roleBinding := range roleBindings {
-		if !appliesToUser(roleBinding.Users(), roleBinding.Groups(), user) {
+		if !roleBinding.AppliesToUser(user) {
 			continue
 		}
 

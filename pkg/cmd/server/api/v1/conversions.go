@@ -1,17 +1,21 @@
 package v1
 
 import (
+	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/conversion"
+	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util/sets"
 
-	newer "github.com/openshift/origin/pkg/cmd/server/api"
+	"github.com/openshift/origin/pkg/api/extension"
+	internal "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 )
 
-func init() {
-	err := newer.Scheme.AddDefaultingFuncs(
+func addDefaultingFuncs(scheme *runtime.Scheme) {
+	err := scheme.AddDefaultingFuncs(
 		func(obj *MasterConfig) {
 			if len(obj.APILevels) == 0 {
-				obj.APILevels = newer.DefaultOpenShiftAPILevels
+				obj.APILevels = internal.DefaultOpenShiftAPILevels
 			}
 			if len(obj.Controllers) == 0 {
 				obj.Controllers = ControllersAll
@@ -28,6 +32,36 @@ func init() {
 			if len(obj.RoutingConfig.Subdomain) == 0 {
 				obj.RoutingConfig.Subdomain = "router.default.svc.cluster.local"
 			}
+			if len(obj.JenkinsPipelineConfig.TemplateNamespace) == 0 {
+				obj.JenkinsPipelineConfig.TemplateNamespace = "openshift"
+			}
+			if len(obj.JenkinsPipelineConfig.TemplateName) == 0 {
+				obj.JenkinsPipelineConfig.TemplateName = "jenkins"
+			}
+			if len(obj.JenkinsPipelineConfig.ServiceName) == 0 {
+				obj.JenkinsPipelineConfig.ServiceName = "jenkins"
+			}
+			if obj.JenkinsPipelineConfig.Enabled == nil {
+				v := true
+				obj.JenkinsPipelineConfig.Enabled = &v
+			}
+
+			if obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides == nil {
+				obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides = &ClientConnectionOverrides{
+					// historical values
+					QPS:   150.0,
+					Burst: 300,
+				}
+			}
+			setDefault_ClientConnectionOverrides(obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides)
+			if obj.MasterClients.ExternalKubernetesClientConnectionOverrides == nil {
+				obj.MasterClients.ExternalKubernetesClientConnectionOverrides = &ClientConnectionOverrides{
+					// historical values
+					QPS:   100.0,
+					Burst: 200,
+				}
+			}
+			setDefault_ClientConnectionOverrides(obj.MasterClients.ExternalKubernetesClientConnectionOverrides)
 
 			// Populate the new NetworkConfig.ServiceNetworkCIDR field from the KubernetesMasterConfig.ServicesSubnet field if needed
 			if len(obj.NetworkConfig.ServiceNetworkCIDR) == 0 {
@@ -39,13 +73,21 @@ func init() {
 					obj.NetworkConfig.ServiceNetworkCIDR = "10.0.0.0/24"
 				}
 			}
+
+			// Historically, the clientCA was incorrectly used as the master's server cert CA bundle
+			// If missing from the config, migrate the ClientCA into that field
+			if obj.OAuthConfig != nil && obj.OAuthConfig.MasterCA == nil {
+				s := obj.ServingInfo.ClientCA
+				// The final value of OAuthConfig.MasterCA should never be nil
+				obj.OAuthConfig.MasterCA = &s
+			}
 		},
 		func(obj *KubernetesMasterConfig) {
 			if obj.MasterCount == 0 {
 				obj.MasterCount = 1
 			}
 			if len(obj.APILevels) == 0 {
-				obj.APILevels = newer.DefaultKubernetesAPILevels
+				obj.APILevels = internal.DefaultKubernetesAPILevels
 			}
 			if len(obj.ServicesNodePortRange) == 0 {
 				obj.ServicesNodePortRange = "30000-32767"
@@ -55,6 +97,15 @@ func init() {
 			}
 		},
 		func(obj *NodeConfig) {
+			if obj.MasterClientConnectionOverrides == nil {
+				obj.MasterClientConnectionOverrides = &ClientConnectionOverrides{
+					// historical values
+					QPS:   10.0,
+					Burst: 20,
+				}
+			}
+			setDefault_ClientConnectionOverrides(obj.MasterClientConnectionOverrides)
+
 			// Defaults/migrations for NetworkConfig
 			if len(obj.NetworkConfig.NetworkPluginName) == 0 {
 				obj.NetworkConfig.NetworkPluginName = obj.DeprecatedNetworkPluginName
@@ -63,7 +114,7 @@ func init() {
 				obj.NetworkConfig.MTU = 1450
 			}
 			if len(obj.IPTablesSyncPeriod) == 0 {
-				obj.IPTablesSyncPeriod = "5s"
+				obj.IPTablesSyncPeriod = "30s"
 			}
 
 			// Auth cache defaults
@@ -79,6 +130,12 @@ func init() {
 			if obj.AuthConfig.AuthorizationCacheSize == 0 {
 				obj.AuthConfig.AuthorizationCacheSize = 1000
 			}
+
+			// EnableUnidling by default
+			if obj.EnableUnidling == nil {
+				v := true
+				obj.EnableUnidling = &v
+			}
 		},
 		func(obj *EtcdStorageConfig) {
 			if len(obj.KubernetesStorageVersion) == 0 {
@@ -88,7 +145,7 @@ func init() {
 				obj.KubernetesStoragePrefix = "kubernetes.io"
 			}
 			if len(obj.OpenShiftStorageVersion) == 0 {
-				obj.OpenShiftStorageVersion = "v1"
+				obj.OpenShiftStorageVersion = internal.DefaultOpenShiftStorageVersionLevel
 			}
 			if len(obj.OpenShiftStoragePrefix) == 0 {
 				obj.OpenShiftStoragePrefix = "openshift.io"
@@ -102,6 +159,17 @@ func init() {
 		func(obj *ServingInfo) {
 			if len(obj.BindNetwork) == 0 {
 				obj.BindNetwork = "tcp4"
+			}
+		},
+		func(obj *ImagePolicyConfig) {
+			if obj.MaxImagesBulkImportedPerRepository == 0 {
+				obj.MaxImagesBulkImportedPerRepository = 5
+			}
+			if obj.MaxScheduledImageImportsPerMinute == 0 {
+				obj.MaxScheduledImageImportsPerMinute = 60
+			}
+			if obj.ScheduledImageImportMinimumIntervalSeconds == 0 {
+				obj.ScheduledImageImportMinimumIntervalSeconds = 15 * 60
 			}
 		},
 		func(obj *DNSConfig) {
@@ -120,79 +188,222 @@ func init() {
 				obj.MCSLabelsPerProject = 5
 			}
 		},
+		func(obj *IdentityProvider) {
+			if len(obj.MappingMethod) == 0 {
+				// By default, only let one identity provider authenticate a particular user
+				// If multiple identity providers collide, the second one in will fail to auth
+				// The admin can set this to "add" if they want to allow new identities to join existing users
+				obj.MappingMethod = "claim"
+			}
+		},
+		func(obj *GrantConfig) {
+			if len(obj.ServiceAccountMethod) == 0 {
+				obj.ServiceAccountMethod = "prompt"
+			}
+		},
 	)
 	if err != nil {
 		// If one of the conversion functions is malformed, detect it immediately.
 		panic(err)
 	}
-	err = newer.Scheme.AddConversionFuncs(
-		func(in *NodeConfig, out *newer.NodeConfig, s conversion.Scope) error {
+}
+
+func addConversionFuncs(scheme *runtime.Scheme) {
+	err := scheme.AddConversionFuncs(
+		convert_runtime_Object_To_runtime_RawExtension,
+		convert_runtime_RawExtension_To_runtime_Object,
+
+		func(in *NodeConfig, out *internal.NodeConfig, s conversion.Scope) error {
 			return s.DefaultConvert(in, out, conversion.IgnoreMissingFields)
 		},
-		func(in *newer.NodeConfig, out *NodeConfig, s conversion.Scope) error {
+		func(in *internal.NodeConfig, out *NodeConfig, s conversion.Scope) error {
 			return s.DefaultConvert(in, out, conversion.IgnoreMissingFields)
 		},
-		func(in *ServingInfo, out *newer.ServingInfo, s conversion.Scope) error {
-			out.BindAddress = in.BindAddress
-			out.BindNetwork = in.BindNetwork
-			out.ClientCA = in.ClientCA
+		func(in *KubernetesMasterConfig, out *internal.KubernetesMasterConfig, s conversion.Scope) error {
+			if err := s.DefaultConvert(in, out, conversion.IgnoreMissingFields); err != nil {
+				return err
+			}
+
+			if out.DisabledAPIGroupVersions == nil {
+				out.DisabledAPIGroupVersions = map[string][]string{}
+			}
+
+			// the APILevels (whitelist) needs to be converted into an internal blacklist
+			if len(in.APILevels) == 0 {
+				out.DisabledAPIGroupVersions[internal.APIGroupKube] = []string{"*"}
+
+			} else {
+				availableLevels := internal.KubeAPIGroupsToAllowedVersions[internal.APIGroupKube]
+				whitelistedLevels := sets.NewString(in.APILevels...)
+				blacklistedLevels := []string{}
+
+				for _, curr := range availableLevels {
+					if !whitelistedLevels.Has(curr) {
+						blacklistedLevels = append(blacklistedLevels, curr)
+					}
+				}
+
+				if len(blacklistedLevels) > 0 {
+					out.DisabledAPIGroupVersions[internal.APIGroupKube] = blacklistedLevels
+				}
+			}
+
+			return nil
+		},
+		func(in *internal.KubernetesMasterConfig, out *KubernetesMasterConfig, s conversion.Scope) error {
+			// internal doesn't have all fields: APILevels
+			return s.DefaultConvert(in, out, conversion.IgnoreMissingFields)
+		},
+		func(in *ServingInfo, out *internal.ServingInfo, s conversion.Scope) error {
+			if err := s.DefaultConvert(in, out, conversion.IgnoreMissingFields); err != nil {
+				return err
+			}
 			out.ServerCert.CertFile = in.CertFile
 			out.ServerCert.KeyFile = in.KeyFile
 			return nil
 		},
-		func(in *newer.ServingInfo, out *ServingInfo, s conversion.Scope) error {
-			out.BindAddress = in.BindAddress
-			out.BindNetwork = in.BindNetwork
-			out.ClientCA = in.ClientCA
+		func(in *internal.ServingInfo, out *ServingInfo, s conversion.Scope) error {
+			if err := s.DefaultConvert(in, out, conversion.IgnoreMissingFields); err != nil {
+				return err
+			}
 			out.CertFile = in.ServerCert.CertFile
 			out.KeyFile = in.ServerCert.KeyFile
 			return nil
 		},
-		func(in *RemoteConnectionInfo, out *newer.RemoteConnectionInfo, s conversion.Scope) error {
+		func(in *RemoteConnectionInfo, out *internal.RemoteConnectionInfo, s conversion.Scope) error {
 			out.URL = in.URL
 			out.CA = in.CA
 			out.ClientCert.CertFile = in.CertFile
 			out.ClientCert.KeyFile = in.KeyFile
 			return nil
 		},
-		func(in *newer.RemoteConnectionInfo, out *RemoteConnectionInfo, s conversion.Scope) error {
+		func(in *internal.RemoteConnectionInfo, out *RemoteConnectionInfo, s conversion.Scope) error {
 			out.URL = in.URL
 			out.CA = in.CA
 			out.CertFile = in.ClientCert.CertFile
 			out.KeyFile = in.ClientCert.KeyFile
 			return nil
 		},
-		func(in *EtcdConnectionInfo, out *newer.EtcdConnectionInfo, s conversion.Scope) error {
+		func(in *EtcdConnectionInfo, out *internal.EtcdConnectionInfo, s conversion.Scope) error {
 			out.URLs = in.URLs
 			out.CA = in.CA
 			out.ClientCert.CertFile = in.CertFile
 			out.ClientCert.KeyFile = in.KeyFile
 			return nil
 		},
-		func(in *newer.EtcdConnectionInfo, out *EtcdConnectionInfo, s conversion.Scope) error {
+		func(in *internal.EtcdConnectionInfo, out *EtcdConnectionInfo, s conversion.Scope) error {
 			out.URLs = in.URLs
 			out.CA = in.CA
 			out.CertFile = in.ClientCert.CertFile
 			out.KeyFile = in.ClientCert.KeyFile
 			return nil
 		},
-		func(in *KubeletConnectionInfo, out *newer.KubeletConnectionInfo, s conversion.Scope) error {
+		func(in *KubeletConnectionInfo, out *internal.KubeletConnectionInfo, s conversion.Scope) error {
 			out.Port = in.Port
 			out.CA = in.CA
 			out.ClientCert.CertFile = in.CertFile
 			out.ClientCert.KeyFile = in.KeyFile
 			return nil
 		},
-		func(in *newer.KubeletConnectionInfo, out *KubeletConnectionInfo, s conversion.Scope) error {
+		func(in *internal.KubeletConnectionInfo, out *KubeletConnectionInfo, s conversion.Scope) error {
 			out.Port = in.Port
 			out.CA = in.CA
 			out.CertFile = in.ClientCert.CertFile
 			out.KeyFile = in.ClientCert.KeyFile
 			return nil
 		},
+		func(in *MasterVolumeConfig, out *internal.MasterVolumeConfig, s conversion.Scope) error {
+			out.DynamicProvisioningEnabled = (in.DynamicProvisioningEnabled == nil) || (*in.DynamicProvisioningEnabled)
+			return nil
+		},
+		func(in *internal.MasterVolumeConfig, out *MasterVolumeConfig, s conversion.Scope) error {
+			enabled := in.DynamicProvisioningEnabled
+			out.DynamicProvisioningEnabled = &enabled
+			return nil
+		},
+
+		api.Convert_resource_Quantity_To_resource_Quantity,
+		api.Convert_bool_To_Pointer_bool,
+		api.Convert_Pointer_bool_To_bool,
 	)
 	if err != nil {
 		// If one of the conversion functions is malformed, detect it immediately.
 		panic(err)
 	}
+}
+
+// convert_runtime_Object_To_runtime_RawExtension attempts to convert runtime.Objects to the appropriate target.
+func convert_runtime_Object_To_runtime_RawExtension(in *runtime.Object, out *runtime.RawExtension, s conversion.Scope) error {
+	return extension.Convert_runtime_Object_To_runtime_RawExtension(internal.Scheme, in, out, s)
+}
+
+// convert_runtime_RawExtension_To_runtime_Object attempts to convert an incoming object into the
+// appropriate output type.
+func convert_runtime_RawExtension_To_runtime_Object(in *runtime.RawExtension, out *runtime.Object, s conversion.Scope) error {
+	return extension.Convert_runtime_RawExtension_To_runtime_Object(internal.Scheme, in, out, s)
+}
+
+// setDefault_ClientConnectionOverrides defaults a client connection to the pre-1.3 settings of
+// being JSON only. Callers must explicitly opt-in to Protobuf support in 1.3+.
+func setDefault_ClientConnectionOverrides(overrides *ClientConnectionOverrides) {
+	if len(overrides.AcceptContentTypes) == 0 {
+		overrides.AcceptContentTypes = "application/json"
+	}
+	if len(overrides.ContentType) == 0 {
+		overrides.ContentType = "application/json"
+	}
+}
+
+var _ runtime.NestedObjectDecoder = &MasterConfig{}
+
+// DecodeNestedObjects handles encoding RawExtensions on the MasterConfig, ensuring the
+// objects are decoded with the provided decoder.
+func (c *MasterConfig) DecodeNestedObjects(d runtime.Decoder) error {
+	// decoding failures result in a runtime.Unknown object being created in Object and passed
+	// to conversion
+	for k, v := range c.AdmissionConfig.PluginConfig {
+		extension.DecodeNestedRawExtensionOrUnknown(d, &v.Configuration)
+		c.AdmissionConfig.PluginConfig[k] = v
+	}
+	if c.KubernetesMasterConfig != nil {
+		for k, v := range c.KubernetesMasterConfig.AdmissionConfig.PluginConfig {
+			extension.DecodeNestedRawExtensionOrUnknown(d, &v.Configuration)
+			c.KubernetesMasterConfig.AdmissionConfig.PluginConfig[k] = v
+		}
+	}
+	if c.OAuthConfig != nil {
+		for i := range c.OAuthConfig.IdentityProviders {
+			extension.DecodeNestedRawExtensionOrUnknown(d, &c.OAuthConfig.IdentityProviders[i].Provider)
+		}
+	}
+	return nil
+}
+
+var _ runtime.NestedObjectEncoder = &MasterConfig{}
+
+// EncodeNestedObjects handles encoding RawExtensions on the MasterConfig, ensuring the
+// objects are encoded with the provided encoder.
+func (c *MasterConfig) EncodeNestedObjects(e runtime.Encoder) error {
+	for k, v := range c.AdmissionConfig.PluginConfig {
+		if err := extension.EncodeNestedRawExtension(e, &v.Configuration); err != nil {
+			return err
+		}
+		c.AdmissionConfig.PluginConfig[k] = v
+	}
+	if c.KubernetesMasterConfig != nil {
+		for k, v := range c.KubernetesMasterConfig.AdmissionConfig.PluginConfig {
+			if err := extension.EncodeNestedRawExtension(e, &v.Configuration); err != nil {
+				return err
+			}
+			c.KubernetesMasterConfig.AdmissionConfig.PluginConfig[k] = v
+		}
+	}
+	if c.OAuthConfig != nil {
+		for i := range c.OAuthConfig.IdentityProviders {
+			if err := extension.EncodeNestedRawExtension(e, &c.OAuthConfig.IdentityProviders[i].Provider); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

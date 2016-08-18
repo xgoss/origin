@@ -3,12 +3,123 @@ package api
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/util/diff"
 )
+
+func TestParseImageStreamImageName(t *testing.T) {
+	tests := map[string]struct {
+		input        string
+		expectedRepo string
+		expectedId   string
+		expectError  bool
+	}{
+		"empty string": {
+			input:       "",
+			expectError: true,
+		},
+		"one part": {
+			input:       "a",
+			expectError: true,
+		},
+		"more than 2 parts": {
+			input:       "a@b@c",
+			expectError: true,
+		},
+		"empty name part": {
+			input:       "@id",
+			expectError: true,
+		},
+		"empty id part": {
+			input:       "name@",
+			expectError: true,
+		},
+		"valid input": {
+			input:        "repo@id",
+			expectedRepo: "repo",
+			expectedId:   "id",
+			expectError:  false,
+		},
+	}
+
+	for name, test := range tests {
+		repo, id, err := ParseImageStreamImageName(test.input)
+		didError := err != nil
+		if e, a := test.expectError, didError; e != a {
+			t.Errorf("%s: expected error=%t, got=%t: %s", name, e, a, err)
+			continue
+		}
+		if test.expectError {
+			continue
+		}
+		if e, a := test.expectedRepo, repo; e != a {
+			t.Errorf("%s: repo: expected %q, got %q", name, e, a)
+			continue
+		}
+		if e, a := test.expectedId, id; e != a {
+			t.Errorf("%s: id: expected %q, got %q", name, e, a)
+			continue
+		}
+	}
+}
+
+func TestParseImageStreamTagName(t *testing.T) {
+	tests := map[string]struct {
+		id           string
+		expectedName string
+		expectedTag  string
+		expectError  bool
+	}{
+		"empty id": {
+			id:          "",
+			expectError: true,
+		},
+		"missing semicolon": {
+			id:          "hello",
+			expectError: true,
+		},
+		"too many semicolons": {
+			id:          "a:b:c",
+			expectError: true,
+		},
+		"empty name": {
+			id:          ":tag",
+			expectError: true,
+		},
+		"empty tag": {
+			id:          "name",
+			expectError: true,
+		},
+		"happy path": {
+			id:           "name:tag",
+			expectError:  false,
+			expectedName: "name",
+			expectedTag:  "tag",
+		},
+	}
+
+	for description, testCase := range tests {
+		name, tag, err := ParseImageStreamTagName(testCase.id)
+		gotError := err != nil
+		if e, a := testCase.expectError, gotError; e != a {
+			t.Fatalf("%s: expected err: %t, got: %t: %s", description, e, a, err)
+		}
+		if err != nil {
+			continue
+		}
+		if e, a := testCase.expectedName, name; e != a {
+			t.Errorf("%s: name: expected %q, got %q", description, e, a)
+		}
+		if e, a := testCase.expectedTag, tag; e != a {
+			t.Errorf("%s: tag: expected %q, got %q", description, e, a)
+		}
+	}
+}
 
 func TestParseDockerImageReference(t *testing.T) {
 	testCases := []struct {
@@ -54,6 +165,12 @@ func TestParseDockerImageReference(t *testing.T) {
 			Name:      "baz",
 		},
 		{
+			From:      "bar/library/baz",
+			Registry:  "bar",
+			Namespace: "library",
+			Name:      "baz",
+		},
+		{
 			From:      "bar/foo/baz:tag",
 			Registry:  "bar",
 			Namespace: "foo",
@@ -74,10 +191,15 @@ func TestParseDockerImageReference(t *testing.T) {
 			Name:      "baz",
 		},
 		{
-			From:      "bar:5000/baz",
+			From:      "bar:5000/library/baz",
 			Registry:  "bar:5000",
 			Namespace: "library",
 			Name:      "baz",
+		},
+		{
+			From:     "bar:5000/baz",
+			Registry: "bar:5000",
+			Name:     "baz",
 		},
 		{
 			From:      "bar:5000/foo/baz:tag",
@@ -94,15 +216,37 @@ func TestParseDockerImageReference(t *testing.T) {
 			ID:        "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
 		},
 		{
-			From:      "myregistry.io/foo",
-			Registry:  "myregistry.io",
-			Namespace: "library",
-			Name:      "foo",
+			From:     "myregistry.io/foo",
+			Registry: "myregistry.io",
+			Name:     "foo",
 		},
 		{
-			From:      "localhost/bar",
-			Registry:  "localhost",
+			From:     "localhost/bar",
+			Registry: "localhost",
+			Name:     "bar",
+		},
+		{
+			From:      "docker.io/library/myapp",
+			Registry:  "docker.io",
 			Namespace: "library",
+			Name:      "myapp",
+		},
+		{
+			From:      "docker.io/myapp",
+			Registry:  "docker.io",
+			Namespace: DockerDefaultNamespace,
+			Name:      "myapp",
+		},
+		{
+			From:      "docker.io/user/myapp",
+			Registry:  "docker.io",
+			Namespace: "user",
+			Name:      "myapp",
+		},
+		{
+			From:      "index.docker.io/bar",
+			Registry:  "index.docker.io",
+			Namespace: DockerDefaultNamespace,
 			Name:      "bar",
 		},
 		// TODO: test cases if ParseDockerImageReference validates segment length and allowed chars
@@ -119,7 +263,7 @@ func TestParseDockerImageReference(t *testing.T) {
 		// 	// namespace/name == 255 chars with implicit namespace
 		// 	From:      fmt.Sprintf("bar:5000/%s:tag", strings.Repeat("b", 247)),
 		// 	Registry:  "bar:5000",
-		// 	Namespace: "library",
+		// 	Namespace: DockerDefaultNamespace,
 		// 	Name:      strings.Repeat("b", 247),
 		// 	Tag:       "tag",
 		// },
@@ -229,6 +373,79 @@ func TestDockerImageReferenceAsRepository(t *testing.T) {
 
 }
 
+func TestDockerImageReferenceDaemonMinimal(t *testing.T) {
+	testCases := []struct {
+		Registry, Namespace, Name, Tag, ID string
+		Expected                           string
+	}{
+		{
+			Namespace: "library",
+			Name:      "foo",
+			Tag:       "tag",
+			Expected:  "library/foo:tag",
+		},
+		{
+			Namespace: "bar",
+			Name:      "foo",
+			ID:        "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			Expected:  "bar/foo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+		},
+		{
+			Registry:  "bar",
+			Namespace: "foo",
+			Name:      "baz",
+			Expected:  "bar/foo/baz",
+		},
+		{
+			Registry:  "localhost:5000",
+			Namespace: "library",
+			Name:      "bar",
+			Tag:       "latest",
+			Expected:  "localhost:5000/library/bar",
+		},
+		{
+			Registry:  "index.docker.io",
+			Namespace: "foo",
+			Name:      "bar",
+			Tag:       "latest",
+			Expected:  "docker.io/foo/bar",
+		},
+		{
+			Registry:  "registry-1.docker.io",
+			Namespace: "library",
+			Name:      "foo",
+			Tag:       "bar",
+			Expected:  "docker.io/foo:bar",
+		},
+		{
+			Registry:  "docker.io",
+			Namespace: "foo",
+			Name:      "library",
+			Expected:  "docker.io/foo/library",
+		},
+		{
+			Registry: "registry-1.docker.io",
+			Name:     "library",
+			Tag:      "foo",
+			Expected: "docker.io/library:foo",
+		},
+	}
+
+	for i, testCase := range testCases {
+		ref := DockerImageReference{
+			Registry:  testCase.Registry,
+			Namespace: testCase.Namespace,
+			Name:      testCase.Name,
+			Tag:       testCase.Tag,
+			ID:        testCase.ID,
+		}
+		actual := ref.DaemonMinimal().Exact()
+		if e, a := testCase.Expected, actual; e != a {
+			t.Errorf("%d: expected %q, got %q", i, e, a)
+		}
+	}
+}
+
 func TestDockerImageReferenceString(t *testing.T) {
 	testCases := []struct {
 		Registry, Namespace, Name, Tag, ID string
@@ -236,22 +453,22 @@ func TestDockerImageReferenceString(t *testing.T) {
 	}{
 		{
 			Name:     "foo",
-			Expected: "library/foo",
+			Expected: "foo",
 		},
 		{
 			Name:     "foo",
 			Tag:      "tag",
-			Expected: "library/foo:tag",
+			Expected: "foo:tag",
 		},
 		{
 			Name:     "foo",
 			ID:       "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
-			Expected: "library/foo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			Expected: "foo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
 		},
 		{
 			Name:     "foo",
 			ID:       "3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
-			Expected: "library/foo:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			Expected: "foo:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
 		},
 		{
 			Namespace: "bar",
@@ -305,10 +522,35 @@ func TestDockerImageReferenceString(t *testing.T) {
 		},
 		{
 			Registry:  "bar:5000",
+			Namespace: "library",
+			Name:      "baz",
+			Tag:       "tag",
+			Expected:  "bar:5000/library/baz:tag",
+		},
+		{
+			Registry:  "bar:5000",
 			Namespace: "foo",
 			Name:      "baz",
 			ID:        "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
 			Expected:  "bar:5000/foo/baz@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+		},
+		{
+			Registry:  "docker.io",
+			Namespace: "user",
+			Name:      "app",
+			Expected:  "docker.io/user/app",
+		},
+		{
+			Registry: "index.docker.io",
+			Name:     "foo",
+			Expected: "index.docker.io/library/foo",
+		},
+		{
+			Registry:  "index.docker.io",
+			Namespace: "library",
+			Name:      "bar",
+			ID:        "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			Expected:  "index.docker.io/library/bar@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
 		},
 	}
 
@@ -391,6 +633,143 @@ func validImageWithManifestData() Image {
 	}
 }
 
+func validImageWithManifestV2Data() Image {
+	return Image{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "id",
+		},
+		DockerImageConfig: `{
+    "architecture": "amd64",
+    "config": {
+        "AttachStderr": false,
+        "AttachStdin": false,
+        "AttachStdout": false,
+        "Cmd": [
+            "/bin/sh",
+            "-c",
+            "echo hi"
+        ],
+        "Domainname": "",
+        "Entrypoint": null,
+        "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "derived=true",
+            "asdf=true"
+        ],
+        "Hostname": "23304fc829f9",
+        "Image": "sha256:4ab15c48b859c2920dd5224f92aabcd39a52794c5b3cf088fb3bbb438756c246",
+        "Labels": {},
+        "OnBuild": [],
+        "OpenStdin": false,
+        "StdinOnce": false,
+        "Tty": false,
+        "User": "",
+        "Volumes": null,
+        "WorkingDir": ""
+    },
+    "container": "e91032eb0403a61bfe085ff5a5a48e3659e5a6deae9f4d678daa2ae399d5a001",
+    "container_config": {
+        "AttachStderr": false,
+        "AttachStdin": false,
+        "AttachStdout": false,
+        "Cmd": [
+            "/bin/sh",
+            "-c",
+            "#(nop) CMD [\"/bin/sh\" \"-c\" \"echo hi\"]"
+        ],
+        "Domainname": "",
+        "Entrypoint": null,
+        "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "derived=true",
+            "asdf=true"
+        ],
+        "Hostname": "23304fc829f9",
+        "Image": "sha256:4ab15c48b859c2920dd5224f92aabcd39a52794c5b3cf088fb3bbb438756c246",
+        "Labels": {},
+        "OnBuild": [],
+        "OpenStdin": false,
+        "StdinOnce": false,
+        "Tty": false,
+        "User": "",
+        "Volumes": null,
+        "WorkingDir": ""
+    },
+    "created": "2015-02-21T02:11:06.735146646Z",
+    "docker_version": "1.9.0-dev",
+    "history": [
+        {
+            "created": "2015-10-31T22:22:54.690851953Z",
+            "created_by": "/bin/sh -c #(nop) ADD file:a3bc1e842b69636f9df5256c49c5374fb4eef1e281fe3f282c65fb853ee171c5 in /"
+        },
+        {
+            "created": "2015-10-31T22:22:55.613815829Z",
+            "created_by": "/bin/sh -c #(nop) CMD [\"sh\"]"
+        },
+        {
+            "created": "2015-11-04T23:06:30.934316144Z",
+            "created_by": "/bin/sh -c #(nop) ENV derived=true",
+            "empty_layer": true
+        },
+        {
+            "created": "2015-11-04T23:06:31.192097572Z",
+            "created_by": "/bin/sh -c #(nop) ENV asdf=true",
+            "empty_layer": true
+        },
+        {
+            "created": "2015-11-04T23:06:32.083868454Z",
+            "created_by": "/bin/sh -c dd if=/dev/zero of=/file bs=1024 count=1024"
+        },
+        {
+            "created": "2015-11-04T23:06:32.365666163Z",
+            "created_by": "/bin/sh -c #(nop) CMD [\"/bin/sh\" \"-c\" \"echo hi\"]",
+            "empty_layer": true
+        }
+    ],
+    "os": "linux",
+    "rootfs": {
+        "diff_ids": [
+            "sha256:c6f988f4874bb0add23a778f753c65efe992244e148a1d2ec2a8b664fb66bbd1",
+            "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+            "sha256:13f53e08df5a220ab6d13c58b2bf83a59cbdc2e04d0a3f041ddf4b0ba4112d49"
+        ],
+        "type": "layers"
+    }
+}`,
+		DockerImageManifest: `{
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+    "config": {
+        "mediaType": "application/vnd.docker.container.image.v1+json",
+        "size": 7023,
+        "digest": "sha256:815d06b56f4138afacd0009b8e3799fcdce79f0507bf8d0588e219b93ab6fd4d"
+    },
+    "layers": [
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 5312,
+            "digest": "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"
+        },
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 235231,
+            "digest": "sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa"
+        },
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 235231,
+            "digest": "sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa"
+        },
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 639152,
+            "digest": "sha256:b4ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"
+        }
+    ]
+}`,
+	}
+}
+
 func TestImageWithMetadata(t *testing.T) {
 	tests := map[string]struct {
 		image         Image
@@ -412,11 +791,13 @@ func TestImageWithMetadata(t *testing.T) {
 			image: Image{
 				DockerImageManifest: `{"name": "library/ubuntu", "tag": "latest"}`,
 			},
-			expectedImage: Image{},
+			expectedImage: Image{
+				DockerImageManifest: `{"name": "library/ubuntu", "tag": "latest"}`,
+			},
 		},
 		"error unmarshalling v1 compat": {
 			image: Image{
-				DockerImageManifest: `{"name": "library/ubuntu", "tag": "latest", "history": ["v1Compatibility": "{ not valid {{ json" }`,
+				DockerImageManifest: "{\"name\": \"library/ubuntu\", \"tag\": \"latest\", \"history\": [\"v1Compatibility\": \"{ not valid {{ json\" }",
 			},
 			expectError: true,
 		},
@@ -426,12 +807,20 @@ func TestImageWithMetadata(t *testing.T) {
 				ObjectMeta: kapi.ObjectMeta{
 					Name: "id",
 				},
-				DockerImageManifest: "",
+				DockerImageManifest: validImageWithManifestData().DockerImageManifest,
+				DockerImageLayers: []ImageLayer{
+					{Name: "tarsum.dev+sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", MediaType: "application/vnd.docker.container.image.rootfs.diff+x-gtar", LayerSize: 0},
+					{Name: "tarsum.dev+sha256:2aaacc362ac6be2b9e9ae8c6029f6f616bb50aec63746521858e47841b90fabd", MediaType: "application/vnd.docker.container.image.rootfs.diff+x-gtar", LayerSize: 188097705},
+					{Name: "tarsum.dev+sha256:c937c4bb1c1a21cc6d94340812262c6472092028972ae69b551b1a70d4276171", MediaType: "application/vnd.docker.container.image.rootfs.diff+x-gtar", LayerSize: 194533},
+					{Name: "tarsum.dev+sha256:b194de3772ebbcdc8f244f663669799ac1cb141834b7cb8b69100285d357a2b0", MediaType: "application/vnd.docker.container.image.rootfs.diff+x-gtar", LayerSize: 1895},
+					{Name: "tarsum.dev+sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", MediaType: "application/vnd.docker.container.image.rootfs.diff+x-gtar", LayerSize: 0},
+				},
+				DockerImageManifestMediaType: "application/vnd.docker.distribution.manifest.v1+json",
 				DockerImageMetadata: DockerImage{
 					ID:        "2d24f826cb16146e2016ff349a8a33ed5830f3b938d45c0f82943f4ab8c097e7",
 					Parent:    "117ee323aaa9d1b136ea55e4421f4ce413dfc6c0cc6b2186dea6c88d93e1ad7c",
 					Comment:   "",
-					Created:   util.Date(2015, 2, 21, 2, 11, 6, 735146646, time.UTC),
+					Created:   unversioned.Date(2015, 2, 21, 2, 11, 6, 735146646, time.UTC),
 					Container: "c9a3eda5951d28aa8dbe5933be94c523790721e4f80886d0a8e7a710132a38ec",
 					ContainerConfig: DockerConfig{
 						Hostname:        "43bd710ec89a",
@@ -487,14 +876,94 @@ func TestImageWithMetadata(t *testing.T) {
 						OnBuild:         []string{},
 					},
 					Architecture: "amd64",
-					Size:         0,
+					Size:         188294133,
+				},
+			},
+		},
+		"valid metadata size": {
+			image: validImageWithManifestV2Data(),
+			expectedImage: Image{
+				ObjectMeta: kapi.ObjectMeta{
+					Name: "id",
+				},
+				DockerImageConfig:            validImageWithManifestV2Data().DockerImageConfig,
+				DockerImageManifest:          validImageWithManifestV2Data().DockerImageManifest,
+				DockerImageManifestMediaType: "application/vnd.docker.distribution.manifest.v2+json",
+				DockerImageLayers: []ImageLayer{
+					{Name: "sha256:b4ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4", MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", LayerSize: 639152},
+					{Name: "sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa", MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", LayerSize: 235231},
+					{Name: "sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa", MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", LayerSize: 235231},
+					{Name: "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4", MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", LayerSize: 5312},
+				},
+				DockerImageMetadata: DockerImage{
+					ID:            "sha256:815d06b56f4138afacd0009b8e3799fcdce79f0507bf8d0588e219b93ab6fd4d",
+					Parent:        "",
+					Comment:       "",
+					Created:       unversioned.Date(2015, 2, 21, 2, 11, 6, 735146646, time.UTC),
+					Container:     "e91032eb0403a61bfe085ff5a5a48e3659e5a6deae9f4d678daa2ae399d5a001",
+					DockerVersion: "1.9.0-dev",
+					Author:        "",
+					Architecture:  "amd64",
+					Size:          882848,
+					ContainerConfig: DockerConfig{
+						Hostname:        "23304fc829f9",
+						Domainname:      "",
+						User:            "",
+						Memory:          0,
+						MemorySwap:      0,
+						CPUShares:       0,
+						CPUSet:          "",
+						AttachStdin:     false,
+						AttachStdout:    false,
+						AttachStderr:    false,
+						PortSpecs:       nil,
+						ExposedPorts:    nil,
+						Tty:             false,
+						OpenStdin:       false,
+						StdinOnce:       false,
+						Env:             []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "derived=true", "asdf=true"},
+						Cmd:             []string{"/bin/sh", "-c", "#(nop) CMD [\"/bin/sh\" \"-c\" \"echo hi\"]"},
+						Image:           "sha256:4ab15c48b859c2920dd5224f92aabcd39a52794c5b3cf088fb3bbb438756c246",
+						Volumes:         nil,
+						WorkingDir:      "",
+						Entrypoint:      nil,
+						NetworkDisabled: false,
+						SecurityOpts:    nil,
+						OnBuild:         []string{},
+					},
+					Config: &DockerConfig{
+						Hostname:        "23304fc829f9",
+						Domainname:      "",
+						User:            "",
+						Memory:          0,
+						MemorySwap:      0,
+						CPUShares:       0,
+						CPUSet:          "",
+						AttachStdin:     false,
+						AttachStdout:    false,
+						AttachStderr:    false,
+						PortSpecs:       nil,
+						ExposedPorts:    nil,
+						Tty:             false,
+						OpenStdin:       false,
+						StdinOnce:       false,
+						Env:             []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "derived=true", "asdf=true"},
+						Cmd:             []string{"/bin/sh", "-c", "echo hi"},
+						Image:           "sha256:4ab15c48b859c2920dd5224f92aabcd39a52794c5b3cf088fb3bbb438756c246",
+						Volumes:         nil,
+						WorkingDir:      "",
+						Entrypoint:      nil,
+						NetworkDisabled: false,
+						OnBuild:         []string{},
+					},
 				},
 			},
 		},
 	}
 
 	for name, test := range tests {
-		imageWithMetadata, err := ImageWithMetadata(test.image)
+		imageWithMetadata := test.image
+		err := ImageWithMetadata(&imageWithMetadata)
 		gotError := err != nil
 		if e, a := test.expectError, gotError; e != a {
 			t.Fatalf("%s: expectError=%t, gotError=%t: %s", name, e, a, err)
@@ -502,10 +971,8 @@ func TestImageWithMetadata(t *testing.T) {
 		if test.expectError {
 			continue
 		}
-		if e, a := test.expectedImage, *imageWithMetadata; !kapi.Semantic.DeepEqual(e, a) {
-			stringE := fmt.Sprintf("%#v", e)
-			stringA := fmt.Sprintf("%#v", a)
-			t.Errorf("%s: image: %s", name, util.StringDiff(stringE, stringA))
+		if e, a := test.expectedImage, imageWithMetadata; !kapi.Semantic.DeepEqual(e, a) {
+			t.Errorf("%s: image: %s", name, diff.ObjectDiff(e, a))
 		}
 	}
 }
@@ -741,7 +1208,7 @@ func TestAddTagEventToImageStream(t *testing.T) {
 			t.Errorf("%s: expected updated=%t, got %t", name, e, a)
 		}
 		if e, a := test.expectedTags, stream.Status.Tags; !reflect.DeepEqual(e, a) {
-			t.Errorf("%s: expected tags=%v, got %v", name, e, a)
+			t.Errorf("%s: expected\ntags=%#v\ngot=%#v", name, e, a)
 		}
 	}
 }
@@ -897,11 +1364,431 @@ func TestUpdateTrackingTags(t *testing.T) {
 	}
 }
 
-func TestNameAndTag(t *testing.T) {
-	if e, a := "foo:bar", NameAndTag("foo", "bar"); e != a {
+func TestJoinImageStreamTag(t *testing.T) {
+	if e, a := "foo:bar", JoinImageStreamTag("foo", "bar"); e != a {
 		t.Errorf("Unexpected value: %s", a)
 	}
-	if e, a := "foo:"+DefaultImageTag, NameAndTag("foo", ""); e != a {
+	if e, a := "foo:"+DefaultImageTag, JoinImageStreamTag("foo", ""); e != a {
 		t.Errorf("Unexpected value: %s", a)
+	}
+}
+
+func TestResolveImageID(t *testing.T) {
+	tests := map[string]struct {
+		tags     map[string]TagEventList
+		imageID  string
+		expErr   string
+		expEvent TagEvent
+	}{
+		"single tag, match ID prefix": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+							Image:                "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+						},
+					},
+				},
+			},
+			imageID: "3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			expErr:  "",
+			expEvent: TagEvent{
+				DockerImageReference: "repo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+				Image:                "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			},
+		},
+		"single tag, match string prefix": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo:mytag",
+							Image:                "mytag",
+						},
+					},
+				},
+			},
+			imageID: "mytag",
+			expErr:  "",
+			expEvent: TagEvent{
+				DockerImageReference: "repo:mytag",
+				Image:                "mytag",
+			},
+		},
+		"single tag, ID error": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b2",
+							Image:                "sha256:3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b2",
+						},
+					},
+				},
+			},
+			imageID:  "3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			expErr:   "not found",
+			expEvent: TagEvent{},
+		},
+		"no tag": {
+			tags:     map[string]TagEventList{},
+			imageID:  "3c87c572822935df60f0f5d3665bd376841a7fcfeb806b5f212de6a00e9a7b25",
+			expErr:   "not found",
+			expEvent: TagEvent{},
+		},
+		"multiple match": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@mytag",
+							Image:                "mytag",
+						},
+						{
+							DockerImageReference: "repo@mytag",
+							Image:                "mytag2",
+						},
+					},
+				},
+			},
+			imageID:  "mytag",
+			expErr:   "multiple images match the prefix",
+			expEvent: TagEvent{},
+		},
+		"find match out of multiple tags in first position": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+						},
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000002",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+						},
+					},
+				},
+				"tag2": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000003",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+						},
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000004",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+						},
+					},
+				},
+			},
+			imageID: "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+			expEvent: TagEvent{
+				DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+				Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+			},
+		},
+		"find match out of multiple tags in last position": {
+			tags: map[string]TagEventList{
+				"tag1": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+						},
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000002",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+						},
+					},
+				},
+				"tag2": {
+					Items: []TagEvent{
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000003",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+						},
+						{
+							DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000004",
+							Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+						},
+					},
+				},
+			},
+			imageID: "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+			expEvent: TagEvent{
+				DockerImageReference: "repo@sha256:0000000000000000000000000000000000000000000000000000000000000004",
+				Image:                "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+			},
+		},
+	}
+
+	for name, test := range tests {
+		stream := &ImageStream{}
+		stream.Status.Tags = test.tags
+		event, err := ResolveImageID(stream, test.imageID)
+		if len(test.expErr) > 0 {
+			if err == nil || !strings.Contains(err.Error(), test.expErr) {
+				t.Errorf("%s: unexpected error, expected %v, got %v", name, test.expErr, err)
+			}
+			continue
+		} else if err != nil {
+			t.Errorf("%s: unexpected error, got %v", name, err)
+			continue
+		}
+		if test.expEvent.Image != event.Image || test.expEvent.DockerImageReference != event.DockerImageReference {
+			t.Errorf("%s: unexpected tag, expected %#v, got %#v", name, test.expEvent, event)
+		}
+	}
+}
+
+func TestDockerImageReferenceEquality(t *testing.T) {
+	equalityTests := []struct {
+		a, b    DockerImageReference
+		isEqual bool
+	}{
+		{
+			a:       DockerImageReference{},
+			b:       DockerImageReference{},
+			isEqual: true,
+		},
+		{
+			a: DockerImageReference{
+				Name: "openshift",
+			},
+			b: DockerImageReference{
+				Name: "openshift",
+			},
+			isEqual: true,
+		},
+		{
+			a: DockerImageReference{
+				Name: "openshift",
+			},
+			b: DockerImageReference{
+				Name: "openshift3",
+			},
+			isEqual: false,
+		},
+		{
+			a: DockerImageReference{
+				Name: "openshift",
+			},
+			b: DockerImageReference{
+				Registry:  DockerDefaultRegistry,
+				Namespace: DockerDefaultNamespace,
+				Name:      "openshift",
+				Tag:       DefaultImageTag,
+			},
+			isEqual: true,
+		},
+		{
+			a: DockerImageReference{
+				Name: "openshift",
+			},
+			b: DockerImageReference{
+				Registry:  DockerDefaultRegistry,
+				Namespace: DockerDefaultNamespace,
+				Name:      "openshift",
+				Tag:       "v1.0",
+			},
+			isEqual: false,
+		},
+		{
+			a: DockerImageReference{
+				Name: "openshift",
+			},
+			b: DockerImageReference{
+				Registry:  DockerDefaultRegistry,
+				Namespace: DockerDefaultNamespace,
+				Name:      "openshift",
+				Tag:       DefaultImageTag,
+				ID:        "d0a28ab59a",
+			},
+			isEqual: false,
+		},
+	}
+	for i, test := range equalityTests {
+		if isEqual := test.a.Equal(test.b); isEqual != test.isEqual {
+			t.Errorf("test %d: %#v.Equal(%#v) = %t; want %t",
+				i, test.a, test.b, isEqual, test.isEqual)
+		}
+		// commutativeness sanity check
+		if x, y := test.a.Equal(test.b), test.b.Equal(test.a); x != y {
+			t.Errorf("test %[1]d: %[2]q.Equal(%[3]q) = %[4]t != %[3]q.Equal(%[2]q) = %[5]t",
+				i, test.a, test.b, x, y)
+		}
+	}
+}
+
+func TestPrioritizeTags(t *testing.T) {
+	tags := []string{"5", "other", "latest", "v5.5", "v6", "5.2.3", "v5.3.6-bother", "5.3.6-abba", "5.6"}
+	PrioritizeTags(tags)
+	if !reflect.DeepEqual(tags, []string{"latest", "v6", "5", "5.6", "v5.5", "v5.3.6-bother", "5.3.6-abba", "5.2.3", "other"}) {
+		t.Errorf("unexpected order: %v", tags)
+	}
+}
+
+func TestTagsChanged(t *testing.T) {
+	tests := map[string]struct {
+		new     []TagEvent
+		old     []TagEvent
+		changed bool
+		deleted bool
+	}{
+		"both empty": {
+			new:     []TagEvent{},
+			old:     []TagEvent{},
+			changed: false,
+			deleted: false,
+		},
+		"new image": {
+			new:     []TagEvent{{Image: "newimage"}},
+			old:     []TagEvent{},
+			changed: true,
+			deleted: false,
+		},
+		"image deleted": {
+			new:     []TagEvent{},
+			old:     []TagEvent{{Image: "oldimage"}},
+			changed: true,
+			deleted: true,
+		},
+		"image changed": {
+			new:     []TagEvent{{Image: "newimage"}},
+			old:     []TagEvent{{Image: "oldImage"}},
+			changed: true,
+			deleted: false,
+		},
+	}
+	for name, test := range tests {
+		changed, deleted := tagsChanged(test.new, test.old)
+		if changed != test.changed || deleted != test.deleted {
+			t.Errorf("%s: unexpected tagsChanged, expected (%v, %v) got (%v, %v)",
+				name, test.changed, test.deleted, changed, deleted)
+		}
+	}
+}
+
+func TestIndexOfImageSignature(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		signatures    []ImageSignature
+		matchType     string
+		matchContent  []byte
+		expectedIndex int
+	}{
+		{
+			name:          "empty",
+			matchType:     ImageSignatureTypeAtomicImageV1,
+			matchContent:  []byte("blob"),
+			expectedIndex: -1,
+		},
+
+		{
+			name: "not present",
+			signatures: []ImageSignature{
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("binary"),
+				},
+				{
+					Type:    "custom",
+					Content: []byte("blob"),
+				},
+			},
+			matchType:     ImageSignatureTypeAtomicImageV1,
+			matchContent:  []byte("blob"),
+			expectedIndex: -1,
+		},
+
+		{
+			name: "first and only",
+			signatures: []ImageSignature{
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("binary"),
+				},
+			},
+			matchType:     ImageSignatureTypeAtomicImageV1,
+			matchContent:  []byte("binary"),
+			expectedIndex: 0,
+		},
+
+		{
+			name: "last",
+			signatures: []ImageSignature{
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("binary"),
+				},
+				{
+					Type:    "custom",
+					Content: []byte("blob"),
+				},
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("blob"),
+				},
+			},
+			matchType:     ImageSignatureTypeAtomicImageV1,
+			matchContent:  []byte("blob"),
+			expectedIndex: 2,
+		},
+
+		{
+			name: "many matches",
+			signatures: []ImageSignature{
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("blob2"),
+				},
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("blob"),
+				},
+				{
+					Type:    "custom",
+					Content: []byte("blob"),
+				},
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("blob"),
+				},
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("blob"),
+				},
+				{
+					Type:    ImageSignatureTypeAtomicImageV1,
+					Content: []byte("binary"),
+				},
+			},
+			matchType:     ImageSignatureTypeAtomicImageV1,
+			matchContent:  []byte("blob"),
+			expectedIndex: 1,
+		},
+	} {
+
+		im := Image{
+			Signatures: make([]ImageSignature, len(tc.signatures)),
+		}
+		for i, signature := range tc.signatures {
+			signature.Name = fmt.Sprintf("%s:%s", signature.Type, signature.Content)
+			im.Signatures[i] = signature
+		}
+
+		matchName := fmt.Sprintf("%s:%s", tc.matchType, tc.matchContent)
+
+		index := IndexOfImageSignatureByName(im.Signatures, matchName)
+		if index != tc.expectedIndex {
+			t.Errorf("[%s] got unexpected index: %d != %d", tc.name, index, tc.expectedIndex)
+		}
+
+		index = IndexOfImageSignature(im.Signatures, tc.matchType, tc.matchContent)
+		if index != tc.expectedIndex {
+			t.Errorf("[%s] got unexpected index: %d != %d", tc.name, index, tc.expectedIndex)
+		}
 	}
 }

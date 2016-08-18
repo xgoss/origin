@@ -2,24 +2,37 @@ package proxy
 
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	clusterpolicyregistry "github.com/openshift/origin/pkg/authorization/registry/clusterpolicy"
+	clusterpolicybindingregistry "github.com/openshift/origin/pkg/authorization/registry/clusterpolicybinding"
 	roleregistry "github.com/openshift/origin/pkg/authorization/registry/role"
 	rolestorage "github.com/openshift/origin/pkg/authorization/registry/role/policybased"
+	"github.com/openshift/origin/pkg/authorization/rulevalidation"
 )
 
 type ClusterRoleStorage struct {
 	roleStorage rolestorage.VirtualStorage
 }
 
-func NewClusterRoleStorage(clusterPolicyRegistry clusterpolicyregistry.Registry) *ClusterRoleStorage {
+func NewClusterRoleStorage(clusterPolicyRegistry clusterpolicyregistry.Registry, clusterBindingRegistry clusterpolicybindingregistry.Registry) *ClusterRoleStorage {
+	simulatedPolicyRegistry := clusterpolicyregistry.NewSimulatedRegistry(clusterPolicyRegistry)
+
+	ruleResolver := rulevalidation.NewDefaultRuleResolver(
+		nil,
+		nil,
+		clusterpolicyregistry.ReadOnlyClusterPolicy{Registry: clusterPolicyRegistry},
+		clusterpolicybindingregistry.ReadOnlyClusterPolicyBinding{Registry: clusterBindingRegistry},
+	)
+
 	return &ClusterRoleStorage{
 		roleStorage: rolestorage.VirtualStorage{
-			PolicyStorage:  clusterpolicyregistry.NewSimulatedRegistry(clusterPolicyRegistry),
+			PolicyStorage: simulatedPolicyRegistry,
+
+			RuleResolver:   ruleResolver,
 			CreateStrategy: roleregistry.ClusterStrategy,
 			UpdateStrategy: roleregistry.ClusterStrategy},
 	}
@@ -32,8 +45,8 @@ func (s *ClusterRoleStorage) NewList() runtime.Object {
 	return &authorizationapi.ClusterRoleList{}
 }
 
-func (s *ClusterRoleStorage) List(ctx kapi.Context, label labels.Selector, field fields.Selector) (runtime.Object, error) {
-	ret, err := s.roleStorage.List(ctx, label, field)
+func (s *ClusterRoleStorage) List(ctx kapi.Context, options *kapi.ListOptions) (runtime.Object, error) {
+	ret, err := s.roleStorage.List(ctx, options)
 	if ret == nil {
 		return nil, err
 	}
@@ -54,7 +67,7 @@ func (s *ClusterRoleStorage) Delete(ctx kapi.Context, name string, options *kapi
 		return nil, err
 	}
 
-	return ret.(*kapi.Status), err
+	return ret.(*unversioned.Status), err
 }
 
 func (s *ClusterRoleStorage) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, error) {
@@ -69,14 +82,47 @@ func (s *ClusterRoleStorage) Create(ctx kapi.Context, obj runtime.Object) (runti
 	return authorizationapi.ToClusterRole(ret.(*authorizationapi.Role)), err
 }
 
-func (s *ClusterRoleStorage) Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error) {
+type convertingObjectInfo struct {
+	rest.UpdatedObjectInfo
+}
+
+func (i convertingObjectInfo) UpdatedObject(ctx kapi.Context, old runtime.Object) (runtime.Object, error) {
+	oldObj := old.(*authorizationapi.Role)
+	convertedOldObj := authorizationapi.ToClusterRole(oldObj)
+	obj, err := i.UpdatedObjectInfo.UpdatedObject(ctx, convertedOldObj)
+	if err != nil {
+		return nil, err
+	}
 	clusterObj := obj.(*authorizationapi.ClusterRole)
 	convertedObj := authorizationapi.ToRole(clusterObj)
+	return convertedObj, nil
+}
 
-	ret, created, err := s.roleStorage.Update(ctx, convertedObj)
+func (s *ClusterRoleStorage) Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	ret, created, err := s.roleStorage.Update(ctx, name, convertingObjectInfo{objInfo})
 	if ret == nil {
 		return nil, created, err
 	}
 
 	return authorizationapi.ToClusterRole(ret.(*authorizationapi.Role)), created, err
+}
+
+func (m *ClusterRoleStorage) CreateClusterRoleWithEscalation(ctx kapi.Context, obj *authorizationapi.ClusterRole) (*authorizationapi.ClusterRole, error) {
+	in := authorizationapi.ToRole(obj)
+	ret, err := m.roleStorage.CreateRoleWithEscalation(ctx, in)
+	return authorizationapi.ToClusterRole(ret), err
+}
+
+func (m *ClusterRoleStorage) UpdateClusterRoleWithEscalation(ctx kapi.Context, obj *authorizationapi.ClusterRole) (*authorizationapi.ClusterRole, bool, error) {
+	in := authorizationapi.ToRole(obj)
+	ret, created, err := m.roleStorage.UpdateRoleWithEscalation(ctx, in)
+	return authorizationapi.ToClusterRole(ret), created, err
+}
+
+func (m *ClusterRoleStorage) CreateRoleWithEscalation(ctx kapi.Context, obj *authorizationapi.Role) (*authorizationapi.Role, error) {
+	return m.roleStorage.CreateRoleWithEscalation(ctx, obj)
+}
+
+func (m *ClusterRoleStorage) UpdateRoleWithEscalation(ctx kapi.Context, obj *authorizationapi.Role) (*authorizationapi.Role, bool, error) {
+	return m.roleStorage.UpdateRoleWithEscalation(ctx, obj)
 }

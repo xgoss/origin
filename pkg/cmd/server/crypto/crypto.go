@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/big"
+	mathrand "math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +30,34 @@ import (
 	"github.com/openshift/origin/pkg/auth/authenticator/request/x509request"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 )
+
+// SecureTLSConfig enforces the default minimum security settings for the
+// cluster.
+// TODO: allow override
+func SecureTLSConfig(config *tls.Config) *tls.Config {
+	// Recommendations from https://wiki.mozilla.org/Security/Server_Side_TLS
+	// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability)
+	config.MinVersion = tls.VersionTLS10
+	// In a legacy environment, allow cipher control to be disabled.
+	if len(os.Getenv("OPENSHIFT_ALLOW_DANGEROUS_TLS_CIPHER_SUITES")) == 0 {
+		config.PreferServerCipherSuites = true
+		config.CipherSuites = []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+			tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+		}
+	} else {
+		glog.Warningf("Potentially insecure TLS cipher suites are allowed in client connections because environment variable OPENSHIFT_ALLOW_DANGEROUS_TLS_CIPHER_SUITES is set")
+	}
+	return config
+}
 
 type TLSCertificateConfig struct {
 	Certs []*x509.Certificate
@@ -48,6 +77,19 @@ func (c *TLSCertificateConfig) writeCertConfig(certFile, keyFile string) error {
 	}
 	return nil
 }
+func (c *TLSCertificateConfig) GetPEMBytes() ([]byte, []byte, error) {
+	certBytes, err := encodeCertificates(c.Certs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyBytes, err := encodeKey(c.Key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return certBytes, keyBytes, nil
+}
+
 func (c *TLSCARoots) writeCARoots(rootFile string) error {
 	if err := writeCertificates(rootFile, c.Roots...); err != nil {
 		return err
@@ -103,23 +145,92 @@ func GetTLSCertificateConfig(certFile, keyFile string) (*TLSCertificateConfig, e
 }
 
 var (
-	// Default templates to last for a year
-	lifetime = time.Hour * 24 * 365
+	// Default ca certs to be long-lived
+	caLifetime = time.Hour * 24 * 365 * 5
+
+	// Default templates to last for two years
+	lifetime = time.Hour * 24 * 365 * 2
 
 	// Default keys are 2048 bits
 	keyBits = 2048
 )
 
 type CA struct {
+	Config *TLSCertificateConfig
+
+	SerialGenerator SerialGenerator
+}
+
+// SerialGenerator is an interface for getting a serial number for the cert.  It MUST be thread-safe.
+type SerialGenerator interface {
+	Next(template *x509.Certificate) (int64, error)
+}
+
+// SerialFileGenerator returns a unique, monotonically increasing serial number and ensures the CA on disk records that value.
+type SerialFileGenerator struct {
 	SerialFile string
-	Config     *TLSCertificateConfig
 
 	// lock guards access to the Serial field
 	lock   sync.Mutex
 	Serial int64
 }
 
+func NewSerialFileGenerator(serialFile string, createIfNeeded bool) (*SerialFileGenerator, error) {
+	// read serial file
+	var serial int64
+	serialData, err := ioutil.ReadFile(serialFile)
+	if err == nil {
+		serial, _ = strconv.ParseInt(string(serialData), 16, 64)
+	}
+	if os.IsNotExist(err) && createIfNeeded {
+		if err := ioutil.WriteFile(serialFile, []byte("00"), 0644); err != nil {
+			return nil, err
+		}
+		serial = 1
+
+	} else if err != nil {
+		return nil, err
+	}
+
+	if serial < 1 {
+		serial = 1
+	}
+
+	return &SerialFileGenerator{
+		Serial:     serial,
+		SerialFile: serialFile,
+	}, nil
+}
+
+// Next returns a unique, monotonically increasing serial number and ensures the CA on disk records that value.
+func (s *SerialFileGenerator) Next(template *x509.Certificate) (int64, error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	next := s.Serial + 1
+	s.Serial = next
+
+	// Output in hex, padded to multiples of two characters for OpenSSL's sake
+	serialText := fmt.Sprintf("%X", next)
+	if len(serialText)%2 == 1 {
+		serialText = "0" + serialText
+	}
+
+	if err := ioutil.WriteFile(s.SerialFile, []byte(serialText), os.FileMode(0640)); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// RandomSerialGenerator returns a serial based on time.Now and the subject
+type RandomSerialGenerator struct {
+}
+
+func (s *RandomSerialGenerator) Next(template *x509.Certificate) (int64, error) {
+	return mathrand.Int63(), nil
+}
+
 // EnsureCA returns a CA, whether it was created (as opposed to pre-existing), and any error
+// if serialFile is empty, a RandomSerialGenerator will be used
 func EnsureCA(certFile, keyFile, serialFile, name string) (*CA, bool, error) {
 	if ca, err := GetCA(certFile, keyFile, serialFile); err == nil {
 		return ca, false, err
@@ -128,30 +239,30 @@ func EnsureCA(certFile, keyFile, serialFile, name string) (*CA, bool, error) {
 	return ca, true, err
 }
 
+// if serialFile is empty, a RandomSerialGenerator will be used
 func GetCA(certFile, keyFile, serialFile string) (*CA, error) {
 	caConfig, err := GetTLSCertificateConfig(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
 
-	// read serial file
-	var serial int64
-	if serialData, err := ioutil.ReadFile(serialFile); err == nil {
-		serial, _ = strconv.ParseInt(string(serialData), 10, 64)
+	var serialGenerator SerialGenerator
+	if len(serialFile) > 0 {
+		serialGenerator, err = NewSerialFileGenerator(serialFile, false)
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		return nil, err
-	}
-	if serial < 1 {
-		serial = 1
+		serialGenerator = &RandomSerialGenerator{}
 	}
 
 	return &CA{
-		Serial:     serial,
-		SerialFile: serialFile,
-		Config:     caConfig,
+		SerialGenerator: serialGenerator,
+		Config:          caConfig,
 	}, nil
 }
 
+// if serialFile is empty, a RandomSerialGenerator will be used
 func MakeCA(certFile, keyFile, serialFile, name string) (*CA, error) {
 	glog.V(2).Infof("Generating new CA for %s cert, and key in %s, %s", name, certFile, keyFile)
 	// Create CA cert
@@ -175,21 +286,29 @@ func MakeCA(certFile, keyFile, serialFile, name string) (*CA, error) {
 		return nil, err
 	}
 
-	if err := ioutil.WriteFile(serialFile, []byte("0"), 0644); err != nil {
-		return nil, err
+	var serialGenerator SerialGenerator
+	if len(serialFile) > 0 {
+		if err := ioutil.WriteFile(serialFile, []byte("00"), 0644); err != nil {
+			return nil, err
+		}
+		serialGenerator, err = NewSerialFileGenerator(serialFile, false)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		serialGenerator = &RandomSerialGenerator{}
 	}
 
 	return &CA{
-		Serial:     0,
-		SerialFile: serialFile,
-		Config:     caConfig,
+		SerialGenerator: serialGenerator,
+		Config:          caConfig,
 	}, nil
 }
 
 func (ca *CA) EnsureServerCert(certFile, keyFile string, hostnames sets.String) (*TLSCertificateConfig, bool, error) {
 	certConfig, err := GetServerCert(certFile, keyFile, hostnames)
 	if err != nil {
-		certConfig, err = ca.MakeServerCert(certFile, keyFile, hostnames)
+		certConfig, err = ca.MakeAndWriteServerCert(certFile, keyFile, hostnames)
 		return certConfig, true, err
 	}
 
@@ -214,18 +333,29 @@ func GetServerCert(certFile, keyFile string, hostnames sets.String) (*TLSCertifi
 	return nil, fmt.Errorf("Existing server certificate in %s was missing some hostnames (%v) or IP addresses (%v).", certFile, missingDns, missingIps)
 }
 
-func (ca *CA) MakeServerCert(certFile, keyFile string, hostnames sets.String) (*TLSCertificateConfig, error) {
+func (ca *CA) MakeAndWriteServerCert(certFile, keyFile string, hostnames sets.String) (*TLSCertificateConfig, error) {
 	glog.V(4).Infof("Generating server certificate in %s, key in %s", certFile, keyFile)
 
-	serverPublicKey, serverPrivateKey, _ := NewKeyPair()
-	serverTemplate, _ := newServerCertificateTemplate(pkix.Name{CommonName: hostnames.List()[0]}, hostnames.List())
-	serverCrt, _ := ca.signCertificate(serverTemplate, serverPublicKey)
-	server := &TLSCertificateConfig{
-		Certs: append([]*x509.Certificate{serverCrt}, ca.Config.Certs...),
-		Key:   serverPrivateKey,
+	server, err := ca.MakeServerCert(hostnames)
+	if err != nil {
+		return nil, err
 	}
 	if err := server.writeCertConfig(certFile, keyFile); err != nil {
 		return server, err
+	}
+	return server, nil
+}
+
+func (ca *CA) MakeServerCert(hostnames sets.String) (*TLSCertificateConfig, error) {
+	serverPublicKey, serverPrivateKey, _ := NewKeyPair()
+	serverTemplate, _ := newServerCertificateTemplate(pkix.Name{CommonName: hostnames.List()[0]}, hostnames.List())
+	serverCrt, err := ca.signCertificate(serverTemplate, serverPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	server := &TLSCertificateConfig{
+		Certs: append([]*x509.Certificate{serverCrt}, ca.Config.Certs...),
+		Key:   serverPrivateKey,
 	}
 	return server, nil
 }
@@ -252,7 +382,10 @@ func (ca *CA) MakeClientCertificate(certFile, keyFile string, u user.Info) (*TLS
 
 	clientPublicKey, clientPrivateKey, _ := NewKeyPair()
 	clientTemplate, _ := newClientCertificateTemplate(x509request.UserToSubject(u))
-	clientCrt, _ := ca.signCertificate(clientTemplate, clientPublicKey)
+	clientCrt, err := ca.signCertificate(clientTemplate, clientPublicKey)
+	if err != nil {
+		return nil, err
+	}
 
 	certData, err := encodeCertificates(clientCrt)
 	if err != nil {
@@ -273,22 +406,9 @@ func (ca *CA) MakeClientCertificate(certFile, keyFile string, u user.Info) (*TLS
 	return GetTLSCertificateConfig(certFile, keyFile)
 }
 
-// nextSerial returns a unique, monotonically increasing serial number and ensures the CA on
-// disk records that value.
-func (ca *CA) nextSerial() (int64, error) {
-	ca.lock.Lock()
-	defer ca.lock.Unlock()
-	next := ca.Serial + 1
-	ca.Serial = next
-	if err := ioutil.WriteFile(ca.SerialFile, []byte(fmt.Sprintf("%d", next)), os.FileMode(0640)); err != nil {
-		return 0, err
-	}
-	return next, nil
-}
-
 func (ca *CA) signCertificate(template *x509.Certificate, requestKey crypto.PublicKey) (*x509.Certificate, error) {
 	// Increment and persist serial
-	serial, err := ca.nextSerial()
+	serial, err := ca.SerialGenerator.Next(template)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +432,7 @@ func newSigningCertificateTemplate(subject pkix.Name) (*x509.Certificate, error)
 		SignatureAlgorithm: x509.SHA256WithRSA,
 
 		NotBefore:    time.Now().Add(-1 * time.Second),
-		NotAfter:     time.Now().Add(lifetime),
+		NotAfter:     time.Now().Add(caLifetime),
 		SerialNumber: big.NewInt(1),
 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,

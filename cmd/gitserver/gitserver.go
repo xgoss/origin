@@ -7,6 +7,11 @@ import (
 
 	"github.com/openshift/origin/pkg/cmd/infra/gitserver"
 	"github.com/openshift/origin/pkg/cmd/util/serviceability"
+
+	// install all APIs
+	_ "github.com/openshift/origin/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/apis/extensions/install"
 )
 
 func main() {
@@ -18,7 +23,7 @@ func main() {
 	}
 
 	basename := filepath.Base(os.Args[0])
-	command := gitserver.NewCommandGitServer(basename)
+	command := gitserver.CommandFor(basename)
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
 	}

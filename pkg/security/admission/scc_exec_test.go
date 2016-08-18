@@ -6,15 +6,18 @@ import (
 	kadmission "k8s.io/kubernetes/pkg/admission"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/client/cache"
+	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	testingcore "k8s.io/kubernetes/pkg/client/testing/core"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/watch"
+
+	oscache "github.com/openshift/origin/pkg/client/cache"
 )
 
 // scc exec is a pass through to *constraint, so we only need to test that
 // it correctly limits its actions to certain conditions
 func TestExecAdmit(t *testing.T) {
-
 	goodPod := func() *kapi.Pod {
 		return &kapi.Pod{
 			Spec: kapi.PodSpec{
@@ -33,7 +36,7 @@ func TestExecAdmit(t *testing.T) {
 		resource    string
 		subresource string
 
-		pod                    *kapi.Pod
+		pod, oldPod            *kapi.Pod
 		shouldAdmit            bool
 		shouldHaveClientAction bool
 	}{
@@ -80,16 +83,20 @@ func TestExecAdmit(t *testing.T) {
 	}
 
 	for k, v := range testCases {
-		tc := testclient.NewSimpleFake()
-		tc.PrependReactor("get", "pods", func(action testclient.Action) (handled bool, ret runtime.Object, err error) {
+		tc := clientsetfake.NewSimpleClientset(v.pod)
+		tc.PrependReactor("get", "pods", func(action testingcore.Action) (handled bool, ret runtime.Object, err error) {
 			return true, v.pod, nil
 		})
-		tc.AddWatchReactor("*", testclient.DefaultWatchReactor(watch.NewFake(), nil))
+		tc.AddWatchReactor("*", testingcore.DefaultWatchReactor(watch.NewFake(), nil))
 
 		// create the admission plugin
 		p := NewSCCExecRestrictions(tc)
+		p.constraintAdmission.sccLister = &oscache.IndexerToSecurityContextConstraintsLister{
+			Indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc,
+				cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}),
+		}
 
-		attrs := kadmission.NewAttributesRecord(v.pod, "Pod", "namespace", "pod-name", v.resource, v.subresource, v.operation, &user.DefaultInfo{})
+		attrs := kadmission.NewAttributesRecord(v.pod, v.oldPod, kapi.Kind("Pod").WithVersion("version"), "namespace", "pod-name", kapi.Resource(v.resource).WithVersion("version"), v.subresource, v.operation, &user.DefaultInfo{})
 		err := p.Admit(attrs)
 
 		if v.shouldAdmit && err != nil {
@@ -107,12 +114,6 @@ func TestExecAdmit(t *testing.T) {
 		}
 		if v.shouldHaveClientAction && (len(tc.Actions()) == 0) {
 			t.Errorf("%s: no actions found", k)
-		}
-
-		if v.shouldHaveClientAction {
-			if len(v.pod.Spec.ServiceAccountName) != 0 {
-				t.Errorf("%s: sa name should have been cleared: %v", k, v.pod.Spec.ServiceAccountName)
-			}
 		}
 	}
 }

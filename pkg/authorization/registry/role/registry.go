@@ -3,8 +3,6 @@ package role
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 )
@@ -12,7 +10,7 @@ import (
 // Registry is an interface for things that know how to store Roles.
 type Registry interface {
 	// ListRoles obtains list of policyRoles that match a selector.
-	ListRoles(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.RoleList, error)
+	ListRoles(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.RoleList, error)
 	// GetRole retrieves a specific policyRole.
 	GetRole(ctx kapi.Context, id string) (*authorizationapi.Role, error)
 	// CreateRole creates a new policyRole.
@@ -29,6 +27,11 @@ type Storage interface {
 	rest.Lister
 	rest.CreaterUpdater
 	rest.GracefulDeleter
+
+	// CreateRoleWithEscalation creates a new policyRole.  Skipping the escalation check should only be done during bootstrapping procedures where no users are currently bound.
+	CreateRoleWithEscalation(ctx kapi.Context, policyRole *authorizationapi.Role) (*authorizationapi.Role, error)
+	// UpdateRoleWithEscalation updates a policyRole.  Skipping the escalation check should only be done during bootstrapping procedures where no users are currently bound.
+	UpdateRoleWithEscalation(ctx kapi.Context, policyRole *authorizationapi.Role) (*authorizationapi.Role, bool, error)
 }
 
 // storage puts strong typing around storage calls
@@ -42,8 +45,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListRoles(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.RoleList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListRoles(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.RoleList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -51,13 +54,13 @@ func (s *storage) ListRoles(ctx kapi.Context, label labels.Selector, field field
 	return obj.(*authorizationapi.RoleList), nil
 }
 
-func (s *storage) CreateRole(ctx kapi.Context, node *authorizationapi.Role) (*authorizationapi.Role, error) {
-	obj, err := s.Create(ctx, node)
+func (s *storage) CreateRole(ctx kapi.Context, role *authorizationapi.Role) (*authorizationapi.Role, error) {
+	obj, err := s.Create(ctx, role)
 	return obj.(*authorizationapi.Role), err
 }
 
-func (s *storage) UpdateRole(ctx kapi.Context, node *authorizationapi.Role) (*authorizationapi.Role, bool, error) {
-	obj, created, err := s.Update(ctx, node)
+func (s *storage) UpdateRole(ctx kapi.Context, role *authorizationapi.Role) (*authorizationapi.Role, bool, error) {
+	obj, created, err := s.Update(ctx, role.Name, rest.DefaultUpdatedObjectInfo(role, kapi.Scheme))
 	return obj.(*authorizationapi.Role), created, err
 }
 

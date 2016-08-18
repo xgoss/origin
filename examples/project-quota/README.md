@@ -12,14 +12,14 @@ any pod in the system will be able to consume as much CPU and memory on the node
 An author of a pod may set explicit resource limits per container in the pod in order to control
 memory usage dedicated to its containers on a node.
 
-The following is an example of a pod that has a single container.  This container sets it's resource
+The following is an example of a pod that has a single container.  This container sets its resource
 limit for cpu to 100m and memory as 6Mi.  This means that the container will get 100 millicores of
 a core on the Node.  In effect, if the node had a single core, this pod could be scheduled 10 times
 at most to a single host.
 
 ```shell
 $ cat pod-with-resources.yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: Pod
 metadata:
   name: pod-with-resources
@@ -52,19 +52,7 @@ Let's create a simple project that applies a basic quota where the total cpu usa
 ```shell
 $ oadm new-project quota-demo --admin=test-admin
 $ oc project quota-demo
-$ cat quota.yaml
-kind: ResourceQuota
-metadata:
-  name: quota
-spec:
-  hard:
-    cpu: "1"
-    memory: "750Mi"
-    pods: "10"
-    replicationcontrollers: "10"
-    resourcequotas: "1"
-    services: "10"
-$ oc create -f quota.yaml
+$ oc create quota quota --hard=cpu=1,memory=750Mi,pods=10,replicationcontrollers=10,resourcequotas=1,services=1
 ```
 
 A few moments after the quota is created, the current usage in the project is calculated.
@@ -73,27 +61,29 @@ You can view the current usage by doing the following:
 
 ```
 $ oc describe project quota-demo
-Name:   quota-demo
-Created:  4 hours ago
-Labels:   <none>
-Annotations:  displayName=,openshift.io/node-selector=
-Display Name: <none>
-Description:  <none>
-Status:   Active
+Name:           quota-demo
+Created:        4 hours ago
+Labels:         <none>
+Annotations:    openshift.io/description=
+                openshift.io/display-name=
+                openshift.io/sa.scc.mcs=s0:c6,c5
+                openshift.io/sa.scc.supplemental-groups=1000040000/10000
+                openshift.io/sa.scc.uid-range=1000040000/10000
+Display Name:   <none>
+Description:    <none>
+Status:         Active
 Node Selector:  <none>
-
 Quota:
-  Name:     quota
-  Resource    Used  Hard
-  --------    ----  ----
-  cpu     0m  1
-  memory      0m  750Mi
-  pods      0m  10
-  replicationcontrollers  0m  10
-  resourcequotas    1 1
-  services    0m  10
-
-Resource limits:  <none>
+                Name:                   quota
+                Resource                Used    Hard
+                --------                ----    ----
+                cpu                     0       1
+                memory                  0       750Mi
+                pods                    0       10
+                replicationcontrollers  0       10
+                resourcequotas          1       1
+                services                0       10
+Resource limits:  <none>        
 ```
 
 Applying default resource limits
@@ -106,9 +96,10 @@ cpu and memory.
 
 ```shell
 $ cat pod-without-resources.yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: Pod
 metadata:
+  creationTimestamp: null
   name: pod-without-resources
 spec:
   containers:
@@ -116,13 +107,16 @@ spec:
     image: gcr.io/google_containers/serve_hostname
     imagePullPolicy: IfNotPresent
     name: kubernetes-serve-hostname
+    resources: {}
     securityContext:
       capabilities: {}
       privileged: false
+    terminationMessagePath: /dev/termination-log
   dnsPolicy: ClusterFirst
   restartPolicy: Always
+status: {} 
 $ oc create -f pod-without-resources.yaml
-Error from server: Pod "pod-without-resources" is forbidden: Limited to 750Mi memory, but pod has no specified memory limit
+Error from server: error when creating "pod-without-resources.yaml": pods "pod-without-resources" is forbidden: Failed quota: quota: must specify cpu,memory
 ```
 
 The administrator is happy because end-users need to specify resource limits.
@@ -144,9 +138,10 @@ So let's set some default limits for this project:
 
 ```shell
 $ cat limits.yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: LimitRange
 metadata:
+  creationTimestamp: null
   name: limits
 spec:
   limits:
@@ -169,73 +164,77 @@ spec:
     type: Container
 $ oc create -f limits.yaml
 $ oc describe project quota-demo
-Name:   quota-demo
-Created:  4 hours ago
-Labels:   <none>
-Annotations:  displayName=,openshift.io/node-selector=
-Display Name: <none>
-Description:  <none>
-Status:   Active
+Name:           quota-demo
+Created:        4 hours ago
+Labels:         <none>
+Annotations:    openshift.io/description=
+                openshift.io/display-name=
+                openshift.io/sa.scc.mcs=s0:c6,c5
+                openshift.io/sa.scc.supplemental-groups=1000040000/10000
+                openshift.io/sa.scc.uid-range=1000040000/10000
+Display Name:   <none>
+Description:    <none>
+Status:         Active
 Node Selector:  <none>
-
 Quota:
-  Name:     quota
-  Resource    Used  Hard
-  --------    ----  ----
-  cpu     0m  1
-  memory      0m  750Mi
-  pods      0m  10
-  replicationcontrollers  0m  10
-  resourcequotas    1 1
-  services    0m  10
-
+        Name:                   quota
+        Resource                Used    Hard
+        --------                ----    ----
+        cpu                     0       1
+        memory                  0       750Mi
+        pods                    0       10
+        replicationcontrollers  0       10
+        resourcequotas          1       1
+        services                0       10
 Resource limits:
-  Name:   limits
-  Type    Resource  Min Max Default
-  ----    --------  --- --- ---
-  Pod   memory    5Mi 750Mi -
-  Pod   cpu   10m 500m  -
-  Container cpu   10m 500m  100m
-  Container memory    5Mi 750Mi 100Mi
+        Name:           limits
+        Type            Resource        Min     Max     Default
+        ----            --------        ---     ---     ---
+        Pod             cpu             10m     500m    -
+        Pod             memory          5Mi     750Mi   -
+        Container       cpu             10m     500m    100m
+        Container       memory          5Mi     750Mi   100Mi  
 ```
 
 You can now see that the project has set min/max limits at the pod and container scopes.
 
-If a pod is created that has no cpu resource limit set, the default (100m) will be set as an explicit limit.  Similarly, if a pod is created that has no memory resource limit set, the default (256Mi) will be set as an explicit limit.
+If a pod is created that has no cpu resource limit set, the default (100m) will be set as an explicit limit.  Similarly, if a pod is created that has no memory resource limit set, the default (100Mi) will be set as an explicit limit.
 
 To demonstrate this, let's try to create the pod that failed previously:
 
 ```shell
 $ oc create -f pod-without-resources.yaml
 $ oc describe project quota-demo
-Name:   quota-demo
-Created:  4 hours ago
-Labels:   <none>
-Annotations:  displayName=,openshift.io/node-selector=
-Display Name: <none>
-Description:  <none>
-Status:   Active
+Name:           quota-demo
+Created:        4 hours ago
+Labels:         <none>
+Annotations:    openshift.io/description=
+                openshift.io/display-name=
+                openshift.io/sa.scc.mcs=s0:c6,c5
+                openshift.io/sa.scc.supplemental-groups=1000040000/10000
+                openshift.io/sa.scc.uid-range=1000040000/10000
+Display Name:   <none>
+Description:    <none>
+Status:         Active
 Node Selector:  <none>
-
 Quota:
-  Name:     quota
-  Resource    Used    Hard
-  --------    ----    ----
-  cpu     100m    1
-  memory      104857600 750Mi
-  pods      1   10
-  replicationcontrollers  0m    10
-  resourcequotas    1   1
-  services    0m    10
-
+        Name:                   quota
+        Resource                Used    Hard
+        --------                ----    ----
+        cpu                     100m    1
+        memory                  100Mi   750Mi
+        pods                    1       10
+        replicationcontrollers  0       10
+        resourcequotas          1       1
+        services                0       10
 Resource limits:
-  Name:   limits
-  Type    Resource  Min Max Default
-  ----    --------  --- --- ---
-  Pod   memory    5Mi 750Mi -
-  Pod   cpu   10m 500m  -
-  Container cpu   10m 500m  100m
-  Container memory    5Mi 750Mi 100Mi
+        Name:           limits
+        Type            Resource        Min     Max     Default
+        ----            --------        ---     ---     ---
+        Pod             cpu             10m     500m    -
+        Pod             memory          5Mi     750Mi   -
+        Container       cpu             10m     500m    100m
+        Container       memory          5Mi     750Mi   100Mi    
 ```
 
 As you can see, we now have a single pod in our project, and that pod is consuming the default amount of resources.
@@ -252,86 +251,102 @@ To demonstrate this, let's provision a custom template that enumerates resources
 
 ```shell
 $ oc create -f application-template-with-resources.json
-$ oc describe template templates ruby-helloworld-sample-with-resources
-Name:   ruby-helloworld-sample-with-resources
-Created:  12 minutes ago
-Labels:   <none>
-Description:  This example shows how to create a simple ruby application in openshift origin v3
-Annotations:  iconClass=icon-ruby,tags=instant-app,ruby,mysql
+$ oc describe template ruby-helloworld-sample-with-resources
+Name:           ruby-helloworld-sample-with-resources
+Created:        12 minutes ago
+Labels:         <none>
+Description:    This example shows how to create a simple ruby application in openshift origin v3
+Annotations:    iconClass=icon-ruby
+                tags=instant-app,ruby,mysql
 
-Parameters:    
-    Name:   ADMIN_USERNAME
-    Description:  administrator username
-    Generated:    expression
-    From:   admin[A-Z0-9]{3}
+Parameters:
+    Name:               ADMIN_USERNAME
+    Description:        administrator username
+    Required:           false
+    Generated:          expression
+    From:               admin[A-Z0-9]{3}
 
-    Name:   ADMIN_PASSWORD
-    Description:  administrator password
-    Generated:    expression
-    From:   [a-zA-Z0-9]{8}
+    Name:               ADMIN_PASSWORD
+    Description:        administrator password
+    Required:           false
+    Generated:          expression
+    From:               [a-zA-Z0-9]{8}
 
-    Name:   MYSQL_USER
-    Description:  database username
-    Generated:    expression
-    From:   user[A-Z0-9]{3}
+    Name:               MYSQL_USER
+    Description:        database username
+    Required:           false
+    Generated:          expression
+    From:               user[A-Z0-9]{3}
 
-    Name:   MYSQL_PASSWORD
-    Description:  database password
-    Generated:    expression
-    From:   [a-zA-Z0-9]{8}
+    Name:               MYSQL_PASSWORD
+    Description:        database password
+    Required:           false
+    Generated:          expression
+    From:               [a-zA-Z0-9]{8}
 
-    Name:   MYSQL_DATABASE
-    Description:  database name
-    Value:    root
-    Name:   MYSQL_RESOURCES_LIMITS_MEMORY
-    Description:  database memory limit
-    Value:    200Mi
-    Name:   MYSQL_RESOURCES_LIMITS_CPU
-    Description:  database cpu limit
-    Value:    400m
-    Name:   DEPLOY_MYSQL_RESOURCES_LIMITS_MEMORY
-    Description:  deploy database memory limit
-    Value:    50Mi
-    Name:   DEPLOY_MYSQL_RESOURCES_LIMITS_CPU
-    Description:  deploy database cpu limit
-    Value:    150m
-    Name:   FRONTEND_RESOURCES_LIMITS_MEMORY
-    Description:  frontend memory limit
-    Value:    200Mi
-    Name:   FRONTEND_RESOURCES_LIMITS_CPU
-    Description:  frontend cpu limit
-    Value:    200m
-    Name:   DEPLOY_FRONTEND_RESOURCES_LIMITS_MEMORY
-    Description:  deploy frontend memory limit
-    Value:    50Mi
-    Name:   DEPLOY_FRONTEND_RESOURCES_LIMITS_CPU
-    Description:  deploy frontend cpu limit
-    Value:    150m
-    Name:   BUILD_RUBY_RESOURCES_LIMITS_MEMORY
-    Description:  build ruby memory limit
-    Value:    50Mi
-    Name:   BUILD_RUBY_RESOURCES_LIMITS_CPU
-    Description:  build ruby cpu limit
-    Value:    150m
+    Name:               MYSQL_DATABASE
+    Description:        database name
+    Required:           false
+    Value:              root
+    Name:               MYSQL_RESOURCES_LIMITS_MEMORY
+    Description:        database memory limit
+    Required:           false
+    Value:              200Mi
+    Name:               MYSQL_RESOURCES_LIMITS_CPU
+    Description:        database cpu limit
+    Required:           false
+    Value:              400m
+    Name:               DEPLOY_MYSQL_RESOURCES_LIMITS_MEMORY
+    Description:        deploy database memory limit
+    Required:           false
+    Value:              50Mi
+    Name:               DEPLOY_MYSQL_RESOURCES_LIMITS_CPU
+    Description:        deploy database cpu limit
+    Required:           false
+    Value:              20m
+    Name:               FRONTEND_RESOURCES_LIMITS_MEMORY
+    Description:        frontend memory limit
+    Required:           false
+    Value:              100Mi
+    Name:               FRONTEND_RESOURCES_LIMITS_CPU
+    Description:        frontend cpu limit
+    Required:           false
+    Value:              200m
+    Name:               DEPLOY_FRONTEND_RESOURCES_LIMITS_MEMORY
+    Description:        deploy frontend memory limit
+    Required:           false
+    Value:              50Mi
+    Name:               DEPLOY_FRONTEND_RESOURCES_LIMITS_CPU
+    Description:        deploy frontend cpu limit
+    Required:           false
+    Value:              20m
+    Name:               BUILD_RUBY_RESOURCES_LIMITS_MEMORY
+    Description:        build ruby memory limit
+    Required:           false
+    Value:              50Mi
+    Name:               BUILD_RUBY_RESOURCES_LIMITS_CPU
+    Description:        build ruby cpu limit
+    Required:           false
+    Value:              20m
 
 Object Labels:  template=application-template-stibuild
 
-Objects:   
-    Service frontend
-    Route route-edge
+Objects:
+    Service     frontend
+    Route       route-edge
     ImageStream origin-ruby-sample
     ImageStream ruby-20-centos7
-        
-        
-    Service database
+
+
+    Service     database           
 ```
 
 Notice that the template exposes parameters to limit the amount of memory and cpu used by the pods in your project.
 
 * MYSQL_RESOURCES_LIMITS_CPU - the amount of cpu for your mysql containers
 * MYSQL_RESOURCES_LIMITS_MEMORY - the amount of memory for your mysql containers
-* FRONTEND_RESOURCES_LIMITS_CPU - the amount of cpu for your mysql containers
-* FRONTEND_RESOURCES_LIMITS_MEMORY - the amount of memory for your mysql containers
+* FRONTEND_RESOURCES_LIMITS_CPU - the amount of cpu for your frontend containers
+* FRONTEND_RESOURCES_LIMITS_MEMORY - the amount of memory for your frontend containers
 
 When you build your source code, OpenShift will create pods to execute the build in your project.  Those pods consume
 node resources, so they are subject to quota.  It is possible to customize the amount of cpu and memory used by
@@ -354,15 +369,15 @@ Putting it all together
 Now that we have created our template, let's create the content within it.
 
 ```shell
-$ oc process ruby-helloworld-sample-with-resources | openshift cli create -f -
-services/frontend
-routes/route-edge
-imageStreams/origin-ruby-sample
-imageStreams/ruby-20-centos7
-buildConfigs/ruby-sample-build
-deploymentConfigs/frontend
-services/database
-deploymentConfigs/database
+$ oc process ruby-helloworld-sample-with-resources | oc create -f -
+service "frontend" created
+route "route-edge" created
+imagestream "origin-ruby-sample" created
+imagestream "ruby-20-centos7" created
+buildconfig "ruby-sample-build" created
+deploymentconfig "frontend" created
+service "database" created
+deploymentconfig "database" created
 ```
 
 Every action in the project that consumes node level cpu or memory resources has defined limits.
@@ -399,7 +414,7 @@ Output to:    origin-ruby-sample:latest
 Output Spec:    <none>
 Events:
   FirstSeen       LastSeen      Count From      SubobjectPath Reason    Message
-  Tue, 19 May 2015 20:55:47 +0000 Tue, 19 May 2015 20:56:01 +0000 2 {build-controller }     failedCreate  Error creating: Pod "ruby-sample-build-5" is forbidden: Limited to 750Mi memory 
+  Tue, 19 May 2015 20:55:47 +0000 Tue, 19 May 2015 20:56:01 +0000 2 {build-controller }     failedCreate  Error creating: Pod "ruby-sample-build-5" is forbidden: Limited to 750Mi memory
 ```
 
 Note the event that was published from the build controller to denote that there is no more quota

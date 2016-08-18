@@ -67,12 +67,14 @@ func MockBuildConfig(source buildapi.BuildSource, strategy buildapi.BuildStrateg
 	return &buildapi.BuildConfig{
 		ObjectMeta: kapi.ObjectMeta{
 			Name: "test-build-config",
+			Labels: map[string]string{
+				"testbclabel": "testbcvalue",
+			},
 		},
 		Spec: buildapi.BuildConfigSpec{
-			BuildSpec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
 				Source: source,
 				Revision: &buildapi.SourceRevision{
-					Type: buildapi.BuildSourceGit,
 					Git: &buildapi.GitSourceRevision{
 						Commit: "1234",
 					},
@@ -86,7 +88,6 @@ func MockBuildConfig(source buildapi.BuildSource, strategy buildapi.BuildStrateg
 
 func MockSource() buildapi.BuildSource {
 	return buildapi.BuildSource{
-		Type: buildapi.BuildSourceGit,
 		Git: &buildapi.GitBuildSource{
 			URI: "http://test.repository/namespace/name",
 			Ref: "test-tag",
@@ -96,7 +97,6 @@ func MockSource() buildapi.BuildSource {
 
 func MockSourceStrategyForImageRepository() buildapi.BuildStrategy {
 	return buildapi.BuildStrategy{
-		Type: buildapi.SourceBuildStrategyType,
 		SourceStrategy: &buildapi.SourceBuildStrategy{
 			From: kapi.ObjectReference{
 				Kind:      "ImageStreamTag",
@@ -111,7 +111,7 @@ func MockOutput() buildapi.BuildOutput {
 	return buildapi.BuildOutput{
 		To: &kapi.ObjectReference{
 			Kind: "DockerImage",
-			Name: "http://localhost:5000/test/image-tag",
+			Name: "localhost:5000/test/image-tag",
 		},
 	}
 }

@@ -1,119 +1,75 @@
 #!/bin/bash
-
-set -o errexit
-set -o nounset
-set -o pipefail
-
 STARTTIME=$(date +%s)
-OS_ROOT=$(dirname "${BASH_SOURCE}")/..
-source "${OS_ROOT}/hack/common.sh"
-source "${OS_ROOT}/hack/util.sh"
-os::log::install_errexit
-
-# Go to the top of the tree.
-cd "${OS_ROOT}"
+source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
 os::build::setup_env
 
-export ETCD_HOST=${ETCD_HOST:-127.0.0.1}
-export ETCD_PORT=${ETCD_PORT:-44001}
-export ETCD_PEER_PORT=${ETCD_PEER_PORT:-47001}
-
-
-set +e
-
-if [ "$(which etcd 2>/dev/null)" == "" ]; then
-	if [[ ! -f ${OS_ROOT}/_tools/etcd/bin/etcd ]]; then
-		echo "etcd must be in your PATH or installed in _tools/etcd/bin/ with hack/install-etcd.sh"
-		exit 1
-	fi
-	export PATH="${OS_ROOT}/_tools/etcd/bin:$PATH"
-fi
-
-# Stop on any failures
-set -e
-
-
+export API_SCHEME="http"
+export API_BIND_HOST="127.0.0.1"
+os::util::environment::setup_all_server_vars "test-integration/"
+reset_tmp_dir
 
 function cleanup() {
+	out=$?
 	set +e
-	kill "${ETCD_PID}" 1>&2 2>/dev/null
-	echo
+
 	echo "Complete"
+	exit $out
 }
 
-
-
-package="${OS_TEST_PACKAGE:-test/integration}"
-tags="${OS_TEST_TAGS:-integration !docker etcd}"
+trap cleanup EXIT SIGINT
 
 export GOMAXPROCS="$(grep "processor" -c /proc/cpuinfo 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || 1)"
-TMPDIR=${TMPDIR:-/tmp}
-export BASETMPDIR=${BASETMPDIR:-${TMPDIR}/openshift-integration}
-rm -rf ${BASETMPDIR} | true
-mkdir -p ${BASETMPDIR}
 
-
-echo
-echo "Test ${package} -tags='${tags}' ..."
-echo
-
-# setup the test dirs
-testdir="${OS_ROOT}/_output/testbin/${package}"
-name="$(basename ${testdir})"
-testexec="${testdir}/${name}.test"
-mkdir -p "${testdir}"
+# Internalize environment variables we consume and default if they're not set
+package="${OS_TEST_PACKAGE:-test/integration}"
+name="$(basename ${package})"
+dlv_debug="${DLV_DEBUG:-}"
+verbose="${VERBOSE:-}"
 
 # build the test executable (cgo must be disabled to have the symbol table available)
-pushd "${testdir}" 2>&1 >/dev/null
-CGO_ENABLED=0 go test -c -tags="${tags}" "${OS_GO_PACKAGE}/${package}"
-popd 2>&1 >/dev/null
+if [[ -n "${OPENSHIFT_SKIP_BUILD:-}" ]]; then
+  echo "WARNING: Skipping build due to OPENSHIFT_SKIP_BUILD"
+else
+	CGO_ENABLED=0 "${OS_ROOT}/hack/build-go.sh" "${package}/${name}.test" -a -installsuffix=cgo
+fi
+testexec="$(pwd)/$(os::build::find-binary "${name}.test")"
 
-
-# Start etcd
-export ETCD_DIR=${BASETMPDIR}/etcd
-etcd -name test -data-dir ${ETCD_DIR} \
- --listen-peer-urls http://${ETCD_HOST}:${ETCD_PEER_PORT} \
- --listen-client-urls http://${ETCD_HOST}:${ETCD_PORT} \
- --initial-advertise-peer-urls http://${ETCD_HOST}:${ETCD_PEER_PORT} \
- --initial-cluster test=http://${ETCD_HOST}:${ETCD_PEER_PORT} \
- --advertise-client-urls http://${ETCD_HOST}:${ETCD_PORT} \
- >/dev/null 2>/dev/null &
-export ETCD_PID=$!
-
-wait_for_url "http://${ETCD_HOST}:${ETCD_PORT}/version" "etcd: " 0.25 80
-curl -X PUT	"http://${ETCD_HOST}:${ETCD_PORT}/v2/keys/_test"
-echo
-
-
-
-trap cleanup EXIT SIGINT
+os::log::start_system_logger
 
 function exectest() {
 	echo "Running $1..."
 
+	export TEST_ETCD_DIR="${TMPDIR:-/tmp}/etcd-${1}"
+	rm -fr "${TEST_ETCD_DIR}"
+	mkdir -p "${TEST_ETCD_DIR}"
 	result=1
-	if [ -n "${VERBOSE-}" ]; then
-		ETCD_PORT=${ETCD_PORT} "${testexec}" -test.v -test.run="^$1$" "${@:2}" 2>&1
+	if [[ -n "${dlv_debug}" ]]; then
+		# run tests using delve debugger
+		dlv exec "${testexec}" -- -test.run="^$1$" "${@:2}"
+		result=$?
+		out=
+	elif [[ -n "${verbose}" ]]; then
+		# run tests with extra verbosity
+		out=$("${testexec}" -vmodule=*=5 -test.v -test.timeout=4m -test.run="^$1$" "${@:2}" 2>&1)
 		result=$?
 	else
-		out=$(ETCD_PORT=${ETCD_PORT} "${testexec}" -test.run="^$1$" "${@:2}" 2>&1)
+		# run tests normally
+		out=$("${testexec}" -test.timeout=4m -test.run="^$1$" "${@:2}" 2>&1)
 		result=$?
 	fi
 
-	tput cuu 1 # Move up one line
-	tput el		# Clear "running" line
+	os::text::clear_last_line
 
 	if [[ ${result} -eq 0 ]]; then
-		tput setaf 2 # green
-		echo "ok			$1"
-		tput sgr0		# reset
+		os::text::print_green "ok      $1"
+		# Remove the etcd directory to cleanup the space.
+		rm -rf "${TEST_ETCD_DIR}"
 		exit 0
 	else
-		tput setaf 1 # red
-		echo "failed	$1"
-		tput sgr0		# reset
-		echo "${out}"
+		os::text::print_red "failed  $1"
+		echo "${out:-}"
+
 		exit 1
 	fi
 }
@@ -122,6 +78,7 @@ export -f exectest
 export testexec
 export childargs
 
+loop="${TIMES:-1}"
 # $1 is passed to grep -E to filter the list of tests; this may be the name of a single test,
 # a fragment of a test name, or a regular expression.
 #
@@ -130,12 +87,17 @@ export childargs
 # hack/test-integration.sh WatchBuilds
 # hack/test-integration.sh Template*
 # hack/test-integration.sh "(WatchBuilds|Template)"
-
+tests=( $(go run "${OS_ROOT}/hack/listtests.go" -prefix="${OS_GO_PACKAGE}/${package}.Test" "${testexec}" | grep -E "${1-Test}") )
 # run each test as its own process
-pushd "./${package}" 2>&1 >/dev/null
-time go run "${OS_ROOT}/hack/listtests.go" -prefix="${OS_GO_PACKAGE}/${package}.Test" "${testdir}" \
-	| grep --color=never -E "${1-Test}" \
-	| xargs -I {} -n 1 bash -c "exectest {} ${@:2}" # "${testexec}" -test.run="^{}$" "${@:2}"
-popd 2>&1 >/dev/null
+ret=0
+pushd "${OS_ROOT}/${package}" &>/dev/null
+for test in "${tests[@]}"; do
+	for((i=0;i<${loop};i+=1)); do
+		if ! (exectest "${test}" ${@:2}); then
+			ret=1
+		fi
+	done
+done
+popd &>/dev/null
 
-ret=$?; ENDTIME=$(date +%s); echo "$0 took $(($ENDTIME - $STARTTIME)) seconds"; exit "$ret"
+ENDTIME=$(date +%s); echo "$0 took $(($ENDTIME - $STARTTIME)) seconds"; exit "$ret"

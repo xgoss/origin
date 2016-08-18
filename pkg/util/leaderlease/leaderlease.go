@@ -6,9 +6,10 @@ import (
 
 	etcdclient "github.com/coreos/go-etcd/etcd"
 	"github.com/golang/glog"
-	storage "k8s.io/kubernetes/pkg/storage/etcd"
-	"k8s.io/kubernetes/pkg/util"
+	etcdutil "k8s.io/kubernetes/pkg/storage/etcd/util"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
+	utilwait "k8s.io/kubernetes/pkg/util/wait"
 )
 
 // Leaser allows a caller to acquire a lease and be notified when it is lost.
@@ -18,7 +19,7 @@ type Leaser interface {
 	// lease is acquired, and the provided channel will be closed when the lease is lost. If the
 	// function returns true, the lease will be released on exit. If the function returns false,
 	// the lease will be held.
-	AcquireAndHold(chan struct{})
+	AcquireAndHold(chan error)
 	// Release returns any active leases
 	Release()
 }
@@ -53,7 +54,7 @@ func NewEtcd(client *etcdclient.Client, key, value string, ttl uint64) Leaser {
 		value:  value,
 		ttl:    ttl,
 
-		waitFraction:         0.75,
+		waitFraction:         0.66,
 		pauseInterval:        time.Second,
 		maxRetries:           10,
 		minimumRetryInterval: 100 * time.Millisecond,
@@ -61,11 +62,11 @@ func NewEtcd(client *etcdclient.Client, key, value string, ttl uint64) Leaser {
 }
 
 // AcquireAndHold implements an acquire and release of a lease.
-func (e *Etcd) AcquireAndHold(notify chan struct{}) {
+func (e *Etcd) AcquireAndHold(notify chan error) {
 	for {
 		ok, ttl, index, err := e.tryAcquire()
 		if err != nil {
-			util.HandleError(err)
+			utilruntime.HandleError(err)
 			time.Sleep(e.pauseInterval)
 			continue
 		}
@@ -75,12 +76,12 @@ func (e *Etcd) AcquireAndHold(notify chan struct{}) {
 		}
 
 		// notify
-		notify <- struct{}{}
+		notify <- nil
 		defer close(notify)
 
 		// hold the lease
 		if err := e.tryHold(ttl, index); err != nil {
-			util.HandleError(err)
+			notify <- err
 		}
 		break
 	}
@@ -101,7 +102,7 @@ func (e *Etcd) tryAcquire() (ok bool, ttl uint64, nextIndex uint64, err error) {
 		return true, ttl, index + 1, nil
 	}
 
-	if !storage.IsEtcdNodeExist(err) {
+	if !etcdutil.IsEtcdNodeExist(err) {
 		return false, 0, 0, fmt.Errorf("unable to check lease %s: %v", e.key, err)
 	}
 
@@ -139,10 +140,10 @@ func (e *Etcd) Release() {
 		}
 		// If the value has changed, we don't hold the lease. If the key is missing we don't
 		// hold the lease.
-		if storage.IsEtcdTestFailed(err) || storage.IsEtcdNotFound(err) {
+		if etcdutil.IsEtcdTestFailed(err) || etcdutil.IsEtcdNotFound(err) {
 			break
 		}
-		util.HandleError(fmt.Errorf("unable to release %s: %v", e.key, err))
+		utilruntime.HandleError(fmt.Errorf("unable to release %s: %v", e.key, err))
 	}
 }
 
@@ -155,16 +156,20 @@ func (e *Etcd) tryHold(ttl, index uint64) error {
 	// watch for termination
 	stop := make(chan struct{})
 	lost := make(chan struct{})
+	closedLost := false
 	watchIndex := index
-	go util.Until(func() {
+	go utilwait.Until(func() {
 		index, err := e.waitForExpiration(true, watchIndex, stop)
 		watchIndex = index
 		if err != nil {
-			util.HandleError(fmt.Errorf("error watching for lease expiration %s: %v", e.key, err))
+			utilruntime.HandleError(fmt.Errorf("error watching for lease expiration %s: %v", e.key, err))
 			return
 		}
 		glog.V(4).Infof("Lease %s lost due to deletion at %d", e.key, watchIndex)
-		close(lost)
+		if !closedLost {
+			closedLost = true
+			close(lost)
+		}
 	}, 100*time.Millisecond, stop)
 	defer close(stop)
 
@@ -187,12 +192,12 @@ func (e *Etcd) tryHold(ttl, index uint64) error {
 				case err == nil:
 					index = eventIndexFor(resp)
 					return true, nil
-				case storage.IsEtcdTestFailed(err):
+				case etcdutil.IsEtcdTestFailed(err):
 					return false, fmt.Errorf("another client has taken the lease %s: %v", e.key, err)
-				case storage.IsEtcdNotFound(err):
+				case etcdutil.IsEtcdNotFound(err):
 					return false, fmt.Errorf("another client has revoked the lease %s", e.key)
 				default:
-					util.HandleError(fmt.Errorf("unexpected error renewing lease %s: %v", e.key, err))
+					utilruntime.HandleError(fmt.Errorf("unexpected error renewing lease %s: %v", e.key, err))
 					index = etcdIndexFor(err, index)
 					// try again
 					return false, nil

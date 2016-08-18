@@ -1,9 +1,44 @@
 package api
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
+
+func TestKnownAPIGroups(t *testing.T) {
+	unexposedGroups := sets.NewString("authorization.k8s.io", "componentconfig", "metrics", "policy", "federation", "authentication.k8s.io", "rbac.authorization.k8s.io")
+
+	enabledGroups := sets.NewString()
+	for _, enabledVersion := range registered.EnabledVersions() {
+		enabledGroups.Insert(enabledVersion.Group)
+	}
+
+	if missingKnownGroups := KnownKubeAPIGroups.Difference(enabledGroups); len(missingKnownGroups) > 0 {
+		t.Errorf("KnownKubeAPIGroups are missing from registered.EnabledVersions: %v", missingKnownGroups.List())
+	}
+	if unknownEnabledGroups := enabledGroups.Difference(KnownKubeAPIGroups).Difference(unexposedGroups); len(unknownEnabledGroups) > 0 {
+		t.Errorf("KnownKubeAPIGroups is missing groups from registered.EnabledVersions: %v", unknownEnabledGroups.List())
+	}
+}
+
+func TestAllowedAPIVersions(t *testing.T) {
+	// Make sure all versions we know about match registered versions
+	for group, versions := range KubeAPIGroupsToAllowedVersions {
+		enabled := sets.NewString()
+		for _, enabledVersion := range registered.EnabledVersionsForGroup(group) {
+			enabled.Insert(enabledVersion.Version)
+		}
+		expected := sets.NewString(versions...)
+		actual := enabled.Difference(sets.NewString(KubeAPIGroupsToDeadVersions[group]...))
+		if e, a := expected.List(), actual.List(); !reflect.DeepEqual(e, a) {
+			t.Errorf("For group %s, expected versions %#v, got %#v", group, e, a)
+		}
+	}
+}
 
 func TestFeatureListAdd(t *testing.T) {
 	orderedList := []string{FeatureBuilder, FeatureWebConsole, FeatureS2I}
@@ -82,28 +117,134 @@ func TestFeatureListDelete(t *testing.T) {
 	}
 }
 
+func TestFeatureListDeleteByAnAlias(t *testing.T) {
+	fl := FeatureList{FeatureWebConsole}
+	// try to delete unknown feature
+	fl.Delete("web console")
+	if len(fl) != 0 {
+		t.Fatalf("fl.Delete() should have removed feature %s", FeatureWebConsole)
+	}
+}
+
+func TestFeatureListDeleteUknown(t *testing.T) {
+	fl := FeatureList{FeatureWebConsole, "Unknown Feature"}
+	// try to delete unknown feature
+	fl.Delete("unknownfeatures")
+	if len(fl) != 2 {
+		t.Fatalf("fl.Delete() unexpectedly modified the list: %d != 2", len(fl))
+	}
+	fl.Delete("unknown feature")
+	if len(fl) != 1 {
+		t.Fatalf("Delete() should have removed exactly 1 item: %d != 1", len(fl))
+	}
+	if fl[0] != FeatureWebConsole {
+		t.Fatalf("Delete() removed wrong item")
+	}
+}
+
+func TestFeatureListDeleteAliases(t *testing.T) {
+	fl := FeatureList{}
+	for alias := range FeatureAliases {
+		fl = append(fl, alias)
+	}
+	// try to delete unknown feature
+	fl.Delete("unknown")
+	if len(fl) != len(FeatureAliases) {
+		t.Fatalf("fl.Delete() unexpectedly modified the list: %d != %d", len(fl), len(FeatureAliases))
+	}
+	fl.Delete("web console")
+	if len(fl) != len(FeatureAliases)-1 {
+		t.Fatalf("Delete() should have removed exactly 1 item: %d != %d", len(fl), len(FeatureAliases)-1)
+	}
+	fl.Delete("s2ibuilder")
+	if len(fl) != len(FeatureAliases)-2 {
+		t.Fatalf("Delete() should have removed exactly 1 item: %d != %d", len(fl), len(FeatureAliases)-2)
+	}
+}
+
+func testFeatureListCases(t *testing.T, fl FeatureList, cases []string, good bool) {
+	for _, name := range cases {
+		if good {
+			if !fl.Has(name) {
+				t.Errorf("feature list {%s} should have %q", strings.Join(fl, ", "), name)
+			}
+		} else {
+			if fl.Has(name) {
+				t.Errorf("feature list {%s} shouldn't have %q", strings.Join(fl, ", "), name)
+			}
+		}
+	}
+}
+
 func TestFeatureListHas(t *testing.T) {
 	fl := FeatureList{FeatureBuilder, FeatureS2I}
 	goodCases := []string{
 		"builder",
 		"BuilDer",
-		"S2I Builder",
-		"S2i builder",
+		"S2IBuilder",
+		"S2ibuilder",
+		"s2i builder",
 	}
 	badCases := []string{
 		"console",
 		"CONSOLE",
 		"unknown",
-		"s2ibuilder",
+		"web-console",
+		"S2 I Builder",
 	}
-	for _, gc := range goodCases {
-		if !fl.Has(gc) {
-			t.Errorf("feature list should have %q", gc)
-		}
+	testFeatureListCases(t, fl, goodCases, true)
+	testFeatureListCases(t, fl, badCases, false)
+
+	fl = FeatureList{FeatureWebConsole}
+	goodCases = []string{
+		"WebConsole",
+		"Web Console",
+		"wEBcONSOLE",
 	}
-	for _, bc := range badCases {
-		if fl.Has(bc) {
-			t.Errorf("feature list shouldn't have %q", bc)
-		}
+	badCases = []string{
+		"console",
+		"CONSOLE",
+		"unknown",
+		"builder",
+		"web-console",
+		"S2 I Builder",
 	}
+	testFeatureListCases(t, fl, goodCases, true)
+	testFeatureListCases(t, fl, badCases, false)
+}
+
+func TestFeatureListHasWithAliases(t *testing.T) {
+	fl := FeatureList{}
+	for alias := range FeatureAliases {
+		fl = append(fl, alias)
+	}
+	goodCases := []string{
+		"web console",
+		"WebConsole",
+		"S2iBuilder",
+		"S2i Builder",
+	}
+	badCases := []string{
+		"Builder",
+	}
+	testFeatureListCases(t, fl, goodCases, true)
+	testFeatureListCases(t, fl, badCases, false)
+}
+
+func TestFeatureListHasWithUnknownValue(t *testing.T) {
+	fl := FeatureList{"Unknown value"}
+	goodCases := []string{
+		"unknown value",
+		"UNknown Value",
+		"Unknown value",
+	}
+	badCases := []string{
+		"web console",
+		"WebConsole",
+		"S2iBuilder",
+		"S2i Builder",
+		"unknownvalue",
+	}
+	testFeatureListCases(t, fl, goodCases, true)
+	testFeatureListCases(t, fl, badCases, false)
 }

@@ -1,34 +1,28 @@
-// +build integration,etcd
-
 package integration
 
 import (
 	"path"
+	"reflect"
 	"sync"
 	"testing"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrs "k8s.io/kubernetes/pkg/api/errors"
-	etcdstorage "k8s.io/kubernetes/pkg/storage/etcd"
+	etcdutil "k8s.io/kubernetes/pkg/storage/etcd/util"
 	"k8s.io/kubernetes/pkg/types"
 
 	authapi "github.com/openshift/origin/pkg/auth/api"
 	"github.com/openshift/origin/pkg/auth/userregistry/identitymapper"
 	"github.com/openshift/origin/pkg/cmd/server/etcd"
-	"github.com/openshift/origin/pkg/cmd/server/origin"
 	"github.com/openshift/origin/pkg/user/api"
 	identityregistry "github.com/openshift/origin/pkg/user/registry/identity"
 	identityetcd "github.com/openshift/origin/pkg/user/registry/identity/etcd"
 	userregistry "github.com/openshift/origin/pkg/user/registry/user"
 	useretcd "github.com/openshift/origin/pkg/user/registry/user/etcd"
-	"github.com/openshift/origin/pkg/user/registry/useridentitymapping"
+	"github.com/openshift/origin/pkg/util/restoptions"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
-
-func init() {
-	testutil.RequireEtcd()
-}
 
 func makeIdentityInfo(providerName, providerUserName string, extra map[string]string) authapi.UserIdentityInfo {
 	info := authapi.NewDefaultUserIdentityInfo("idp", "bob")
@@ -70,8 +64,9 @@ func makeMapping(user, identity string) *api.UserIdentityMapping {
 }
 
 func TestUserInitialization(t *testing.T) {
-
-	masterConfig, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	masterConfig, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,22 +76,36 @@ func TestUserInitialization(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	etcdClient, err := etcd.GetAndTestEtcdClient(masterConfig.EtcdClientInfo)
+	restOptsGetter := restoptions.NewConfigGetter(*masterConfig)
+
+	userStorage, err := useretcd.NewREST(restOptsGetter)
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
+	userRegistry := userregistry.NewRegistry(userStorage)
 
-	etcdHelper, err := origin.NewEtcdStorage(etcdClient, masterConfig.EtcdStorageConfig.OpenShiftStorageVersion, masterConfig.EtcdStorageConfig.OpenShiftStoragePrefix)
+	identityStorage, err := identityetcd.NewREST(restOptsGetter)
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
+	identityRegistry := identityregistry.NewRegistry(identityStorage)
 
-	userRegistry := userregistry.NewRegistry(useretcd.NewREST(etcdHelper))
-	identityRegistry := identityregistry.NewRegistry(identityetcd.NewREST(etcdHelper))
-	useridentityMappingRegistry := useridentitymapping.NewRegistry(useridentitymapping.NewREST(userRegistry, identityRegistry))
-
-	lookup := identitymapper.NewLookupIdentityMapper(useridentityMappingRegistry, userRegistry)
-	provisioner := identitymapper.NewAlwaysCreateUserIdentityToUserMapper(identityRegistry, userRegistry)
+	lookup, err := identitymapper.NewIdentityUserMapper(identityRegistry, userRegistry, identitymapper.MappingMethodLookup)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	generate, err := identitymapper.NewIdentityUserMapper(identityRegistry, userRegistry, identitymapper.MappingMethodGenerate)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	add, err := identitymapper.NewIdentityUserMapper(identityRegistry, userRegistry, identitymapper.MappingMethodAdd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	claim, err := identitymapper.NewIdentityUserMapper(identityRegistry, userRegistry, identitymapper.MappingMethodClaim)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	testcases := map[string]struct {
 		Identity authapi.UserIdentityInfo
@@ -107,15 +116,16 @@ func TestUserInitialization(t *testing.T) {
 		CreateMapping  *api.UserIdentityMapping
 		UpdateUser     *api.User
 
-		ExpectedErr      error
-		ExpectedUserName string
-		ExpectedFullName string
+		ExpectedErr        error
+		ExpectedUserName   string
+		ExpectedFullName   string
+		ExpectedIdentities []string
 	}{
 		"lookup missing identity": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
 			Mapper:   lookup,
 
-			ExpectedErr: kerrs.NewNotFound("UserIdentityMapping", "idp:bob"),
+			ExpectedErr: identitymapper.NewLookupError(makeIdentityInfo("idp", "bob", nil), kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob")),
 		},
 		"lookup existing identity": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
@@ -125,65 +135,72 @@ func TestUserInitialization(t *testing.T) {
 			CreateIdentity: makeIdentity("idp", "bob"),
 			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
 
-			ExpectedUserName: "mappeduser",
+			ExpectedUserName:   "mappeduser",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision missing identity and user": {
+		"generate missing identity and user": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
-			ExpectedUserName: "bob",
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision missing identity and user with preferred username and display name": {
+		"generate missing identity and user with preferred username and display name": {
 			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityDisplayNameKey: "Bob, Sr.", authapi.IdentityPreferredUsernameKey: "admin"}),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
-			ExpectedUserName: "admin",
-			ExpectedFullName: "Bob, Sr.",
+			ExpectedUserName:   "admin",
+			ExpectedFullName:   "Bob, Sr.",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision missing identity for existing user": {
+		"generate missing identity for existing user": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser: makeUser("bob", "idp:bob"),
 
-			ExpectedUserName: "bob",
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision missing identity with conflicting user": {
+		"generate missing identity with conflicting user": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser: makeUser("bob"),
 
-			ExpectedUserName: "bob2",
+			ExpectedUserName:   "bob2",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision missing identity with conflicting user and preferred username": {
+		"generate missing identity with conflicting user and preferred username": {
 			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityPreferredUsernameKey: "admin"}),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser: makeUser("admin"),
 
-			ExpectedUserName: "admin2",
+			ExpectedUserName:   "admin2",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision with existing unmapped identity": {
+		"generate with existing unmapped identity": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateIdentity: makeIdentity("idp", "bob"),
 
-			ExpectedErr: kerrs.NewNotFound("UserIdentityMapping", "idp:bob"),
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
 		},
-		"provision with existing mapped identity with invalid user UID": {
+		"generate with existing mapped identity with invalid user UID": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser:     makeUser("mappeduser"),
 			CreateIdentity: makeIdentityWithUserReference("idp", "bob", "mappeduser", "invalidUID"),
 
-			ExpectedErr: kerrs.NewNotFound("UserIdentityMapping", "idp:bob"),
+			ExpectedErr:        kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+			ExpectedIdentities: []string{"idp:bob"},
 		},
-		"provision with existing mapped identity without user backreference": {
+		"generate with existing mapped identity without user backreference": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser:     makeUser("mappeduser"),
 			CreateIdentity: makeIdentity("idp", "bob"),
@@ -191,26 +208,205 @@ func TestUserInitialization(t *testing.T) {
 			// Update user to a version which does not reference the identity
 			UpdateUser: makeUser("mappeduser"),
 
-			ExpectedErr: kerrs.NewNotFound("UserIdentityMapping", "idp:bob"),
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
 		},
-		"provision returns existing mapping": {
+		"generate returns existing mapping": {
 			Identity: makeIdentityInfo("idp", "bob", nil),
-			Mapper:   provisioner,
+			Mapper:   generate,
 
 			CreateUser:     makeUser("mappeduser"),
 			CreateIdentity: makeIdentity("idp", "bob"),
 			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
 
-			ExpectedUserName: "mappeduser",
+			ExpectedUserName:   "mappeduser",
+			ExpectedIdentities: []string{"idp:bob"},
 		},
+
+		"add missing identity and user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"add missing identity and user with preferred username and display name": {
+			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityDisplayNameKey: "Bob, Sr.", authapi.IdentityPreferredUsernameKey: "admin"}),
+			Mapper:   add,
+
+			ExpectedUserName:   "admin",
+			ExpectedFullName:   "Bob, Sr.",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"add missing identity for existing user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateUser: makeUser("bob", "idp:bob"),
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"add missing identity with conflicting user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateUser: makeUser("bob", "otheridp:otheruser"),
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"otheridp:otheruser", "idp:bob"},
+		},
+		"add missing identity with conflicting user and preferred username": {
+			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityPreferredUsernameKey: "admin"}),
+			Mapper:   add,
+
+			CreateUser: makeUser("admin", "otheridp:otheruser"),
+
+			ExpectedUserName:   "admin",
+			ExpectedIdentities: []string{"otheridp:otheruser", "idp:bob"},
+		},
+		"add with existing unmapped identity": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateIdentity: makeIdentity("idp", "bob"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"add with existing mapped identity with invalid user UID": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentityWithUserReference("idp", "bob", "mappeduser", "invalidUID"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"add with existing mapped identity without user backreference": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentity("idp", "bob"),
+			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
+			// Update user to a version which does not reference the identity
+			UpdateUser: makeUser("mappeduser"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"add returns existing mapping": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   add,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentity("idp", "bob"),
+			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
+
+			ExpectedUserName:   "mappeduser",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+
+		"claim missing identity and user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"claim missing identity and user with preferred username and display name": {
+			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityDisplayNameKey: "Bob, Sr.", authapi.IdentityPreferredUsernameKey: "admin"}),
+			Mapper:   claim,
+
+			ExpectedUserName:   "admin",
+			ExpectedFullName:   "Bob, Sr.",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"claim missing identity for existing user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser: makeUser("bob", "idp:bob"),
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"claim missing identity with existing available user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser: makeUser("bob"),
+
+			ExpectedUserName:   "bob",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+		"claim missing identity with conflicting user": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser: makeUser("bob", "otheridp:otheruser"),
+
+			ExpectedErr: identitymapper.NewClaimError(makeUser("bob", "otheridp:otheruser"), makeIdentity("idp", "bob")),
+		},
+		"claim missing identity with conflicting user and preferred username": {
+			Identity: makeIdentityInfo("idp", "bob", map[string]string{authapi.IdentityPreferredUsernameKey: "admin"}),
+			Mapper:   claim,
+
+			CreateUser: makeUser("admin", "otheridp:otheruser"),
+
+			ExpectedErr: identitymapper.NewClaimError(makeUser("admin", "otheridp:otheruser"), makeIdentity("idp", "bob")),
+		},
+		"claim with existing unmapped identity": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateIdentity: makeIdentity("idp", "bob"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"claim with existing mapped identity with invalid user UID": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentityWithUserReference("idp", "bob", "mappeduser", "invalidUID"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"claim with existing mapped identity without user backreference": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentity("idp", "bob"),
+			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
+			// Update user to a version which does not reference the identity
+			UpdateUser: makeUser("mappeduser"),
+
+			ExpectedErr: kerrs.NewNotFound(api.Resource("useridentitymapping"), "idp:bob"),
+		},
+		"claim returns existing mapping": {
+			Identity: makeIdentityInfo("idp", "bob", nil),
+			Mapper:   claim,
+
+			CreateUser:     makeUser("mappeduser"),
+			CreateIdentity: makeIdentity("idp", "bob"),
+			CreateMapping:  makeMapping("mappeduser", "idp:bob"),
+
+			ExpectedUserName:   "mappeduser",
+			ExpectedIdentities: []string{"idp:bob"},
+		},
+	}
+
+	oldEtcdClient, err := etcd.GetAndTestEtcdClient(masterConfig.EtcdClientInfo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	for k, testcase := range testcases {
 		// Cleanup
-		if _, err := etcdClient.Delete(path.Join(masterConfig.EtcdStorageConfig.OpenShiftStoragePrefix, useretcd.EtcdPrefix), true); err != nil && !etcdstorage.IsEtcdNotFound(err) {
+		if _, err := oldEtcdClient.Delete(path.Join(masterConfig.EtcdStorageConfig.OpenShiftStoragePrefix, useretcd.EtcdPrefix), true); err != nil && !etcdutil.IsEtcdNotFound(err) {
 			t.Fatalf("Could not clean up users: %v", err)
 		}
-		if _, err := etcdClient.Delete(path.Join(masterConfig.EtcdStorageConfig.OpenShiftStoragePrefix, identityetcd.EtcdPrefix), true); err != nil && !etcdstorage.IsEtcdNotFound(err) {
+		if _, err := oldEtcdClient.Delete(path.Join(masterConfig.EtcdStorageConfig.OpenShiftStoragePrefix, identityetcd.EtcdPrefix), true); err != nil && !etcdutil.IsEtcdNotFound(err) {
 			t.Fatalf("Could not clean up identities: %v", err)
 		}
 
@@ -285,7 +481,9 @@ func TestUserInitialization(t *testing.T) {
 				if user.FullName != testcase.ExpectedFullName {
 					t.Errorf("%s: Expected full name %s, got %s", k, testcase.ExpectedFullName, user.FullName)
 				}
-
+				if !reflect.DeepEqual(user.Identities, testcase.ExpectedIdentities) {
+					t.Errorf("%s: Expected identities %v, got %v", k, testcase.ExpectedIdentities, user.Identities)
+				}
 			}()
 		}
 		wg.Wait()

@@ -3,14 +3,13 @@ package cmd
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
-
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/registry/controller"
 	"k8s.io/kubernetes/pkg/registry/endpoint"
 	"k8s.io/kubernetes/pkg/registry/namespace"
@@ -21,6 +20,7 @@ import (
 	"k8s.io/kubernetes/pkg/registry/resourcequota"
 	"k8s.io/kubernetes/pkg/registry/secret"
 	"k8s.io/kubernetes/pkg/registry/serviceaccount"
+	"k8s.io/kubernetes/pkg/runtime"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	buildrest "github.com/openshift/origin/pkg/build/registry/build"
@@ -28,6 +28,7 @@ import (
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 	routeapi "github.com/openshift/origin/pkg/route/api"
+	osautil "github.com/openshift/origin/pkg/serviceaccounts/util"
 )
 
 var ErrExportOmit = fmt.Errorf("object is omitted")
@@ -37,9 +38,9 @@ type Exporter interface {
 	Export(obj runtime.Object, exact bool) error
 }
 
-type defaultExporter struct{}
+type DefaultExporter struct{}
 
-func (e *defaultExporter) AddExportOptions(flags *pflag.FlagSet) {
+func (e *DefaultExporter) AddExportOptions(flags *pflag.FlagSet) {
 }
 
 func exportObjectMeta(objMeta *kapi.ObjectMeta, exact bool) {
@@ -47,7 +48,7 @@ func exportObjectMeta(objMeta *kapi.ObjectMeta, exact bool) {
 	if !exact {
 		objMeta.Namespace = ""
 	}
-	objMeta.CreationTimestamp = util.Time{}
+	objMeta.CreationTimestamp = unversioned.Time{}
 	objMeta.DeletionTimestamp = nil
 	objMeta.ResourceVersion = ""
 	objMeta.SelfLink = ""
@@ -56,7 +57,7 @@ func exportObjectMeta(objMeta *kapi.ObjectMeta, exact bool) {
 	}
 }
 
-func (e *defaultExporter) Export(obj runtime.Object, exact bool) error {
+func (e *DefaultExporter) Export(obj runtime.Object, exact bool) error {
 	if meta, err := kapi.ObjectMetaFor(obj); err == nil {
 		exportObjectMeta(meta, exact)
 	} else {
@@ -114,13 +115,37 @@ func (e *defaultExporter) Export(obj runtime.Object, exact bool) error {
 		}
 	case *kapi.ServiceAccount:
 		serviceaccount.Strategy.PrepareForCreate(obj)
+		if exact {
+			return nil
+		}
+
+		dockercfgSecretPrefix := osautil.GetDockercfgSecretNamePrefix(t)
+		newImagePullSecrets := []kapi.LocalObjectReference{}
+		for _, secretRef := range t.ImagePullSecrets {
+			if strings.HasPrefix(secretRef.Name, dockercfgSecretPrefix) {
+				continue
+			}
+			newImagePullSecrets = append(newImagePullSecrets, secretRef)
+		}
+		t.ImagePullSecrets = newImagePullSecrets
+
+		tokenSecretPrefix := osautil.GetTokenSecretNamePrefix(t)
+		newMountableSecrets := []kapi.ObjectReference{}
+		for _, secretRef := range t.Secrets {
+			if strings.HasPrefix(secretRef.Name, dockercfgSecretPrefix) ||
+				strings.HasPrefix(secretRef.Name, tokenSecretPrefix) {
+				continue
+			}
+			newMountableSecrets = append(newMountableSecrets, secretRef)
+		}
+		t.Secrets = newMountableSecrets
 
 	case *deployapi.DeploymentConfig:
 		// TODO: when internal refactor is completed use status reset
-		t.LatestVersion = 0
-		t.Details = nil
-		for i := range t.Triggers {
-			if p := t.Triggers[i].ImageChangeParams; p != nil {
+		t.Status.LatestVersion = 0
+		t.Status.Details = nil
+		for i := range t.Spec.Triggers {
+			if p := t.Spec.Triggers[i].ImageChangeParams; p != nil {
 				p.LastTriggeredImage = ""
 			}
 		}

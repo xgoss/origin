@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrs "k8s.io/kubernetes/pkg/api/errors"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -20,8 +20,9 @@ import (
 
 // ClusterRegistry is a Diagnostic to check that there is a working Docker registry.
 type ClusterRegistry struct {
-	KubeClient *kclient.Client
-	OsClient   *osclient.Client
+	KubeClient          *kclient.Client
+	OsClient            *osclient.Client
+	PreventModification bool
 }
 
 const (
@@ -60,6 +61,11 @@ images. Builds and deployments that use images from the registry may
 fail sporadically. Use a single registry or add a shared storage volume
 to the registries.`
 
+	clRegMultiCustomCfg = `
+The "%s" service has multiple associated pods each mounted with
+ephemeral storage, but also has a custom config %s
+mounted; assuming storage config is as desired.`
+
 	clRegPodDown = `
 The "%s" pod for the "%s" service is not running.
 This may be transient, a scheduling error, or something else.`
@@ -90,6 +96,21 @@ the "%s" service indicated unknown errors.
 This could result in problems with builds or deployments.
 Please examine the log entries to determine if there might be
 any related problems:
+%s`
+
+	clRegSelinuxErr = `
+The pod logs for the "%s" pod belonging to
+the "%s" service indicated the registry is unable to write to disk.
+This may indicate an SELinux denial, or problems with volume
+ownership/permissions.
+
+For volume permission problems please consult the Persistent Storage section
+of the Administrator's Guide.
+
+In the case of SELinux this may be resolved on the node by running:
+
+    sudo chcon -R -t svirt_sandbox_file_t [PATH_TO]/openshift.local.volumes
+
 %s`
 
 	clRegNoEP = `
@@ -140,9 +161,10 @@ func (d *ClusterRegistry) CanRun() (bool, error) {
 	if d.OsClient == nil || d.KubeClient == nil {
 		return false, fmt.Errorf("must have kube and os clients")
 	}
-	return userCan(d.OsClient, authorizationapi.AuthorizationAttributes{
+	return userCan(d.OsClient, authorizationapi.Action{
 		Namespace:    kapi.NamespaceDefault,
 		Verb:         "get",
+		Group:        kapi.GroupName,
 		Resource:     "services",
 		ResourceName: registryName,
 	})
@@ -178,7 +200,7 @@ func (d *ClusterRegistry) getRegistryService(r types.DiagnosticResult) *kapi.Ser
 
 func (d *ClusterRegistry) getRegistryPods(service *kapi.Service, r types.DiagnosticResult) []*kapi.Pod {
 	runningPods := []*kapi.Pod{}
-	pods, err := d.KubeClient.Pods(kapi.NamespaceDefault).List(labels.SelectorFromSet(service.Spec.Selector), fields.Everything())
+	pods, err := d.KubeClient.Pods(kapi.NamespaceDefault).List(kapi.ListOptions{LabelSelector: labels.SelectorFromSet(service.Spec.Selector)})
 	if err != nil {
 		r.Error("DClu1005", err, fmt.Sprintf("Finding pods for '%s' service failed. This should never happen. Error: (%T) %[2]v", registryName, err))
 		return runningPods
@@ -186,11 +208,32 @@ func (d *ClusterRegistry) getRegistryPods(service *kapi.Service, r types.Diagnos
 		r.Error("DClu1006", nil, fmt.Sprintf(clRegNoPods, registryName))
 		return runningPods
 	} else if len(pods.Items) > 1 {
-		// multiple registry pods using EmptyDir will be inconsistent
-		for _, volume := range pods.Items[0].Spec.Volumes {
+		emptyDir := false     // multiple registry pods using EmptyDir will be inconsistent
+		customConfig := false // ... unless the user has configured them for e.g. S3
+		configPath := "/config.yml"
+		// look through the pod volumes to see if that might be a problem
+		podSpec := pods.Items[0].Spec
+		container := podSpec.Containers[0]
+		for _, volume := range podSpec.Volumes {
 			if volume.Name == registryVolume && volume.EmptyDir != nil {
+				emptyDir = true
+			}
+		}
+		for _, env := range container.Env {
+			if env.Name == "REGISTRY_CONFIGURATION_PATH" {
+				configPath = env.Value // look for custom config here
+			}
+		}
+		for _, vmount := range container.VolumeMounts {
+			if strings.HasPrefix(configPath, vmount.MountPath) {
+				customConfig = true // if something's mounted there, assume custom config.
+			}
+		}
+		if emptyDir {
+			if customConfig { // assume they know what they're doing
+				r.Info("DClu1020", fmt.Sprintf(clRegMultiCustomCfg, registryName, configPath))
+			} else { // assume they scaled up with ephemeral storage
 				r.Error("DClu1007", nil, fmt.Sprintf(clRegMultiPods, registryName))
-				break
 			}
 		}
 	}
@@ -221,8 +264,15 @@ func (d *ClusterRegistry) checkRegistryLogs(pod *kapi.Pod, r types.DiagnosticRes
 	}
 	defer readCloser.Close()
 
+	// Indicator that selinux is blocking the registry from writing to disk:
+	selinuxErrorRegex, _ := regexp.Compile(".*level=error.*mkdir.*permission denied.*")
+	// If seen after the above error regex, we know the problem has since been fixed:
+	selinuxSuccessRegex, _ := regexp.Compile(".*level=info.*response completed.*http.request.method=PUT.*")
+
 	clientError := ""
 	registryError := ""
+	selinuxError := ""
+
 	scanner := bufio.NewScanner(readCloser)
 	for scanner.Scan() {
 		logLine := scanner.Text()
@@ -230,6 +280,12 @@ func (d *ClusterRegistry) checkRegistryLogs(pod *kapi.Pod, r types.DiagnosticRes
 		// https://github.com/kubernetes/kubernetes/issues/12447
 		if strings.Contains(logLine, `level=error msg="client error:`) {
 			clientError = logLine // end up showing only the most recent client error
+		} else if selinuxErrorRegex.MatchString(logLine) {
+			selinuxError = logLine
+		} else if selinuxSuccessRegex.MatchString(logLine) {
+			// Check for a successful registry push, if this occurs after a selinux error
+			// we can safely clear it, the problem has already been fixed.
+			selinuxError = ""
 		} else if strings.Contains(logLine, "level=error msg=") {
 			registryError += "\n" + logLine // gather generic errors
 		}
@@ -237,10 +293,12 @@ func (d *ClusterRegistry) checkRegistryLogs(pod *kapi.Pod, r types.DiagnosticRes
 	if clientError != "" {
 		r.Error("DClu1011", nil, fmt.Sprintf(clRegPodConn, pod.ObjectMeta.Name, registryName, clientError))
 	}
+	if selinuxError != "" {
+		r.Error("DClu1020", nil, fmt.Sprintf(clRegSelinuxErr, pod.ObjectMeta.Name, registryName, selinuxError))
+	}
 	if registryError != "" {
 		r.Warn("DClu1012", nil, fmt.Sprintf(clRegPodErr, pod.ObjectMeta.Name, registryName, registryError))
 	}
-
 }
 
 func (d *ClusterRegistry) checkRegistryEndpoints(pods []*kapi.Pod, r types.DiagnosticResult) bool {
@@ -261,6 +319,10 @@ func (d *ClusterRegistry) checkRegistryEndpoints(pods []*kapi.Pod, r types.Diagn
 }
 
 func (d *ClusterRegistry) verifyRegistryImageStream(service *kapi.Service, r types.DiagnosticResult) {
+	if d.PreventModification {
+		r.Info("DClu1021", "Skipping creating an ImageStream to test registry service address, because you requested no API modifications.")
+		return
+	}
 	imgStream, err := d.OsClient.ImageStreams(kapi.NamespaceDefault).Create(&osapi.ImageStream{ObjectMeta: kapi.ObjectMeta{GenerateName: "diagnostic-test"}})
 	if err != nil {
 		r.Error("DClu1015", err, fmt.Sprintf("Creating test ImageStream failed. Error: (%T) %[1]v", err))

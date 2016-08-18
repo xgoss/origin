@@ -12,12 +12,11 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrs "k8s.io/kubernetes/pkg/api/errors"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	osclient "github.com/openshift/origin/pkg/client"
-	osapi "github.com/openshift/origin/pkg/deploy/api"
+	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	"github.com/openshift/origin/pkg/diagnostics/types"
 )
 
@@ -95,10 +94,11 @@ func (d *ClusterRouter) CanRun() (bool, error) {
 	if d.KubeClient == nil || d.OsClient == nil {
 		return false, errors.New("must have kube and os client")
 	}
-	can, err := userCan(d.OsClient, authorizationapi.AuthorizationAttributes{
+	can, err := userCan(d.OsClient, authorizationapi.Action{
 		Namespace:    kapi.NamespaceDefault,
 		Verb:         "get",
-		Resource:     "dc",
+		Group:        deployapi.GroupName,
+		Resource:     "deploymentconfigs",
 		ResourceName: routerName,
 	})
 	if err != nil {
@@ -123,7 +123,7 @@ func (d *ClusterRouter) Check() types.DiagnosticResult {
 	return r
 }
 
-func (d *ClusterRouter) getRouterDC(r types.DiagnosticResult) *osapi.DeploymentConfig {
+func (d *ClusterRouter) getRouterDC(r types.DiagnosticResult) *deployapi.DeploymentConfig {
 	dc, err := d.OsClient.DeploymentConfigs(kapi.NamespaceDefault).Get(routerName)
 	if err != nil && reflect.TypeOf(err) == reflect.TypeOf(&kerrs.StatusError{}) {
 		r.Warn("DClu2001", err, fmt.Sprintf(clGetRtNone, routerName))
@@ -136,8 +136,8 @@ func (d *ClusterRouter) getRouterDC(r types.DiagnosticResult) *osapi.DeploymentC
 	return dc
 }
 
-func (d *ClusterRouter) getRouterPods(dc *osapi.DeploymentConfig, r types.DiagnosticResult) *kapi.PodList {
-	pods, err := d.KubeClient.Pods(kapi.NamespaceDefault).List(labels.SelectorFromSet(dc.Template.ControllerTemplate.Selector), fields.Everything())
+func (d *ClusterRouter) getRouterPods(dc *deployapi.DeploymentConfig, r types.DiagnosticResult) *kapi.PodList {
+	pods, err := d.KubeClient.Pods(kapi.NamespaceDefault).List(kapi.ListOptions{LabelSelector: labels.SelectorFromSet(dc.Spec.Selector)})
 	if err != nil {
 		r.Error("DClu2004", err, fmt.Sprintf("Finding pods for '%s' DeploymentConfig failed. This should never happen. Error: (%[2]T) %[2]v", routerName, err))
 		return nil

@@ -1,48 +1,42 @@
 package v1
 
 import (
-	"github.com/openshift/origin/pkg/cmd/server/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
-var Codec = runtime.CodecFor(api.Scheme, "v1")
+const GroupName = ""
 
-func init() {
-	api.Scheme.AddKnownTypes("v1",
+// SchemeGroupVersion is group version used to register these objects
+var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
+
+func AddToScheme(scheme *runtime.Scheme) {
+	addKnownTypes(scheme)
+	addDefaultingFuncs(scheme)
+	addConversionFuncs(scheme)
+}
+
+// Adds the list of known types to api.Scheme.
+func addKnownTypes(scheme *runtime.Scheme) {
+	scheme.AddKnownTypes(SchemeGroupVersion,
 		&MasterConfig{},
 		&NodeConfig{},
 		&SessionSecrets{},
 
-		&IdentityProvider{},
 		&BasicAuthPasswordIdentityProvider{},
 		&AllowAllPasswordIdentityProvider{},
 		&DenyAllPasswordIdentityProvider{},
 		&HTPasswdPasswordIdentityProvider{},
 		&LDAPPasswordIdentityProvider{},
+		&KeystonePasswordIdentityProvider{},
 		&RequestHeaderIdentityProvider{},
 		&GitHubIdentityProvider{},
+		&GitLabIdentityProvider{},
 		&GoogleIdentityProvider{},
 		&OpenIDIdentityProvider{},
-		&GrantConfig{},
 
 		&LDAPSyncConfig{},
+
+		&DefaultAdmissionConfig{},
 	)
 }
-
-func (*LDAPSyncConfig) IsAnAPIObject() {}
-
-func (*IdentityProvider) IsAnAPIObject()                  {}
-func (*BasicAuthPasswordIdentityProvider) IsAnAPIObject() {}
-func (*AllowAllPasswordIdentityProvider) IsAnAPIObject()  {}
-func (*DenyAllPasswordIdentityProvider) IsAnAPIObject()   {}
-func (*HTPasswdPasswordIdentityProvider) IsAnAPIObject()  {}
-func (*LDAPPasswordIdentityProvider) IsAnAPIObject()      {}
-func (*RequestHeaderIdentityProvider) IsAnAPIObject()     {}
-func (*GitHubIdentityProvider) IsAnAPIObject()            {}
-func (*GoogleIdentityProvider) IsAnAPIObject()            {}
-func (*OpenIDIdentityProvider) IsAnAPIObject()            {}
-func (*GrantConfig) IsAnAPIObject()                       {}
-
-func (*MasterConfig) IsAnAPIObject()   {}
-func (*NodeConfig) IsAnAPIObject()     {}
-func (*SessionSecrets) IsAnAPIObject() {}

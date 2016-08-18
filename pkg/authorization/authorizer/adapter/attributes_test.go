@@ -6,13 +6,13 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kauthorizer "k8s.io/kubernetes/pkg/auth/authorizer"
+	"k8s.io/kubernetes/pkg/auth/user"
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	oauthorizer "github.com/openshift/origin/pkg/authorization/authorizer"
 )
 
 // ensure we satisfy both interfaces
-var _ = oauthorizer.AuthorizationAttributes(AdapterAttributes{})
 var _ = kauthorizer.Attributes(AdapterAttributes{})
 
 func TestRoundTrip(t *testing.T) {
@@ -29,12 +29,12 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	// Convert to kube attributes
-	kattrs := KubernetesAuthorizerAttributes("ns", "myuser", []string{"mygroup"}, oattrs)
-	if kattrs.GetUserName() != "myuser" {
-		t.Errorf("Expected %v, got %v", "myuser", kattrs.GetUserName())
+	kattrs := KubernetesAuthorizerAttributes("ns", &user.DefaultInfo{Name: "myuser", Groups: []string{"mygroup"}}, oattrs)
+	if kattrs.GetUser().GetName() != "myuser" {
+		t.Errorf("Expected %v, got %v", "myuser", kattrs.GetUser().GetName())
 	}
-	if !reflect.DeepEqual(kattrs.GetGroups(), []string{"mygroup"}) {
-		t.Errorf("Expected %v, got %v", []string{"mygroup"}, kattrs.GetGroups())
+	if !reflect.DeepEqual(kattrs.GetUser().GetGroups(), []string{"mygroup"}) {
+		t.Errorf("Expected %v, got %v", []string{"mygroup"}, kattrs.GetUser().GetGroups())
 	}
 	if kattrs.GetVerb() != "get" {
 		t.Errorf("Expected %v, got %v", "get", kattrs.GetVerb())
@@ -47,6 +47,12 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if kattrs.GetResource() != "r" {
 		t.Errorf("Expected %v, got %v", "", kattrs.GetResource())
+	}
+	if kattrs.IsResourceRequest() != false {
+		t.Errorf("Expected %v, got %v", false, kattrs.IsResourceRequest())
+	}
+	if kattrs.GetPath() != "/123" {
+		t.Errorf("Expected %v, got %v", "/123", kattrs.GetPath())
 	}
 
 	// Convert back to context+origin attributes
@@ -93,19 +99,21 @@ func TestRoundTrip(t *testing.T) {
 func TestAttributeIntersection(t *testing.T) {
 	// These are the things we expect to be shared
 	// Everything in this list should be used by OriginAuthorizerAttributes
-	expectedIntersection := sets.NewString("GetVerb", "GetResource")
+	expectedIntersection := sets.NewString("GetVerb", "GetResource", "GetAPIGroup", "GetAPIVersion")
 
 	// These are the things we expect to only be in the Kubernetes interface
 	// Everything in this list should be used by OriginAuthorizerAttributes or derivative (like IsReadOnly)
 	expectedKubernetesOnly := sets.NewString(
 		// used to build context in OriginAuthorizerAttributes
-		"GetGroups", "GetUserName", "GetNamespace",
+		"GetUser", "GetNamespace",
 		// Based on verb, derivative
 		"IsReadOnly",
+		// Non-matching, but used
+		"GetPath", "IsResourceRequest", "GetName", "GetSubresource",
 	)
 
 	kattributesType := reflect.TypeOf((*kauthorizer.Attributes)(nil)).Elem()
-	oattributesType := reflect.TypeOf((*oauthorizer.AuthorizationAttributes)(nil)).Elem()
+	oattributesType := reflect.TypeOf((*oauthorizer.Action)(nil)).Elem()
 
 	kattributesMethods := sets.NewString()
 	for i := 0; i < kattributesType.NumMethod(); i++ {

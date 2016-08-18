@@ -2,59 +2,110 @@ package app
 
 import (
 	"fmt"
-	"math/rand"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/golang/glog"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
+	extensions "k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/runtime"
-	kutil "k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/intstr"
+	kuval "k8s.io/kubernetes/pkg/util/validation"
 
+	build "github.com/openshift/origin/pkg/build/api"
 	deploy "github.com/openshift/origin/pkg/deploy/api"
 	image "github.com/openshift/origin/pkg/image/api"
 	route "github.com/openshift/origin/pkg/route/api"
+	"github.com/openshift/origin/pkg/util/docker/dockerfile"
 )
 
-// Pipeline holds components
-type Pipeline struct {
-	From string
+// A PipelineBuilder creates Pipeline instances.
+type PipelineBuilder interface {
+	To(string) PipelineBuilder
 
-	InputImage *ImageRef
-	Build      *BuildRef
-	Image      *ImageRef
-	Deployment *DeploymentConfigRef
-	Labels     map[string]string
+	NewBuildPipeline(string, *ImageRef, *SourceRepository) (*Pipeline, error)
+	NewImagePipeline(string, *ImageRef) (*Pipeline, error)
 }
 
-// NewImagePipeline creates a new pipeline with components that are not
-// expected to be built
-func NewImagePipeline(from string, image *ImageRef) (*Pipeline, error) {
-	return &Pipeline{
-		From:  from,
-		Image: image,
-	}, nil
+// NewPipelineBuilder returns a PipelineBuilder using name as a base name. A
+// PipelineBuilder always creates pipelines with unique names, so that the
+// actual name of a pipeline (Pipeline.Name) might differ from the base name.
+// The pipelines created with a PipelineBuilder will have access to the given
+// environment. The boolean outputDocker controls whether builds will output to
+// an image stream tag or docker image reference.
+func NewPipelineBuilder(name string, environment Environment, outputDocker bool) PipelineBuilder {
+	return &pipelineBuilder{
+		nameGenerator: NewUniqueNameGenerator(name),
+		environment:   environment,
+		outputDocker:  outputDocker,
+	}
 }
 
-// NewBuildPipeline creates a new pipeline with components that are
-// expected to be built
-func NewBuildPipeline(from string, input *ImageRef, outputDocker bool, strategy *BuildStrategyRef, env Environment, source *SourceRef) (*Pipeline, error) {
-	name, ok := NameSuggestions{source, input}.SuggestName()
-	if !ok {
-		name = fmt.Sprintf("app%d", rand.Intn(10000))
+type pipelineBuilder struct {
+	nameGenerator UniqueNameGenerator
+	environment   Environment
+	outputDocker  bool
+	to            string
+}
+
+func (pb *pipelineBuilder) To(name string) PipelineBuilder {
+	pb.to = name
+	return pb
+}
+
+// NewBuildPipeline creates a new pipeline with components that are expected to
+// be built.
+func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, sourceRepository *SourceRepository) (*Pipeline, error) {
+	strategy, source, err := StrategyAndSourceForRepository(sourceRepository, input)
+	if err != nil {
+		return nil, fmt.Errorf("can't build %q: %v", from, err)
 	}
 
+	var name string
 	output := &ImageRef{
-		DockerImageReference: image.DockerImageReference{
+		OutputImage:   true,
+		AsImageStream: !pb.outputDocker,
+	}
+	if len(pb.to) > 0 {
+		outputImageRef, err := image.ParseDockerImageReference(pb.to)
+		if err != nil {
+			return nil, err
+		}
+		output.Reference = outputImageRef
+		name, err = pb.nameGenerator.Generate(NameSuggestions{source, output, input})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		name, err = pb.nameGenerator.Generate(NameSuggestions{source, input})
+		if err != nil {
+			return nil, err
+		}
+		output.Reference = image.DockerImageReference{
 			Name: name,
 			Tag:  image.DefaultImageTag,
-		},
-
-		OutputImage:   true,
-		AsImageStream: !outputDocker,
+		}
 	}
+	source.Name = name
+
+	// Append any exposed ports from Dockerfile to input image
+	if sourceRepository.IsDockerBuild() && sourceRepository.Info() != nil {
+		node := sourceRepository.Info().Dockerfile.AST()
+		ports := dockerfile.LastExposedPorts(node)
+		if len(ports) > 0 {
+			if input.Info == nil {
+				input.Info = &image.DockerImage{
+					Config: &image.DockerConfig{},
+				}
+			}
+			input.Info.Config.ExposedPorts = map[string]struct{}{}
+			for _, p := range ports {
+				input.Info.Config.ExposedPorts[p] = struct{}{}
+			}
+		}
+	}
+
 	if input != nil {
 		// TODO: assumes that build doesn't change the image metadata. In the future
 		// we could get away with deferred generation possibly.
@@ -66,10 +117,11 @@ func NewBuildPipeline(from string, input *ImageRef, outputDocker bool, strategy 
 		Input:    input,
 		Strategy: strategy,
 		Output:   output,
-		Env:      env,
+		Env:      pb.environment,
 	}
 
 	return &Pipeline{
+		Name:       name,
 		From:       from,
 		InputImage: input,
 		Image:      output,
@@ -77,23 +129,52 @@ func NewBuildPipeline(from string, input *ImageRef, outputDocker bool, strategy 
 	}, nil
 }
 
-// NeedsDeployment sets the pipeline for deployment
-func (p *Pipeline) NeedsDeployment(env Environment, labels map[string]string, name string) error {
+// NewImagePipeline creates a new pipeline with components that are not expected
+// to be built.
+func (pb *pipelineBuilder) NewImagePipeline(from string, input *ImageRef) (*Pipeline, error) {
+	name, err := pb.nameGenerator.Generate(input)
+	if err != nil {
+		return nil, err
+	}
+	input.ObjectName = name
+
+	return &Pipeline{
+		Name:  name,
+		From:  from,
+		Image: input,
+	}, nil
+}
+
+// Pipeline holds components.
+type Pipeline struct {
+	Name string
+	From string
+
+	InputImage *ImageRef
+	Build      *BuildRef
+	Image      *ImageRef
+	Deployment *DeploymentConfigRef
+	Labels     map[string]string
+}
+
+// NeedsDeployment sets the pipeline for deployment.
+func (p *Pipeline) NeedsDeployment(env Environment, labels map[string]string, asTest bool) error {
 	if p.Deployment != nil {
 		return nil
 	}
 	p.Deployment = &DeploymentConfigRef{
-		Name: name,
+		Name: p.Name,
 		Images: []*ImageRef{
 			p.Image,
 		},
 		Env:    env,
 		Labels: labels,
+		AsTest: asTest,
 	}
 	return nil
 }
 
-// Objects converts all the components in the pipeline into runtime objects
+// Objects converts all the components in the pipeline into runtime objects.
 func (p *Pipeline) Objects(accept, objectAccept Acceptor) (Objects, error) {
 	objects := Objects{}
 	if p.InputImage != nil && p.InputImage.AsImageStream && accept.Accept(p.InputImage) {
@@ -122,6 +203,15 @@ func (p *Pipeline) Objects(accept, objectAccept Acceptor) (Objects, error) {
 		if objectAccept.Accept(build) {
 			objects = append(objects, build)
 		}
+		if p.Build.Source != nil && p.Build.Source.SourceImage != nil && p.Build.Source.SourceImage.AsImageStream && accept.Accept(p.Build.Source.SourceImage) {
+			srcImage, err := p.Build.Source.SourceImage.ImageStream()
+			if err != nil {
+				return nil, err
+			}
+			if objectAccept.Accept(srcImage) {
+				objects = append(objects, srcImage)
+			}
+		}
 	}
 	if p.Deployment != nil && accept.Accept(p.Deployment) {
 		dc, err := p.Deployment.DeploymentConfig()
@@ -135,10 +225,10 @@ func (p *Pipeline) Objects(accept, objectAccept Acceptor) (Objects, error) {
 	return objects, nil
 }
 
-// PipelineGroup is a group of Pipelines
+// PipelineGroup is a group of Pipelines.
 type PipelineGroup []*Pipeline
 
-// Reduce squashes all common components from the pipelines
+// Reduce squashes all common components from the pipelines.
 func (g PipelineGroup) Reduce() error {
 	var deployment *DeploymentConfigRef
 	for _, p := range g {
@@ -164,37 +254,41 @@ func (g PipelineGroup) String() string {
 	return strings.Join(s, "+")
 }
 
-const maxServiceNameLength = 24
+// MakeSimpleName strips any non-alphanumeric characters out of a string and returns
+// either an empty string or a string which is valid for most Kubernetes resources.
+func MakeSimpleName(name string) string {
+	name = strings.ToLower(name)
+	name = invalidServiceChars.ReplaceAllString(name, "")
+	name = strings.TrimFunc(name, func(r rune) bool { return r == '-' })
+	if len(name) > kuval.DNS952LabelMaxLength {
+		name = name[:kuval.DNS952LabelMaxLength]
+	}
+	return name
+}
 
 var invalidServiceChars = regexp.MustCompile("[^-a-z0-9]")
 
 func makeValidServiceName(name string) (string, string) {
-	if ok, _ := validation.ValidateServiceName(name, false); ok {
+	if len(validation.ValidateServiceName(name, false)) == 0 {
 		return name, ""
 	}
-	name = strings.ToLower(name)
-	name = invalidServiceChars.ReplaceAllString(name, "")
-	name = strings.TrimFunc(name, func(r rune) bool { return r == '-' })
-	switch {
-	case len(name) == 0:
+	name = MakeSimpleName(name)
+	if len(name) == 0 {
 		return "", "service-"
-	case len(name) > maxServiceNameLength:
-		name = name[:maxServiceNameLength]
 	}
 	return name, ""
 }
 
 type sortablePorts []kapi.ContainerPort
 
-func (s sortablePorts) Len() int           { return len(s) }
-func (s sortablePorts) Less(i, j int) bool { return s[i].ContainerPort < s[j].ContainerPort }
-func (s sortablePorts) Swap(i, j int) {
-	p := s[i]
-	s[i] = s[j]
-	s[j] = p
+func (s sortablePorts) Len() int      { return len(s) }
+func (s sortablePorts) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s sortablePorts) Less(i, j int) bool {
+	return s[i].ContainerPort < s[j].ContainerPort
 }
 
-// portName returns a unique key for the given port and protocol which can be used as a service port name
+// portName returns a unique key for the given port and protocol which can be
+// used as a service port name.
 func portName(port int, protocol kapi.Protocol) string {
 	if protocol == "" {
 		protocol = kapi.ProtocolTCP
@@ -202,57 +296,88 @@ func portName(port int, protocol kapi.Protocol) string {
 	return strings.ToLower(fmt.Sprintf("%d-%s", port, protocol))
 }
 
-// AddServices sets up services for the provided objects
+// GenerateService creates a simple service for the provided elements.
+func GenerateService(meta kapi.ObjectMeta, selector map[string]string) *kapi.Service {
+	name, generateName := makeValidServiceName(meta.Name)
+	svc := &kapi.Service{
+		ObjectMeta: kapi.ObjectMeta{
+			Name:         name,
+			GenerateName: generateName,
+			Labels:       meta.Labels,
+		},
+		Spec: kapi.ServiceSpec{
+			Selector: selector,
+		},
+	}
+	return svc
+}
+
+// AllContainerPorts creates a sorted list of all ports in all provided containers.
+func AllContainerPorts(containers ...kapi.Container) []kapi.ContainerPort {
+	var ports []kapi.ContainerPort
+	for _, container := range containers {
+		ports = append(ports, container.Ports...)
+	}
+	sort.Sort(sortablePorts(ports))
+	return ports
+}
+
+// UniqueContainerToServicePorts creates one service port for each unique container port.
+func UniqueContainerToServicePorts(ports []kapi.ContainerPort) []kapi.ServicePort {
+	var result []kapi.ServicePort
+	svcPorts := map[string]struct{}{}
+	for _, p := range ports {
+		name := portName(int(p.ContainerPort), p.Protocol)
+		_, exists := svcPorts[name]
+		if exists {
+			continue
+		}
+		svcPorts[name] = struct{}{}
+		result = append(result, kapi.ServicePort{
+			Name:       name,
+			Port:       p.ContainerPort,
+			Protocol:   p.Protocol,
+			TargetPort: intstr.FromInt(int(p.ContainerPort)),
+		})
+	}
+	return result
+}
+
+// AddServices sets up services for the provided objects.
 func AddServices(objects Objects, firstPortOnly bool) Objects {
 	svcs := []runtime.Object{}
 	for _, o := range objects {
 		switch t := o.(type) {
 		case *deploy.DeploymentConfig:
-			name, generateName := makeValidServiceName(t.Name)
-			svc := &kapi.Service{
-				ObjectMeta: kapi.ObjectMeta{
-					Name:         name,
-					GenerateName: generateName,
-					Labels:       t.Labels,
-				},
-				Spec: kapi.ServiceSpec{
-					Selector: t.Template.ControllerTemplate.Selector,
-				},
+			svc := addServiceInternal(t.Spec.Template.Spec.Containers, t.ObjectMeta, t.Spec.Selector, firstPortOnly)
+			if svc != nil {
+				svcs = append(svcs, svc)
 			}
-
-			svcPorts := map[string]struct{}{}
-			for _, container := range t.Template.ControllerTemplate.Template.Spec.Containers {
-				ports := sortablePorts(container.Ports)
-				sort.Sort(&ports)
-				for _, p := range ports {
-					name := portName(p.ContainerPort, p.Protocol)
-					_, exists := svcPorts[name]
-					if exists {
-						continue
-					}
-					svcPorts[name] = struct{}{}
-					svc.Spec.Ports = append(svc.Spec.Ports, kapi.ServicePort{
-						Name:       name,
-						Port:       p.ContainerPort,
-						Protocol:   p.Protocol,
-						TargetPort: kutil.NewIntOrStringFromInt(p.ContainerPort),
-					})
-					if firstPortOnly {
-						break
-					}
-				}
+		case *extensions.DaemonSet:
+			svc := addServiceInternal(t.Spec.Template.Spec.Containers, t.ObjectMeta, t.Spec.Template.Labels, firstPortOnly)
+			if svc != nil {
+				svcs = append(svcs, svc)
 			}
-			if len(svc.Spec.Ports) == 0 {
-				glog.Warningf("A service will not be generated for DeploymentConfig %q because no exposed ports were detected. Use 'oc expose dc %q --port=[port]' to create a service.", t.Name, t.Name)
-				continue
-			}
-			svcs = append(svcs, svc)
 		}
 	}
 	return append(objects, svcs...)
 }
 
-// AddRoutes sets up routes for the provided objects
+// addServiceInternal utility used by AddServices to create services for multiple types.
+func addServiceInternal(containers []kapi.Container, objectMeta kapi.ObjectMeta, selector map[string]string, firstPortOnly bool) *kapi.Service {
+	ports := UniqueContainerToServicePorts(AllContainerPorts(containers...))
+	if len(ports) == 0 {
+		return nil
+	}
+	if firstPortOnly {
+		ports = ports[:1]
+	}
+	svc := GenerateService(objectMeta, selector)
+	svc.Spec.Ports = ports
+	return svc
+}
+
+// AddRoutes sets up routes for the provided objects.
 func AddRoutes(objects Objects) Objects {
 	routes := []runtime.Object{}
 	for _, o := range objects {
@@ -264,7 +389,7 @@ func AddRoutes(objects Objects) Objects {
 					Labels: t.Labels,
 				},
 				Spec: route.RouteSpec{
-					To: kapi.ObjectReference{
+					To: route.RouteTargetReference{
 						Name: t.Name,
 					},
 				},
@@ -279,7 +404,7 @@ type acceptNew struct{}
 // AcceptNew only accepts runtime.Objects with an empty resource version.
 var AcceptNew Acceptor = acceptNew{}
 
-// Accept accepts any kind of object
+// Accept accepts any kind of object.
 func (acceptNew) Accept(from interface{}) bool {
 	_, meta, err := objectMetaData(from)
 	if err != nil {
@@ -296,17 +421,17 @@ type acceptUnique struct {
 	objects map[string]struct{}
 }
 
-// Accept accepts any kind of object it hasn't accepted before
+// Accept accepts any kind of object it hasn't accepted before.
 func (a *acceptUnique) Accept(from interface{}) bool {
 	obj, meta, err := objectMetaData(from)
 	if err != nil {
 		return false
 	}
-	_, kind, err := a.typer.ObjectVersionAndKind(obj)
+	gvk, _, err := a.typer.ObjectKinds(obj)
 	if err != nil {
 		return false
 	}
-	key := fmt.Sprintf("%s/%s/%s", kind, meta.Namespace, meta.Name)
+	key := fmt.Sprintf("%s/%s/%s", gvk[0].Kind, meta.Namespace, meta.Name)
 	_, exists := a.objects[key]
 	if exists {
 		return false
@@ -315,8 +440,8 @@ func (a *acceptUnique) Accept(from interface{}) bool {
 	return true
 }
 
-// NewAcceptUnique creates an acceptor that only accepts unique objects
-// by kind and name
+// NewAcceptUnique creates an acceptor that only accepts unique objects by kind
+// and name.
 func NewAcceptUnique(typer runtime.ObjectTyper) Acceptor {
 	return &acceptUnique{
 		typer:   typer,
@@ -340,17 +465,17 @@ type acceptBuildConfigs struct {
 	typer runtime.ObjectTyper
 }
 
-// Accept accepts BuildConfigs and ImageStreams
+// Accept accepts BuildConfigs and ImageStreams.
 func (a *acceptBuildConfigs) Accept(from interface{}) bool {
 	obj, _, err := objectMetaData(from)
 	if err != nil {
 		return false
 	}
-	_, kind, err := a.typer.ObjectVersionAndKind(obj)
+	gvk, _, err := a.typer.ObjectKinds(obj)
 	if err != nil {
 		return false
 	}
-	return kind == "BuildConfig" || kind == "ImageStream"
+	return gvk[0].GroupKind() == build.Kind("BuildConfig") || gvk[0].GroupKind() == image.Kind("ImageStream")
 }
 
 // NewAcceptBuildConfigs creates an acceptor accepting BuildConfig objects
@@ -366,7 +491,7 @@ func NewAcceptBuildConfigs(typer runtime.ObjectTyper) Acceptor {
 type Acceptors []Acceptor
 
 // Accept iterates through all acceptors and determines whether the object
-// should be accepted
+// should be accepted.
 func (aa Acceptors) Accept(from interface{}) bool {
 	for _, a := range aa {
 		if !a.Accept(from) {
@@ -378,18 +503,18 @@ func (aa Acceptors) Accept(from interface{}) bool {
 
 type acceptAll struct{}
 
-// AcceptAll accepts all objects
+// AcceptAll accepts all objects.
 var AcceptAll Acceptor = acceptAll{}
 
-// Accept accepts everything
+// Accept accepts everything.
 func (acceptAll) Accept(_ interface{}) bool {
 	return true
 }
 
-// Objects is a set of runtime objects
+// Objects is a set of runtime objects.
 type Objects []runtime.Object
 
-// Acceptor is an interface for accepting objects
+// Acceptor is an interface for accepting objects.
 type Acceptor interface {
 	Accept(from interface{}) bool
 }
@@ -398,12 +523,12 @@ type acceptFirst struct {
 	handled map[interface{}]struct{}
 }
 
-// NewAcceptFirst returns a new Acceptor
+// NewAcceptFirst returns a new Acceptor.
 func NewAcceptFirst() Acceptor {
 	return &acceptFirst{make(map[interface{}]struct{})}
 }
 
-// Accept accepts any object it hasn't accepted before
+// Accept accepts any object it hasn't accepted before.
 func (s *acceptFirst) Accept(from interface{}) bool {
 	if _, ok := s.handled[from]; ok {
 		return false

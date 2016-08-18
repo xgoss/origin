@@ -7,7 +7,7 @@ items:
     name: ruby-hello-world
     namespace: test
     resourceVersion: "1125"
-    selfLink: /osapi/v1beta3/namespaces/test/buildconfigs/ruby-hello-world
+    selfLink: /osapi/v1/namespaces/test/buildconfigs/ruby-hello-world
     uid: 4a10e762-3064-11e5-8da2-080027c5bfa9
   spec:
     output:
@@ -23,7 +23,7 @@ items:
       dockerStrategy:
         from:
           kind: ImageStreamTag
-          name: ruby-20-centos7:latest
+          name: ruby-22-centos7:latest
       type: Docker
     triggers:
     - github:
@@ -33,7 +33,7 @@ items:
         secret: 3kYKtANjVRCOPoM0uLNp
       type: Generic
     - imageChange:
-        lastTriggeredImageID: openshift/ruby-20-centos7:latest
+        lastTriggeredImageID: centos/ruby-22-centos7:latest
       type: ImageChange
   status:
     lastVersion: 1
@@ -47,7 +47,7 @@ items:
     name: ruby-sample-build
     namespace: test
     resourceVersion: "9848"
-    selfLink: /osapi/v1beta3/namespaces/test/buildconfigs/ruby-sample-build
+    selfLink: /osapi/v1/namespaces/test/buildconfigs/ruby-sample-build
     uid: 5f52f442-31d7-11e5-868e-080027c5bfa9
   spec:
     output:
@@ -63,7 +63,7 @@ items:
       sourceStrategy:
         from:
           kind: ImageStreamTag
-          name: ruby-20-centos7:latest
+          name: ruby-22-centos7:latest
       type: Source
     triggers:
     - github:
@@ -73,7 +73,7 @@ items:
         secret: secret101
       type: Generic
     - imageChange:
-        lastTriggeredImageID: openshift/ruby-20-centos7:latest
+        lastTriggeredImageID: centos/ruby-22-centos7:latest
       type: ImageChange
   status:
     lastVersion: 1
@@ -84,7 +84,7 @@ items:
     name: ruby-sample-build-invalidtag
     namespace: test
     resourceVersion: "1605"
-    selfLink: /osapi/v1beta3/namespaces/test/buildconfigs/ruby-sample-build-invalidtag
+    selfLink: /osapi/v1/namespaces/test/buildconfigs/ruby-sample-build-invalidtag
     uid: 4a633dd5-306a-11e5-8da2-080027c5bfa9
   spec:
     output:
@@ -100,9 +100,8 @@ items:
       sourceStrategy:
         from:
           kind: DockerImage
-          name: openshift/ruby-20-centos7
+          name: centos/ruby-22-centos7
         incremental: true
-        scripts: https://raw.githubusercontent.com/openshift/sti-ruby/master/2.0/.sti/bin
       type: Source
     triggers:
     - imageChange: {}
@@ -116,7 +115,7 @@ items:
     name: ruby-sample-build-validtag
     namespace: test
     resourceVersion: "1604"
-    selfLink: /osapi/v1beta3/namespaces/test/buildconfigs/ruby-sample-build-validtag
+    selfLink: /osapi/v1/namespaces/test/buildconfigs/ruby-sample-build-validtag
     uid: 4a623b89-306a-11e5-8da2-080027c5bfa9
   spec:
     output:
@@ -132,9 +131,8 @@ items:
       sourceStrategy:
         from:
           kind: DockerImage
-          name: openshift/ruby-20-centos7
+          name: centos/ruby-22-centos7
         incremental: true
-        scripts: https://raw.githubusercontent.com/openshift/ruby-20-centos7/master/.sti/bin
       type: Source
     triggers:
     - imageChange: {}

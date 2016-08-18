@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -9,8 +10,9 @@ import (
 
 	"github.com/golang/glog"
 	kapi "k8s.io/kubernetes/pkg/api"
-	utilerrors "k8s.io/kubernetes/pkg/util/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 
+	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/dockerregistry"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 )
@@ -39,13 +41,29 @@ type DockerClientSearcher struct {
 }
 
 // Search searches all images in local docker server for images that match terms
-func (r DockerClientSearcher) Search(terms ...string) (ComponentMatches, error) {
+func (r DockerClientSearcher) Search(precise bool, terms ...string) (ComponentMatches, []error) {
 	componentMatches := ComponentMatches{}
 	errs := []error{}
 	for _, term := range terms {
+		if term == "__dockerimage_fail" {
+			errs = append(errs, fmt.Errorf("unable to find the specified docker image: %s", term))
+			continue
+		}
+		if term == "scratch" {
+			componentMatches = append(componentMatches, &ComponentMatch{
+				Value: term,
+				Score: 0.0,
+				// we don't want to create an imagestream for "scratch", so treat
+				// it as a local only image.
+				LocalOnly: true,
+				Virtual:   true,
+			})
+			return componentMatches, errs
+		}
+
 		ref, err := imageapi.ParseDockerImageReference(term)
 		if err != nil {
-			return nil, err
+			continue
 		}
 
 		termMatches := ScoredComponentMatches{}
@@ -53,18 +71,19 @@ func (r DockerClientSearcher) Search(terms ...string) (ComponentMatches, error) 
 		// first look for the image in the remote docker registry
 		if r.RegistrySearcher != nil {
 			glog.V(4).Infof("checking remote registry for %q", ref.String())
-			matches, err := r.RegistrySearcher.Search(term)
-			switch err.(type) {
-			case nil:
-				for i := range matches {
-					matches[i].LocalOnly = false
-					glog.V(5).Infof("Found remote match %v", matches[i].Value)
-				}
-				termMatches = append(termMatches, matches...)
-			case ErrNoMatch:
-			default:
-				return nil, err
+			matches, err := r.RegistrySearcher.Search(precise, term)
+			errs = append(errs, err...)
+
+			for i := range matches {
+				matches[i].LocalOnly = false
+				glog.V(5).Infof("Found remote match %v", matches[i].Value)
 			}
+			termMatches = append(termMatches, matches...)
+		}
+
+		if r.Client == nil || reflect.ValueOf(r.Client).IsNil() {
+			componentMatches = append(componentMatches, termMatches...)
+			continue
 		}
 
 		// if we didn't find it exactly in a remote registry,
@@ -73,20 +92,19 @@ func (r DockerClientSearcher) Search(terms ...string) (ComponentMatches, error) 
 			glog.V(4).Infof("checking local Docker daemon for %q", ref.String())
 			images, err := r.Client.ListImages(docker.ListImagesOptions{})
 			if err != nil {
-				return nil, err
+				errs = append(errs, err)
+				continue
 			}
 
-			if len(ref.Registry) == 0 {
-				ref.Registry = "local Docker"
-			}
 			if len(ref.Tag) == 0 {
 				ref.Tag = imageapi.DefaultImageTag
+				term = fmt.Sprintf("%s:%s", term, imageapi.DefaultImageTag)
 			}
 			for _, image := range images {
 				if tags := matchTag(image, term, ref.Registry, ref.Namespace, ref.Name, ref.Tag); len(tags) > 0 {
 					for i := range tags {
 						tags[i].LocalOnly = true
-						glog.V(5).Infof("Found local match %v", tags[i].Value)
+						glog.V(5).Infof("Found local docker image match %q with score %f", tags[i].Value, tags[i].Score)
 					}
 					termMatches = append(termMatches, tags...)
 				}
@@ -107,15 +125,15 @@ func (r DockerClientSearcher) Search(terms ...string) (ComponentMatches, error) 
 				continue
 			}
 			dockerImage := &imageapi.DockerImage{}
-			if err := kapi.Scheme.Convert(image, dockerImage); err != nil {
-				return nil, err
+			if err := kapi.Scheme.Convert(image, dockerImage, nil); err != nil {
+				errs = append(errs, err)
+				continue
 			}
 			updated := &ComponentMatch{
 				Value:       match.Value,
 				Argument:    fmt.Sprintf("--docker-image=%q", match.Value),
 				Name:        match.Value,
 				Description: descriptionFor(dockerImage, match.Value, ref.Registry, ""),
-				Builder:     IsBuilderImage(dockerImage),
 				Score:       match.Score,
 				Image:       dockerImage,
 				ImageTag:    ref.Tag,
@@ -127,27 +145,101 @@ func (r DockerClientSearcher) Search(terms ...string) (ComponentMatches, error) 
 		}
 
 		componentMatches = append(componentMatches, termMatches...)
-
-		// if we didn't find it remotely or locally, but the user chose to
-		// allow missing images, create an exact match for the value they
-		// provided.
-		if len(componentMatches) == 0 && r.AllowMissingImages {
-			componentMatches = append(componentMatches, &ComponentMatch{
-				Value:     term,
-				Score:     0.0,
-				Builder:   true,
-				LocalOnly: true,
-			})
-			glog.V(4).Infof("Appended missing match %v", term)
-
-		}
 	}
 
-	if len(errs) != 0 {
-		return nil, utilerrors.NewAggregate(errs)
-	}
+	return componentMatches, errs
+}
 
+// MissingImageSearcher always returns an exact match for the item being searched for.
+// It should be used with very high weight(weak priority) as a result of last resort when the
+// user has indicated they want to allow missing images(not found in the docker registry
+// or locally) to be used anyway.
+type MissingImageSearcher struct {
+}
+
+// Search always returns an exact match for the search terms.
+func (r MissingImageSearcher) Search(precise bool, terms ...string) (ComponentMatches, []error) {
+	componentMatches := ComponentMatches{}
+	for _, term := range terms {
+		componentMatches = append(componentMatches, &ComponentMatch{
+			Value:     term,
+			Score:     0.0,
+			LocalOnly: true,
+		})
+		glog.V(4).Infof("Added missing image match for %v", term)
+	}
 	return componentMatches, nil
+}
+
+type ImageImportSearcher struct {
+	Client        client.ImageStreamInterface
+	AllowInsecure bool
+	Fallback      Searcher
+}
+
+// Search invokes the new ImageStreamImport API to have the server look up Docker images for the user,
+// using secrets stored on the server.
+func (s ImageImportSearcher) Search(precise bool, terms ...string) (ComponentMatches, []error) {
+	var errs []error
+	isi := &imageapi.ImageStreamImport{}
+	for _, term := range terms {
+		if term == "__imageimport_fail" {
+			errs = append(errs, fmt.Errorf("unable to find the specified docker import: %s", term))
+			continue
+		}
+		isi.Spec.Images = append(isi.Spec.Images, imageapi.ImageImportSpec{
+			From:         kapi.ObjectReference{Kind: "DockerImage", Name: term},
+			ImportPolicy: imageapi.TagImportPolicy{Insecure: s.AllowInsecure},
+		})
+	}
+	isi.Name = "newapp"
+	result, err := s.Client.Import(isi)
+	if err != nil {
+		if err == client.ErrImageStreamImportUnsupported && s.Fallback != nil {
+			return s.Fallback.Search(precise, terms...)
+		}
+		return nil, []error{fmt.Errorf("can't lookup images: %v", err)}
+	}
+
+	componentMatches := ComponentMatches{}
+	for i, image := range result.Status.Images {
+		term := result.Spec.Images[i].From.Name
+		if image.Status.Status != unversioned.StatusSuccess {
+			glog.V(4).Infof("image import failed: %#v", image)
+			switch image.Status.Reason {
+			case unversioned.StatusReasonInvalid, unversioned.StatusReasonUnauthorized, unversioned.StatusReasonNotFound:
+			default:
+				errs = append(errs, fmt.Errorf("can't look up Docker image %q: %s", term, image.Status.Message))
+			}
+			continue
+		}
+		ref, err := imageapi.ParseDockerImageReference(term)
+		if err != nil {
+			glog.V(4).Infof("image import failed, can't parse ref %q: %v", term, err)
+			continue
+		}
+		if len(ref.Tag) == 0 {
+			ref.Tag = imageapi.DefaultImageTag
+		}
+		if len(ref.Registry) == 0 {
+			ref.Registry = "Docker Hub"
+		}
+
+		match := &ComponentMatch{
+			Value:       term,
+			Argument:    fmt.Sprintf("--docker-image=%q", term),
+			Name:        term,
+			Description: descriptionFor(&image.Image.DockerImageMetadata, term, ref.Registry, ref.Tag),
+			Score:       0,
+			Image:       &image.Image.DockerImageMetadata,
+			ImageTag:    ref.Tag,
+			Insecure:    s.AllowInsecure,
+			Meta:        map[string]string{"registry": ref.Registry, "direct-tag": "1"},
+		}
+		glog.V(2).Infof("Adding %s as component match for %q with score %v", match.Description, term, match.Score)
+		componentMatches = append(componentMatches, match)
+	}
+	return componentMatches, errs
 }
 
 // DockerRegistrySearcher searches for images in a given docker registry.
@@ -160,29 +252,36 @@ type DockerRegistrySearcher struct {
 }
 
 // Search searches in the Docker registry for images that match terms
-func (r DockerRegistrySearcher) Search(terms ...string) (ComponentMatches, error) {
+func (r DockerRegistrySearcher) Search(precise bool, terms ...string) (ComponentMatches, []error) {
 	componentMatches := ComponentMatches{}
+	var errs []error
 	for _, term := range terms {
 		ref, err := imageapi.ParseDockerImageReference(term)
 		if err != nil {
-			return nil, err
+			continue
 		}
 
 		glog.V(4).Infof("checking Docker registry for %q, allow-insecure=%v", ref.String(), r.AllowInsecure)
 		connection, err := r.Client.Connect(ref.Registry, r.AllowInsecure)
 		if err != nil {
 			if dockerregistry.IsRegistryNotFound(err) {
-				return nil, ErrNoMatch{value: term}
+				errs = append(errs, err)
+				continue
 			}
-			return nil, fmt.Errorf("can't connect to %q: %v", ref.Registry, err)
+			errs = append(errs, fmt.Errorf("can't connect to %q: %v", ref.Registry, err))
+			continue
 		}
 
 		image, err := connection.ImageByTag(ref.Namespace, ref.Name, ref.Tag)
 		if err != nil {
 			if dockerregistry.IsNotFound(err) {
-				return nil, ErrNoMatch{value: term, qualifier: err.Error()}
+				if dockerregistry.IsTagNotFound(err) {
+					glog.V(4).Infof("tag not found: %v", err)
+				}
+				continue
 			}
-			return nil, fmt.Errorf("can't connect to %q: %v", ref.Registry, err)
+			errs = append(errs, fmt.Errorf("can't connect to %q: %v", ref.Registry, err))
+			continue
 		}
 
 		if len(ref.Tag) == 0 {
@@ -194,31 +293,34 @@ func (r DockerRegistrySearcher) Search(terms ...string) (ComponentMatches, error
 		glog.V(4).Infof("found image: %#v", image)
 
 		dockerImage := &imageapi.DockerImage{}
-		if err = kapi.Scheme.Convert(&image.Image, dockerImage); err != nil {
-			return nil, err
+		if err = kapi.Scheme.Convert(&image.Image, dockerImage, nil); err != nil {
+			errs = append(errs, err)
+			continue
 		}
 
-		componentMatches = append(componentMatches, &ComponentMatch{
+		match := &ComponentMatch{
 			Value:       term,
 			Argument:    fmt.Sprintf("--docker-image=%q", term),
 			Name:        term,
 			Description: descriptionFor(dockerImage, term, ref.Registry, ref.Tag),
-			Builder:     IsBuilderImage(dockerImage),
 			Score:       0,
 			Image:       dockerImage,
 			ImageTag:    ref.Tag,
+			Insecure:    r.AllowInsecure,
 			Meta:        map[string]string{"registry": ref.Registry},
-		})
+		}
+		glog.V(2).Infof("Adding %s as component match for %q with score %v", match.Description, term, match.Score)
+		componentMatches = append(componentMatches, match)
 	}
 
-	return componentMatches, nil
+	return componentMatches, errs
 }
 
 func descriptionFor(image *imageapi.DockerImage, value, from string, tag string) string {
-	shortID := image.ID
-	if len(shortID) > 7 {
-		shortID = shortID[:7]
+	if len(from) == 0 {
+		from = "local"
 	}
+	shortID := imageapi.ShortDockerImageID(image, 7)
 	tagPart := ""
 	if len(tag) > 0 {
 		tagPart = fmt.Sprintf(" (tag %q)", tag)
@@ -226,7 +328,7 @@ func descriptionFor(image *imageapi.DockerImage, value, from string, tag string)
 	parts := []string{fmt.Sprintf("Docker image %q%v", value, tagPart), shortID, fmt.Sprintf("from %s", from)}
 	if image.Size > 0 {
 		mb := float64(image.Size) / float64(1024*1024)
-		parts = append(parts, fmt.Sprintf("%f", mb))
+		parts = append(parts, fmt.Sprintf("%.3fmb", mb))
 	}
 	if len(image.Author) > 0 {
 		parts = append(parts, fmt.Sprintf("author %s", image.Author))
@@ -238,12 +340,10 @@ func descriptionFor(image *imageapi.DockerImage, value, from string, tag string)
 }
 
 func matchTag(image docker.APIImages, value, registry, namespace, name, tag string) []*ComponentMatch {
-	if len(tag) == 0 {
-		tag = imageapi.DefaultImageTag
-	}
 	matches := []*ComponentMatch{}
 	for _, s := range image.RepoTags {
 		if value == s {
+			glog.V(4).Infof("exact match on %q", s)
 			matches = append(matches, &ComponentMatch{
 				Value: s,
 				Score: 0.0,
@@ -259,15 +359,18 @@ func matchTag(image docker.APIImages, value, registry, namespace, name, tag stri
 		}
 		match := &ComponentMatch{}
 		ok, score := partialScorer(name, iRef.Name, true, 0.5, 1.0)
+		// If the name doesn't match, don't consider this image as a match
 		if !ok {
 			continue
 		}
+
+		// Add up the score, then get the average
 		match.Score += score
 		_, score = partialScorer(namespace, iRef.Namespace, false, 0.5, 1.0)
 		match.Score += score
 		_, score = partialScorer(registry, iRef.Registry, false, 0.5, 1.0)
 		match.Score += score
-		_, score = partialScorer(tag, iRef.Tag, false, 0.5, 1.0)
+		_, score = partialScorer(tag, iRef.Tag, true, 0.5, 1.0)
 		match.Score += score
 
 		if match.Score >= 4.0 {
@@ -280,22 +383,4 @@ func matchTag(image docker.APIImages, value, registry, namespace, name, tag stri
 		matches = append(matches, match)
 	}
 	return matches
-}
-
-// PassThroughDockerSearcher returns a match with the value that was passed in
-type PassThroughDockerSearcher struct{}
-
-// Search always returns a match for every term passed in
-func (r *PassThroughDockerSearcher) Search(terms ...string) (ComponentMatches, error) {
-	matches := ComponentMatches{}
-	for _, value := range terms {
-		matches = append(matches, &ComponentMatch{
-			Value:       value,
-			Name:        value,
-			Argument:    fmt.Sprintf("--docker-image=%q", value),
-			Description: fmt.Sprintf("Docker image %q", value),
-			Score:       1.0,
-		})
-	}
-	return matches, nil
 }

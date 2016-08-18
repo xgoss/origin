@@ -11,7 +11,7 @@ import (
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	kubectl "k8s.io/kubernetes/pkg/kubectl"
-	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	"k8s.io/kubernetes/pkg/runtime"
 
@@ -45,16 +45,16 @@ executing the rollback. This is useful if you're not quite sure what the outcome
 will be.`
 
 	rollbackExample = `  # Perform a rollback to the last successfully completed deployment for a deploymentconfig
-  $ %[1]s rollback frontend
+  %[1]s rollback frontend
 
   # See what a rollback to version 3 will look like, but don't perform the rollback
-  $ %[1]s rollback frontend --to-version=3 --dry-run
+  %[1]s rollback frontend --to-version=3 --dry-run
 
   # Perform a rollback to a specific deployment
-  $ %[1]s rollback frontend-2
+  %[1]s rollback frontend-2
 
   # Perform the rollback manually by piping the JSON of the new config back to %[1]s
-  $ %[1]s rollback frontend --output=json | %[1]s update deploymentConfigs deployment -f -`
+  %[1]s rollback frontend -o json | %[1]s replace dc/frontend -f -`
 )
 
 // NewCmdRollback creates a CLI rollback command.
@@ -67,15 +67,15 @@ func NewCmdRollback(fullName string, f *clientcmd.Factory, out io.Writer) *cobra
 		Example: fmt.Sprintf(rollbackExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := opts.Complete(f, args, out); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := opts.Validate(); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
 			}
 
 			if err := opts.Run(); err != nil {
-				cmdutil.CheckErr(err)
+				kcmdutil.CheckErr(err)
 			}
 		},
 	}
@@ -84,9 +84,10 @@ func NewCmdRollback(fullName string, f *clientcmd.Factory, out io.Writer) *cobra
 	cmd.Flags().BoolVar(&opts.IncludeStrategy, "change-strategy", false, "Include the previous deployment's strategy in the rollback")
 	cmd.Flags().BoolVar(&opts.IncludeScalingSettings, "change-scaling-settings", false, "Include the previous deployment's replicationController replica count and selector in the rollback")
 	cmd.Flags().BoolVarP(&opts.DryRun, "dry-run", "d", false, "Instead of performing the rollback, describe what the rollback will look like in human-readable form")
-	cmd.Flags().StringVarP(&opts.Format, "output", "o", "", "Instead of performing the rollback, print the updated deployment configuration in the specified format (json|yaml|template|templatefile)")
+	cmd.Flags().StringVarP(&opts.Format, "output", "o", "", "Instead of performing the rollback, print the updated deployment configuration in the specified format (json|yaml|name|template|templatefile)")
 	cmd.Flags().StringVarP(&opts.Template, "template", "t", "", "Template string or path to template file to use when -o=template or -o=templatefile.")
-	cmd.Flags().IntVar(&opts.DesiredVersion, "to-version", 0, "A config version to rollback to. Specifying version 0 is the same as omitting a version (the version will be auto-detected). This option is ignored when specifying a deployment.")
+	cmd.MarkFlagFilename("template")
+	cmd.Flags().Int64Var(&opts.DesiredVersion, "to-version", 0, "A config version to rollback to. Specifying version 0 is the same as omitting a version (the version will be auto-detected). This option is ignored when specifying a deployment.")
 
 	return cmd
 }
@@ -95,7 +96,7 @@ func NewCmdRollback(fullName string, f *clientcmd.Factory, out io.Writer) *cobra
 type RollbackOptions struct {
 	Namespace              string
 	TargetName             string
-	DesiredVersion         int
+	DesiredVersion         int64
 	Format                 string
 	Template               string
 	DryRun                 bool
@@ -129,9 +130,9 @@ func (o *RollbackOptions) Complete(f *clientcmd.Factory, args []string, out io.W
 	o.Namespace = namespace
 
 	// Set up client based support.
-	mapper, typer := f.Object()
+	mapper, typer := f.Object(false)
 	o.getBuilder = func() *resource.Builder {
-		return resource.NewBuilder(mapper, typer, f.ClientMapperForCommand())
+		return resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), kapi.Codecs.UniversalDecoder())
 	}
 
 	oClient, kClient, err := f.Clients()
@@ -149,7 +150,7 @@ func (o *RollbackOptions) Complete(f *clientcmd.Factory, args []string, out io.W
 // a rollback.
 func (o *RollbackOptions) Validate() error {
 	if len(o.TargetName) == 0 {
-		return fmt.Errorf("a deployment or deploymentconfig name is required")
+		return fmt.Errorf("a deployment or deployment config name is required")
 	}
 	if o.DesiredVersion < 0 {
 		return fmt.Errorf("the to version must be >= 0")
@@ -182,13 +183,28 @@ func (o *RollbackOptions) Run() error {
 		return err
 	}
 
+	configName := ""
+
 	// Interpret the resource to resolve a target for rollback.
 	var target *kapi.ReplicationController
 	switch r := obj.(type) {
 	case *kapi.ReplicationController:
+		dcName := deployutil.DeploymentConfigNameFor(r)
+		dc, err := o.oc.DeploymentConfigs(r.Namespace).Get(dcName)
+		if err != nil {
+			return err
+		}
+		if dc.Spec.Paused {
+			return fmt.Errorf("cannot rollback a paused deployment config")
+		}
+
 		// A specific deployment was used.
 		target = r
+		configName = deployutil.DeploymentConfigNameFor(obj)
 	case *deployapi.DeploymentConfig:
+		if r.Spec.Paused {
+			return fmt.Errorf("cannot rollback a paused deployment config")
+		}
 		// A deploymentconfig was used. Find the target deployment by the
 		// specified version, or by a lookup of the last completed deployment if
 		// no version was supplied.
@@ -197,17 +213,20 @@ func (o *RollbackOptions) Run() error {
 			return err
 		}
 		target = deployment
+		configName = r.Name
 	}
 	if target == nil {
-		return fmt.Errorf("%s is not a valid deployment or deploymentconfig", o.TargetName)
+		return fmt.Errorf("%s is not a valid deployment or deployment config", o.TargetName)
 	}
 
 	// Set up the rollback and generate a new rolled back config.
 	rollback := &deployapi.DeploymentConfigRollback{
+		Name: configName,
 		Spec: deployapi.DeploymentConfigRollbackSpec{
 			From: kapi.ObjectReference{
 				Name: target.Name,
 			},
+			Revision:               int64(o.DesiredVersion),
 			IncludeTemplate:        true,
 			IncludeTriggers:        o.IncludeTriggers,
 			IncludeStrategy:        o.IncludeStrategy,
@@ -215,14 +234,18 @@ func (o *RollbackOptions) Run() error {
 		},
 	}
 	newConfig, err := o.oc.DeploymentConfigs(o.Namespace).Rollback(rollback)
+	if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
+		// Fallback to the old path for new clients talking to old servers.
+		newConfig, err = o.oc.DeploymentConfigs(o.Namespace).RollbackDeprecated(rollback)
+	}
 	if err != nil {
 		return err
 	}
 
 	// If this is a dry run, print and exit.
 	if o.DryRun {
-		describer := describe.NewDeploymentConfigDescriberForConfig(o.oc, o.kc, newConfig)
-		description, err := describer.Describe(newConfig.Namespace, newConfig.Name)
+		describer := describe.NewDeploymentConfigDescriber(o.oc, o.kc, newConfig)
+		description, err := describer.Describe(newConfig.Namespace, newConfig.Name, kubectl.DescriberSettings{})
 		if err != nil {
 			return err
 		}
@@ -248,8 +271,8 @@ func (o *RollbackOptions) Run() error {
 	}
 
 	// Print warnings about any image triggers disabled during the rollback.
-	fmt.Fprintf(o.out, "#%d rolled back to %s\n", rolledback.LatestVersion, rollback.Spec.From.Name)
-	for _, trigger := range rolledback.Triggers {
+	fmt.Fprintf(o.out, "#%d rolled back to %s\n", rolledback.Status.LatestVersion, rollback.Spec.From.Name)
+	for _, trigger := range rolledback.Spec.Triggers {
 		disabled := []string{}
 		if trigger.Type == deployapi.DeploymentTriggerOnImageChange && !trigger.ImageChangeParams.Automatic {
 			disabled = append(disabled, trigger.ImageChangeParams.From.Name)
@@ -296,7 +319,7 @@ func (o *RollbackOptions) findResource(targetName string) (runtime.Object, error
 		break
 	}
 	if obj == nil {
-		return nil, fmt.Errorf("%s is not a valid deployment or deploymentconfig", targetName)
+		return nil, fmt.Errorf("%s is not a valid deployment or deployment config", targetName)
 	}
 	return obj, nil
 }
@@ -306,13 +329,13 @@ func (o *RollbackOptions) findResource(targetName string) (runtime.Object, error
 // the deployment matching desiredVersion will be returned. If desiredVersion
 // is <=0, the last completed deployment which is older than the config's
 // version will be returned.
-func (o *RollbackOptions) findTargetDeployment(config *deployapi.DeploymentConfig, desiredVersion int) (*kapi.ReplicationController, error) {
+func (o *RollbackOptions) findTargetDeployment(config *deployapi.DeploymentConfig, desiredVersion int64) (*kapi.ReplicationController, error) {
 	// Find deployments for the config sorted by version descending.
-	deployments, err := o.kc.ReplicationControllers(config.Namespace).List(deployutil.ConfigSelector(config.Name))
+	deployments, err := o.kc.ReplicationControllers(config.Namespace).List(kapi.ListOptions{LabelSelector: deployutil.ConfigSelector(config.Name)})
 	if err != nil {
 		return nil, err
 	}
-	sort.Sort(deployutil.DeploymentsByLatestVersionDesc(deployments.Items))
+	sort.Sort(deployutil.ByLatestVersionDesc(deployments.Items))
 
 	// Find the target deployment for rollback. If a version was specified,
 	// use the version for a search. Otherwise, use the last completed
@@ -326,7 +349,7 @@ func (o *RollbackOptions) findTargetDeployment(config *deployapi.DeploymentConfi
 				break
 			}
 		} else {
-			if version < config.LatestVersion && deployutil.DeploymentStatusFor(&deployment) == deployapi.DeploymentStatusComplete {
+			if version < config.Status.LatestVersion && deployutil.DeploymentStatusFor(&deployment) == deployapi.DeploymentStatusComplete {
 				target = &deployment
 				break
 			}

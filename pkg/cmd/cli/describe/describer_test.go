@@ -1,28 +1,37 @@
 package describe
 
 import (
+	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
 	"k8s.io/kubernetes/pkg/kubectl"
-	"k8s.io/kubernetes/pkg/labels"
-	kutil "k8s.io/kubernetes/pkg/util"
 
+	api "github.com/openshift/origin/pkg/api"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/client/testclient"
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
-	deployapitest "github.com/openshift/origin/pkg/deploy/api/test"
-	deployutil "github.com/openshift/origin/pkg/deploy/util"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 	oauthapi "github.com/openshift/origin/pkg/oauth/api"
 	projectapi "github.com/openshift/origin/pkg/project/api"
 	sdnapi "github.com/openshift/origin/pkg/sdn/api"
+	securityapi "github.com/openshift/origin/pkg/security/api"
+
+	// install all APIs
+	_ "github.com/openshift/origin/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/apis/autoscaling/install"
+	_ "k8s.io/kubernetes/pkg/apis/batch/install"
+	_ "k8s.io/kubernetes/pkg/apis/extensions/install"
 )
 
 type describeClient struct {
@@ -36,15 +45,22 @@ type describeClient struct {
 // If you add something to this list, explain why it doesn't need validation.  waaaa is not a valid
 // reason.
 var DescriberCoverageExceptions = []reflect.Type{
+	reflect.TypeOf(&buildapi.BuildLog{}),                              // normal users don't ever look at these
 	reflect.TypeOf(&buildapi.BuildLogOptions{}),                       // normal users don't ever look at these
+	reflect.TypeOf(&buildapi.BinaryBuildRequestOptions{}),             // normal users don't ever look at these
 	reflect.TypeOf(&buildapi.BuildRequest{}),                          // normal users don't ever look at these
+	reflect.TypeOf(&deployapi.DeploymentConfigRollback{}),             // normal users don't ever look at these
+	reflect.TypeOf(&deployapi.DeploymentLog{}),                        // normal users don't ever look at these
+	reflect.TypeOf(&deployapi.DeploymentLogOptions{}),                 // normal users don't ever look at these
 	reflect.TypeOf(&imageapi.DockerImage{}),                           // not a top level resource
+	reflect.TypeOf(&imageapi.ImageStreamImport{}),                     // normal users don't ever look at these
 	reflect.TypeOf(&oauthapi.OAuthAccessToken{}),                      // normal users don't ever look at these
 	reflect.TypeOf(&oauthapi.OAuthAuthorizeToken{}),                   // normal users don't ever look at these
 	reflect.TypeOf(&oauthapi.OAuthClientAuthorization{}),              // normal users don't ever look at these
-	reflect.TypeOf(&deployapi.DeploymentConfigRollback{}),             // normal users don't ever look at these
 	reflect.TypeOf(&projectapi.ProjectRequest{}),                      // normal users don't ever look at these
 	reflect.TypeOf(&authorizationapi.IsPersonalSubjectAccessReview{}), // not a top level resource
+	// ATM image signature doesn't provide any human readable information
+	reflect.TypeOf(&imageapi.ImageSignature{}),
 
 	// these resources can't be "GET"ed, so you can't make a describer for them
 	reflect.TypeOf(&authorizationapi.SubjectAccessReviewResponse{}),
@@ -53,6 +69,10 @@ var DescriberCoverageExceptions = []reflect.Type{
 	reflect.TypeOf(&authorizationapi.ResourceAccessReview{}),
 	reflect.TypeOf(&authorizationapi.LocalSubjectAccessReview{}),
 	reflect.TypeOf(&authorizationapi.LocalResourceAccessReview{}),
+	reflect.TypeOf(&authorizationapi.SelfSubjectRulesReview{}),
+	reflect.TypeOf(&securityapi.PodSecurityPolicySubjectReview{}),
+	reflect.TypeOf(&securityapi.PodSecurityPolicySelfSubjectReview{}),
+	reflect.TypeOf(&securityapi.PodSecurityPolicyReview{}),
 }
 
 // MissingDescriberCoverageExceptions is the list of types that were missing describer methods when I started
@@ -70,8 +90,8 @@ func TestDescriberCoverage(t *testing.T) {
 	c := &client.Client{}
 
 main:
-	for _, apiType := range kapi.Scheme.KnownTypes("") {
-		if !strings.Contains(apiType.PkgPath(), "openshift/origin") {
+	for _, apiType := range kapi.Scheme.KnownTypes(api.SchemeGroupVersion) {
+		if !strings.HasPrefix(apiType.PkgPath(), "github.com/openshift/origin") || strings.HasPrefix(apiType.PkgPath(), "github.com/openshift/origin/vendor/") {
 			continue
 		}
 		// we don't describe lists
@@ -91,7 +111,7 @@ main:
 			}
 		}
 
-		_, ok := DescriberFor(apiType.Name(), c, &ktestclient.Fake{}, "")
+		_, ok := DescriberFor(api.SchemeGroupVersion.WithKind(apiType.Name()).GroupKind(), c, &ktestclient.Fake{}, "")
 		if !ok {
 			t.Errorf("missing printer for %v.  Check pkg/cmd/cli/describe/describer.go", apiType)
 		}
@@ -106,12 +126,11 @@ func TestDescribers(t *testing.T) {
 	testDescriberList := []kubectl.Describer{
 		&BuildDescriber{c, fakeKube},
 		&BuildConfigDescriber{c, ""},
-		&BuildLogDescriber{c},
 		&ImageDescriber{c},
 		&ImageStreamDescriber{c},
 		&ImageStreamTagDescriber{c},
 		&ImageStreamImageDescriber{c},
-		&RouteDescriber{c},
+		&RouteDescriber{c, fakeKube},
 		&ProjectDescriber{c, fakeKube},
 		&PolicyDescriber{c},
 		&PolicyBindingDescriber{c},
@@ -119,7 +138,7 @@ func TestDescribers(t *testing.T) {
 	}
 
 	for _, d := range testDescriberList {
-		out, err := d.Describe("foo", "bar")
+		out, err := d.Describe("foo", "bar", kubectl.DescriberSettings{})
 		if err != nil {
 			t.Errorf("unexpected error for %v: %v", d, err)
 		}
@@ -129,97 +148,17 @@ func TestDescribers(t *testing.T) {
 	}
 }
 
-func TestDeploymentConfigDescriber(t *testing.T) {
-	config := deployapitest.OkDeploymentConfig(1)
-	deployment, _ := deployutil.MakeDeployment(config, kapi.Codec)
-	podList := &kapi.PodList{}
-	eventList := &kapi.EventList{}
-	deploymentList := &kapi.ReplicationControllerList{}
-
-	d := &DeploymentConfigDescriber{
-		client: &genericDeploymentDescriberClient{
-			getDeploymentConfigFunc: func(namespace, name string) (*deployapi.DeploymentConfig, error) {
-				return config, nil
-			},
-			getDeploymentFunc: func(namespace, name string) (*kapi.ReplicationController, error) {
-				return deployment, nil
-			},
-			listDeploymentsFunc: func(namespace string, selector labels.Selector) (*kapi.ReplicationControllerList, error) {
-				return deploymentList, nil
-			},
-			listPodsFunc: func(namespace string, selector labels.Selector) (*kapi.PodList, error) {
-				return podList, nil
-			},
-			listEventsFunc: func(deploymentConfig *deployapi.DeploymentConfig) (*kapi.EventList, error) {
-				return eventList, nil
-			},
-		},
-	}
-
-	describe := func() {
-		if output, err := d.Describe("test", "deployment"); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		} else {
-			t.Logf("describer output:\n%s\n", output)
-		}
-	}
-
-	podList.Items = []kapi.Pod{*mkPod(kapi.PodRunning, 0)}
-	describe()
-
-	config.Triggers = append(config.Triggers, deployapitest.OkConfigChangeTrigger())
-	describe()
-
-	config.Template.Strategy = deployapitest.OkCustomStrategy()
-	describe()
-
-	config.Triggers[0].ImageChangeParams.RepositoryName = ""
-	config.Triggers[0].ImageChangeParams.From = kapi.ObjectReference{Name: "imageRepo"}
-	describe()
-
-	config.Template.Strategy = deployapitest.OkStrategy()
-	config.Template.Strategy.RecreateParams = &deployapi.RecreateDeploymentStrategyParams{
-		Pre: &deployapi.LifecycleHook{
-			FailurePolicy: deployapi.LifecycleHookFailurePolicyAbort,
-			ExecNewPod: &deployapi.ExecNewPodHook{
-				ContainerName: "container",
-				Command:       []string{"/command1", "args"},
-				Env: []kapi.EnvVar{
-					{
-						Name:  "KEY1",
-						Value: "value1",
-					},
-				},
-			},
-		},
-		Post: &deployapi.LifecycleHook{
-			FailurePolicy: deployapi.LifecycleHookFailurePolicyIgnore,
-			ExecNewPod: &deployapi.ExecNewPodHook{
-				ContainerName: "container",
-				Command:       []string{"/command2", "args"},
-				Env: []kapi.EnvVar{
-					{
-						Name:  "KEY2",
-						Value: "value2",
-					},
-				},
-			},
-		},
-	}
-	describe()
-}
-
 func TestDescribeBuildDuration(t *testing.T) {
 	type testBuild struct {
 		build  *buildapi.Build
 		output string
 	}
 
-	creation := kutil.Date(2015, time.April, 9, 6, 0, 0, 0, time.Local)
+	creation := unversioned.Date(2015, time.April, 9, 6, 0, 0, 0, time.Local)
 	// now a minute ago
-	minuteAgo := kutil.Unix(kutil.Now().Rfc3339Copy().Time.Unix()-60, 0)
-	start := kutil.Date(2015, time.April, 9, 6, 1, 0, 0, time.Local)
-	completion := kutil.Date(2015, time.April, 9, 6, 2, 0, 0, time.Local)
+	minuteAgo := unversioned.Unix(unversioned.Now().Rfc3339Copy().Time.Unix()-60, 0)
+	start := unversioned.Date(2015, time.April, 9, 6, 1, 0, 0, time.Local)
+	completion := unversioned.Date(2015, time.April, 9, 6, 2, 0, 0, time.Local)
 	duration := completion.Rfc3339Copy().Time.Sub(start.Rfc3339Copy().Time)
 	zeroDuration := time.Duration(0)
 
@@ -232,7 +171,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration: zeroDuration,
 				},
 			},
-			"waiting for 1m0s",
+			"waiting for 1m",
 		},
 		{ // 1 - build pending
 			&buildapi.Build{
@@ -242,7 +181,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration: zeroDuration,
 				},
 			},
-			"waiting for 1m0s",
+			"waiting for 1m",
 		},
 		{ // 2 - build running
 			&buildapi.Build{
@@ -253,7 +192,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:       duration,
 				},
 			},
-			"running for 1m0s",
+			"running for 1m",
 		},
 		{ // 3 - build completed
 			&buildapi.Build{
@@ -265,7 +204,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"1m0s",
+			"1m",
 		},
 		{ // 4 - build failed
 			&buildapi.Build{
@@ -277,7 +216,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"1m0s",
+			"1m",
 		},
 		{ // 5 - build error
 			&buildapi.Build{
@@ -289,7 +228,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"1m0s",
+			"1m",
 		},
 		{ // 6 - build cancelled before running, start time wasn't set yet
 			&buildapi.Build{
@@ -300,7 +239,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"waited for 2m0s",
+			"waited for 2m",
 		},
 		{ // 7 - build cancelled while running, start time is set already
 			&buildapi.Build{
@@ -312,7 +251,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"1m0s",
+			"1m",
 		},
 		{ // 8 - build failed before running, start time wasn't set yet
 			&buildapi.Build{
@@ -323,7 +262,7 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"waited for 2m0s",
+			"waited for 2m",
 		},
 		{ // 9 - build error before running, start time wasn't set yet
 			&buildapi.Build{
@@ -334,12 +273,12 @@ func TestDescribeBuildDuration(t *testing.T) {
 					Duration:            duration,
 				},
 			},
-			"waited for 2m0s",
+			"waited for 2m",
 		},
 	}
 
 	for i, tc := range tests {
-		if actual, expected := describeBuildDuration(tc.build), tc.output; actual != expected {
+		if actual, expected := describeBuildDuration(tc.build), tc.output; !strings.Contains(actual, expected) {
 			t.Errorf("(%d) expected duration output %s, got %s", i, expected, actual)
 		}
 	}
@@ -353,10 +292,176 @@ func mkPod(status kapi.PodPhase, exitCode int) *kapi.Pod {
 			ContainerStatuses: []kapi.ContainerStatus{
 				{
 					State: kapi.ContainerState{
-						Terminated: &kapi.ContainerStateTerminated{ExitCode: exitCode},
+						Terminated: &kapi.ContainerStateTerminated{ExitCode: int32(exitCode)},
 					},
 				},
 			},
 		},
+	}
+}
+
+func TestDescribePostCommitHook(t *testing.T) {
+	tests := []struct {
+		hook buildapi.BuildPostCommitSpec
+		want string
+	}{
+		{
+			hook: buildapi.BuildPostCommitSpec{},
+			want: "",
+		},
+		{
+			hook: buildapi.BuildPostCommitSpec{
+				Script: "go test",
+			},
+			want: `"/bin/sh", "-ic", "go test"`,
+		},
+		{
+			hook: buildapi.BuildPostCommitSpec{
+				Command: []string{"go", "test"},
+			},
+			want: `"go", "test"`,
+		},
+		{
+			hook: buildapi.BuildPostCommitSpec{
+				Args: []string{"go", "test"},
+			},
+			want: `"<image-entrypoint>", "go", "test"`,
+		},
+		{
+			hook: buildapi.BuildPostCommitSpec{
+				Script: `go test "$@"`,
+				Args:   []string{"-v", "-timeout", "2s"},
+			},
+			want: `"/bin/sh", "-ic", "go test \"$@\"", "/bin/sh", "-v", "-timeout", "2s"`,
+		},
+		{
+			hook: buildapi.BuildPostCommitSpec{
+				Command: []string{"go", "test"},
+				Args:    []string{"-v", "-timeout", "2s"},
+			},
+			want: `"go", "test", "-v", "-timeout", "2s"`,
+		},
+		{
+			// Invalid hook: Script and Command are not allowed
+			// together. For printing, Script takes precedence.
+			hook: buildapi.BuildPostCommitSpec{
+				Script:  "go test -v",
+				Command: []string{"go", "test"},
+			},
+			want: `"/bin/sh", "-ic", "go test -v"`,
+		},
+	}
+	for _, tt := range tests {
+		var b bytes.Buffer
+		out := tabwriter.NewWriter(&b, 0, 8, 0, '\t', 0)
+		describePostCommitHook(tt.hook, out)
+		if err := out.Flush(); err != nil {
+			t.Fatalf("%+v: flush error: %v", tt.hook, err)
+		}
+		var want string
+		if tt.want != "" {
+			want = fmt.Sprintf("Post Commit Hook:\t[%s]\n", tt.want)
+		}
+		if got := b.String(); got != want {
+			t.Errorf("describePostCommitHook(%+v, out) = %q, want %q", tt.hook, got, want)
+		}
+	}
+}
+
+func TestDescribeBuildSpec(t *testing.T) {
+	tests := []struct {
+		spec buildapi.BuildSpec
+		want string
+	}{
+		{
+			spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{
+						Git: &buildapi.GitBuildSource{
+							URI: "http://github.com/my/repository",
+						},
+						ContextDir: "context",
+					},
+					Strategy: buildapi.BuildStrategy{
+						DockerStrategy: &buildapi.DockerBuildStrategy{},
+					},
+					Output: buildapi.BuildOutput{
+						To: &kapi.ObjectReference{
+							Kind: "DockerImage",
+							Name: "repository/data",
+						},
+					},
+				},
+			},
+			want: "URL",
+		},
+		{
+			spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{},
+					Strategy: buildapi.BuildStrategy{
+						SourceStrategy: &buildapi.SourceBuildStrategy{
+							From: kapi.ObjectReference{
+								Kind: "DockerImage",
+								Name: "myimage:tag",
+							},
+						},
+					},
+					Output: buildapi.BuildOutput{
+						To: &kapi.ObjectReference{
+							Kind: "DockerImage",
+							Name: "repository/data",
+						},
+					},
+				},
+			},
+			want: "Empty Source",
+		},
+		{
+			spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{},
+					Strategy: buildapi.BuildStrategy{
+						CustomStrategy: &buildapi.CustomBuildStrategy{
+							From: kapi.ObjectReference{
+								Kind: "DockerImage",
+								Name: "myimage:tag",
+							},
+						},
+					},
+					Output: buildapi.BuildOutput{
+						To: &kapi.ObjectReference{
+							Kind: "DockerImage",
+							Name: "repository/data",
+						},
+					},
+				},
+			},
+			want: "Empty Source",
+		},
+		{
+			spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{},
+					Strategy: buildapi.BuildStrategy{
+						JenkinsPipelineStrategy: &buildapi.JenkinsPipelineBuildStrategy{
+							Jenkinsfile: "openshiftBuild",
+						},
+					},
+				},
+			},
+			want: "openshiftBuild",
+		},
+	}
+	for _, tt := range tests {
+		var b bytes.Buffer
+		out := tabwriter.NewWriter(&b, 0, 8, 0, '\t', 0)
+		describeCommonSpec(tt.spec.CommonSpec, out)
+		if err := out.Flush(); err != nil {
+			t.Fatalf("%+v: flush error: %v", tt.spec, err)
+		}
+		if got := b.String(); !strings.Contains(got, tt.want) {
+			t.Errorf("describeBuildSpec(%+v, out) = %q, should contain %q", tt.spec, got, tt.want)
+		}
 	}
 }

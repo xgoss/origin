@@ -8,13 +8,15 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/controller/serviceaccount"
+	"k8s.io/kubernetes/pkg/serviceaccount"
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	testpolicyregistry "github.com/openshift/origin/pkg/authorization/registry/test"
 	"github.com/openshift/origin/pkg/authorization/rulevalidation"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
+
+	_ "github.com/openshift/origin/pkg/api/install"
 )
 
 type authorizeTest struct {
@@ -43,7 +45,7 @@ func TestAPIGroupDeny(t *testing.T) {
 			Resource: "pods",
 		},
 		expectedAllowed: false,
-		expectedReason:  `User "Anna" cannot list group/pods in project "adze"`,
+		expectedReason:  `User "Anna" cannot list group.pods in project "adze"`,
 	}
 	test.clusterPolicies = newDefaultClusterPolicies()
 	test.policies = append(test.policies, newAdzePolicies()...)
@@ -646,6 +648,7 @@ func newAdzePolicies() []authorizationapi.Policy {
 					},
 					Rules: append(make([]authorizationapi.PolicyRule, 0),
 						authorizationapi.PolicyRule{
+							APIGroups: []string{""},
 							Verbs:     sets.NewString("watch", "list", "get"),
 							Resources: sets.NewString("buildConfigs"),
 						}),

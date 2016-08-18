@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -15,7 +13,9 @@ import (
 )
 
 func TestPolicyCommands(t *testing.T) {
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

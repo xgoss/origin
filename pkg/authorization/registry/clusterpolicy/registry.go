@@ -3,8 +3,6 @@ package clusterpolicy
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/watch"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -14,7 +12,7 @@ import (
 // Registry is an interface for things that know how to store ClusterPolicies.
 type Registry interface {
 	// ListClusterPolicies obtains list of policies that match a selector.
-	ListClusterPolicies(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterPolicyList, error)
+	ListClusterPolicies(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterPolicyList, error)
 	// GetClusterPolicy retrieves a specific policy.
 	GetClusterPolicy(ctx kapi.Context, id string) (*authorizationapi.ClusterPolicy, error)
 	// CreateClusterPolicy creates a new policy.
@@ -28,7 +26,12 @@ type Registry interface {
 type WatchingRegistry interface {
 	Registry
 	// WatchClusterPolicies watches policies.
-	WatchClusterPolicies(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error)
+	WatchClusterPolicies(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error)
+}
+
+type ReadOnlyClusterPolicyInterface interface {
+	List(options kapi.ListOptions) (*authorizationapi.ClusterPolicyList, error)
+	Get(name string) (*authorizationapi.ClusterPolicy, error)
 }
 
 // Storage is an interface for a standard REST Storage backend
@@ -47,8 +50,8 @@ func NewRegistry(s Storage) WatchingRegistry {
 	return &storage{s}
 }
 
-func (s *storage) ListClusterPolicies(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterPolicyList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListClusterPolicies(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterPolicyList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -56,18 +59,18 @@ func (s *storage) ListClusterPolicies(ctx kapi.Context, label labels.Selector, f
 	return obj.(*authorizationapi.ClusterPolicyList), nil
 }
 
-func (s *storage) CreateClusterPolicy(ctx kapi.Context, node *authorizationapi.ClusterPolicy) error {
-	_, err := s.Create(ctx, node)
+func (s *storage) CreateClusterPolicy(ctx kapi.Context, policy *authorizationapi.ClusterPolicy) error {
+	_, err := s.Create(ctx, policy)
 	return err
 }
 
-func (s *storage) UpdateClusterPolicy(ctx kapi.Context, node *authorizationapi.ClusterPolicy) error {
-	_, _, err := s.Update(ctx, node)
+func (s *storage) UpdateClusterPolicy(ctx kapi.Context, policy *authorizationapi.ClusterPolicy) error {
+	_, _, err := s.Update(ctx, policy.Name, rest.DefaultUpdatedObjectInfo(policy, kapi.Scheme))
 	return err
 }
 
-func (s *storage) WatchClusterPolicies(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
-	return s.Watch(ctx, label, field, resourceVersion)
+func (s *storage) WatchClusterPolicies(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error) {
+	return s.Watch(ctx, options)
 }
 
 func (s *storage) GetClusterPolicy(ctx kapi.Context, name string) (*authorizationapi.ClusterPolicy, error) {
@@ -91,8 +94,8 @@ func NewSimulatedRegistry(clusterRegistry Registry) policy.Registry {
 	return &simulatedStorage{clusterRegistry}
 }
 
-func (s *simulatedStorage) ListPolicies(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyList, error) {
-	ret, err := s.clusterRegistry.ListClusterPolicies(ctx, label, field)
+func (s *simulatedStorage) ListPolicies(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.PolicyList, error) {
+	ret, err := s.clusterRegistry.ListClusterPolicies(ctx, options)
 	return authorizationapi.ToPolicyList(ret), err
 }
 
@@ -111,4 +114,16 @@ func (s *simulatedStorage) GetPolicy(ctx kapi.Context, name string) (*authorizat
 
 func (s *simulatedStorage) DeletePolicy(ctx kapi.Context, name string) error {
 	return s.clusterRegistry.DeleteClusterPolicy(ctx, name)
+}
+
+type ReadOnlyClusterPolicy struct {
+	Registry
+}
+
+func (s ReadOnlyClusterPolicy) List(options kapi.ListOptions) (*authorizationapi.ClusterPolicyList, error) {
+	return s.ListClusterPolicies(kapi.WithNamespace(kapi.NewContext(), ""), &options)
+}
+
+func (s ReadOnlyClusterPolicy) Get(name string) (*authorizationapi.ClusterPolicy, error) {
+	return s.GetClusterPolicy(kapi.WithNamespace(kapi.NewContext(), ""), name)
 }

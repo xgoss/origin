@@ -39,7 +39,7 @@ Build Failures
 
 To investigate a build failure, first check the build logs.  You can view the build logs via
 
-    $ oc build-logs [build_id]
+    $ oc logs build/[build_id]
 
 and you can get the build id via:
 
@@ -85,7 +85,7 @@ Docker Registry
 
 Most of the v3 flows today assume you are running a docker registry pod.  You should ensure that this local registry is running:
 
-    $ openshift admin registry
+    $ oadm registry --dry-run
 
 If it's running, you should see this:
 
@@ -93,11 +93,28 @@ If it's running, you should see this:
 
 If it's not running, you will instead see:
 
-    F0429 09:22:54.492990   25259 registry.go:154] Docker-registry "docker-registry" does not exist (no service). Pass --create to install.
+    error: docker-registry "docker-registry" does not exist (no service).
 
 If it's not running, you can launch it via:
 
-    $ oadm registry --create --credentials="${KUBECONFIG}"
+    $ oadm registry
+
+Insecure Docker Registry
+------------------------
+
+If you have problems when pushing to integrated registry, for example following failures in build logs:
+
+    E1124 14:51:23.828346       1 dockerutil.go:74] push for image 172.30.216.184:5000/test/image:latest failed, will retry in 5s seconds ...
+    ...
+    F1124 14:51:28.828654       1 builder.go:60] Build error: Failed to push image. Response from registry is: unable to ping registry endpoint https://172.30.216.184:5000/v0/
+    v2 ping attempt failed with error: Get https://172.30.216.184:5000/v2/: tls: oversized record received with length 20527
+     v1 ping attempt failed with error: Get https://172.30.216.184:5000/v1/_ping: tls: oversized record received with length 20527
+
+If you are running Docker as a service via `systemd`, add the `--insecure-registry 172.30.0.0/16` argument to the options value in `/etc/sysconfig/docker` and restart the Docker daemon.  Otherwise, add "--insecure-registry 172.30.0.0/16" to the Docker daemon invocation, eg:
+
+        $ docker daemon --insecure-registry 172.30.0.0/16
+
+The value of your network might differ, consult OpenShift master configuration (`master-config.yaml`) for `networkConfig.serviceNetworkCIDR` value.
 
 Probing Containers
 ------------------

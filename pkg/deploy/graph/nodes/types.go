@@ -17,7 +17,13 @@ func DeploymentConfigNodeName(o *deployapi.DeploymentConfig) osgraph.UniqueName 
 
 type DeploymentConfigNode struct {
 	osgraph.Node
-	*deployapi.DeploymentConfig
+	DeploymentConfig *deployapi.DeploymentConfig
+
+	IsFound bool
+}
+
+func (n DeploymentConfigNode) Found() bool {
+	return n.IsFound
 }
 
 func (n DeploymentConfigNode) Object() interface{} {
@@ -26,10 +32,6 @@ func (n DeploymentConfigNode) Object() interface{} {
 
 func (n DeploymentConfigNode) String() string {
 	return string(DeploymentConfigNodeName(n.DeploymentConfig))
-}
-
-func (n DeploymentConfigNode) ResourceString() string {
-	return "dc/" + n.Name
 }
 
 func (*DeploymentConfigNode) Kind() string {

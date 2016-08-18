@@ -40,10 +40,13 @@ func TestController(t *testing.T) {
 
 	got := action.(testclient.CreateAction).GetObject().(*kapi.Namespace)
 	if got.Annotations[security.UIDRangeAnnotation] != "10/2" {
-		t.Errorf("unexpected annotation: %#v", got)
+		t.Errorf("unexpected uid annotation: %#v", got)
+	}
+	if got.Annotations[security.SupplementalGroupsAnnotation] != "10/2" {
+		t.Errorf("unexpected supplemental group annotation: %#v", got)
 	}
 	if got.Annotations[security.MCSAnnotation] != "s0:c1,c0" {
-		t.Errorf("unexpected annotation: %#v", got)
+		t.Errorf("unexpected mcs annotation: %#v", got)
 	}
 	if !uida.Has(uid.Block{Start: 10, End: 11}) {
 		t.Errorf("did not allocate uid: %#v", uida)
@@ -58,7 +61,7 @@ func TestControllerError(t *testing.T) {
 		actions int
 	}{
 		"not found": {
-			err:     func() error { return errors.NewNotFound("namespace", "test") },
+			err:     func() error { return errors.NewNotFound(kapi.Resource("Namespace"), "test") },
 			errFn:   func(err error) bool { return err == nil },
 			actions: 1,
 		},
@@ -73,7 +76,7 @@ func TestControllerError(t *testing.T) {
 				if a.Matches("get", "namespaces") {
 					return true, &kapi.Namespace{ObjectMeta: kapi.ObjectMeta{Name: "test"}}, nil
 				}
-				return true, (*kapi.Namespace)(nil), errors.NewConflict("namespace", "test", fmt.Errorf("test conflict"))
+				return true, (*kapi.Namespace)(nil), errors.NewConflict(kapi.Resource("namespace"), "test", fmt.Errorf("test conflict"))
 			},
 			errFn: func(err error) bool {
 				return err != nil && strings.Contains(err.Error(), "unable to allocate security info")

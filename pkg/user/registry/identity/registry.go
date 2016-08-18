@@ -3,17 +3,15 @@ package identity
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/runtime"
 
 	"github.com/openshift/origin/pkg/user/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
 )
 
 // Registry is an interface implemented by things that know how to store Identity objects.
 type Registry interface {
 	// ListIdentities obtains a list of Identities having labels which match selector.
-	ListIdentities(ctx kapi.Context, selector labels.Selector) (*api.IdentityList, error)
+	ListIdentities(ctx kapi.Context, options *kapi.ListOptions) (*api.IdentityList, error)
 	// GetIdentity returns a specific Identity
 	GetIdentity(ctx kapi.Context, name string) (*api.Identity, error)
 	// CreateIdentity creates a Identity
@@ -34,7 +32,7 @@ type Storage interface {
 	rest.Getter
 
 	Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, error)
-	Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error)
+	Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error)
 }
 
 // storage puts strong typing around storage calls
@@ -48,8 +46,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListIdentities(ctx kapi.Context, label labels.Selector) (*api.IdentityList, error) {
-	obj, err := s.List(ctx, label, fields.Everything())
+func (s *storage) ListIdentities(ctx kapi.Context, options *kapi.ListOptions) (*api.IdentityList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -64,16 +62,16 @@ func (s *storage) GetIdentity(ctx kapi.Context, name string) (*api.Identity, err
 	return obj.(*api.Identity), nil
 }
 
-func (s *storage) CreateIdentity(ctx kapi.Context, Identity *api.Identity) (*api.Identity, error) {
-	obj, err := s.Create(ctx, Identity)
+func (s *storage) CreateIdentity(ctx kapi.Context, identity *api.Identity) (*api.Identity, error) {
+	obj, err := s.Create(ctx, identity)
 	if err != nil {
 		return nil, err
 	}
 	return obj.(*api.Identity), nil
 }
 
-func (s *storage) UpdateIdentity(ctx kapi.Context, Identity *api.Identity) (*api.Identity, error) {
-	obj, _, err := s.Update(ctx, Identity)
+func (s *storage) UpdateIdentity(ctx kapi.Context, identity *api.Identity) (*api.Identity, error) {
+	obj, _, err := s.Update(ctx, identity.Name, rest.DefaultUpdatedObjectInfo(identity, kapi.Scheme))
 	if err != nil {
 		return nil, err
 	}

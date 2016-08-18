@@ -9,18 +9,18 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclientcmd "k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 	kclientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
-	"k8s.io/kubernetes/pkg/fields"
-	kcmdconfig "k8s.io/kubernetes/pkg/kubectl/cmd/config"
-	kubecmdconfig "k8s.io/kubernetes/pkg/kubectl/cmd/config"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/term"
 
 	"github.com/openshift/origin/pkg/client"
+	"github.com/openshift/origin/pkg/cmd/cli/cmd/errors"
 	"github.com/openshift/origin/pkg/cmd/cli/config"
+	cmderr "github.com/openshift/origin/pkg/cmd/errors"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
@@ -39,7 +39,7 @@ type LoginOptions struct {
 	Server      string
 	CAFile      string
 	InsecureTLS bool
-	APIVersion  string
+	APIVersion  unversioned.GroupVersion
 
 	// flags and printing helpers
 	Username string
@@ -49,7 +49,7 @@ type LoginOptions struct {
 	// infra
 	StartingKubeConfig *kclientcmdapi.Config
 	DefaultNamespace   string
-	Config             *kclient.Config
+	Config             *restclient.Config
 	Reader             io.Reader
 	Out                io.Writer
 
@@ -59,7 +59,9 @@ type LoginOptions struct {
 
 	Token string
 
-	PathOptions *kcmdconfig.PathOptions
+	PathOptions *kclientcmd.PathOptions
+
+	CommandName string
 }
 
 // Gather all required information in a comprehensive order.
@@ -75,16 +77,16 @@ func (o *LoginOptions) GatherInfo() error {
 
 // getClientConfig returns back the current clientConfig as we know it.  If there is no clientConfig, it builds one with enough information
 // to talk to a server.  This may involve user prompts.  This method is not threadsafe.
-func (o *LoginOptions) getClientConfig() (*kclient.Config, error) {
+func (o *LoginOptions) getClientConfig() (*restclient.Config, error) {
 	if o.Config != nil {
 		return o.Config, nil
 	}
 
-	clientConfig := &kclient.Config{}
+	clientConfig := &restclient.Config{}
 
 	if len(o.Server) == 0 {
 		// we need to have a server to talk to
-		if cmdutil.IsTerminal(o.Reader) {
+		if term.IsTerminal(o.Reader) {
 			for !o.serverProvided() {
 				defaultServer := defaultClusterURL
 				promptMsg := fmt.Sprintf("Server [%s]: ", defaultServer)
@@ -128,7 +130,7 @@ func (o *LoginOptions) getClientConfig() (*kclient.Config, error) {
 		return nil, err
 	}
 
-	result := osClient.Get().AbsPath("/osapi").Do()
+	result := osClient.Get().AbsPath("/").Do()
 	if result.Error() != nil {
 		switch {
 		case o.InsecureTLS:
@@ -147,7 +149,7 @@ func (o *LoginOptions) getClientConfig() (*kclient.Config, error) {
 			if len(matchingClusters) > 0 {
 				clientConfig.Insecure = true
 
-			} else if cmdutil.IsTerminal(o.Reader) {
+			} else if term.IsTerminal(o.Reader) {
 				fmt.Fprintln(o.Out, "The server uses a certificate signed by an unknown authority.")
 				fmt.Fprintln(o.Out, "You can bypass the certificate check, but any data you send to the server could be intercepted by others.")
 
@@ -167,8 +169,8 @@ func (o *LoginOptions) getClientConfig() (*kclient.Config, error) {
 	}
 
 	// check for matching api version
-	if len(o.APIVersion) > 0 {
-		clientConfig.Version = o.APIVersion
+	if !o.APIVersion.IsEmpty() {
+		clientConfig.GroupVersion = &o.APIVersion
 	}
 
 	o.Config = clientConfig
@@ -176,7 +178,7 @@ func (o *LoginOptions) getClientConfig() (*kclient.Config, error) {
 }
 
 // getMatchingClusters examines the kubeconfig for all clusters that point to the same server
-func getMatchingClusters(clientConfig kclient.Config, kubeconfig clientcmdapi.Config) sets.String {
+func getMatchingClusters(clientConfig restclient.Config, kubeconfig clientcmdapi.Config) sets.String {
 	ret := sets.String{}
 
 	for key, cluster := range kubeconfig.Clusters {
@@ -218,12 +220,13 @@ func (o *LoginOptions) gatherAuthInfo() error {
 				return err
 			}
 
-			fmt.Fprint(o.Out, "The token provided is invalid (probably expired).\n\n")
+			return fmt.Errorf("The token provided is invalid or expired.\n\n")
 		}
 	}
 
-	// if a username was provided try to make use of it
-	if o.usernameProvided() {
+	// if a username was provided try to make use of it, but if a password were provided we force a token
+	// request which will return a proper response code for that given password
+	if o.usernameProvided() && !o.passwordProvided() {
 		// search all valid contexts with matching server stanzas to see if we have a matching user stanza
 		kubeconfig := *o.StartingKubeConfig
 		matchingClusters := getMatchingClusters(*clientConfig, kubeconfig)
@@ -242,9 +245,7 @@ func (o *LoginOptions) gatherAuthInfo() error {
 
 							o.Config = clientConfig
 
-							if key == o.StartingKubeConfig.CurrentContext {
-								fmt.Fprintf(o.Out, "Logged into %q as %q using existing credentials.\n\n", o.Config.Host, o.Username)
-							}
+							fmt.Fprintf(o.Out, "Logged into %q as %q using existing credentials.\n\n", o.Config.Host, o.Username)
 
 							return nil
 						}
@@ -301,32 +302,41 @@ func (o *LoginOptions) gatherProjectInfo() error {
 		return err
 	}
 
-	projects, err := oClient.Projects().List(labels.Everything(), fields.Everything())
+	projectsList, err := oClient.Projects().List(kapi.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	projectsItems := projects.Items
+	projectsItems := projectsList.Items
+	projects := sets.String{}
+	for _, project := range projectsItems {
+		projects.Insert(project.Name)
+	}
+
+	if len(o.DefaultNamespace) > 0 && !projects.Has(o.DefaultNamespace) {
+		// Attempt a direct get of our current project in case it hasn't appeared in the list yet
+		if currentProject, err := oClient.Projects().Get(o.DefaultNamespace); err == nil {
+			// If we get it successfully, add it to the list
+			projectsItems = append(projectsItems, *currentProject)
+			projects.Insert(currentProject.Name)
+		}
+	}
 
 	switch len(projectsItems) {
 	case 0:
 		fmt.Fprintf(o.Out, `You don't have any projects. You can try to create a new project, by running
 
-    $ oc new-project <projectname>
+    %s new-project <projectname>
 
-`)
-		o.Project = o.DefaultNamespace
+`, o.CommandName)
+		o.Project = ""
 
 	case 1:
 		o.Project = projectsItems[0].Name
+		fmt.Fprintf(o.Out, "You have one project on this server: %q\n\n", o.Project)
 		fmt.Fprintf(o.Out, "Using project %q.\n", o.Project)
 
 	default:
-		projects := sets.String{}
-		for _, project := range projectsItems {
-			projects.Insert(project.Name)
-		}
-
 		namespace := o.DefaultNamespace
 		if !projects.Has(namespace) {
 			if namespace != kapi.NamespaceDefault && projects.Has(kapi.NamespaceDefault) {
@@ -336,22 +346,22 @@ func (o *LoginOptions) gatherProjectInfo() error {
 			}
 		}
 
-		if current, err := oClient.Projects().Get(namespace); err == nil {
-			o.Project = current.Name
-			fmt.Fprintf(o.Out, "Using project %q.\n", o.Project)
-		} else if !kerrors.IsNotFound(err) && !clientcmd.IsForbidden(err) {
+		current, err := oClient.Projects().Get(namespace)
+		if err != nil && !kerrors.IsNotFound(err) && !clientcmd.IsForbidden(err) {
 			return err
 		}
+		o.Project = current.Name
 
-		fmt.Fprintf(o.Out, "\nYou have access to the following projects and can switch between them with 'oc project <projectname>':\n\n")
+		fmt.Fprintf(o.Out, "You have access to the following projects and can switch between them with '%s project <projectname>':\n\n", o.CommandName)
 		for _, p := range projects.List() {
 			if o.Project == p {
-				fmt.Fprintf(o.Out, "  * %s (current)\n", p)
-			} else {
 				fmt.Fprintf(o.Out, "  * %s\n", p)
+			} else {
+				fmt.Fprintf(o.Out, "    %s\n", p)
 			}
 		}
 		fmt.Fprintln(o.Out)
+		fmt.Fprintf(o.Out, "Using project %q.\n", o.Project)
 	}
 
 	return nil
@@ -393,8 +403,14 @@ func (o *LoginOptions) SaveConfig() (bool, error) {
 		return false, err
 	}
 
-	if err := kubecmdconfig.ModifyConfig(o.PathOptions, *configToWrite, true); err != nil {
-		return false, err
+	if err := kclientcmd.ModifyConfig(o.PathOptions, *configToWrite, true); err != nil {
+		if !os.IsPermission(err) {
+			return false, err
+		}
+
+		out := &bytes.Buffer{}
+		cmderr.PrintError(errors.ErrKubeConfigNotWriteable(o.PathOptions.GetDefaultFilename(), o.PathOptions.IsExplicitFile(), err), out)
+		return false, fmt.Errorf("%v", out)
 	}
 
 	created := false
@@ -425,6 +441,10 @@ func (o LoginOptions) whoAmI() (*api.User, error) {
 
 func (o *LoginOptions) usernameProvided() bool {
 	return len(o.Username) > 0
+}
+
+func (o *LoginOptions) passwordProvided() bool {
+	return len(o.Password) > 0
 }
 
 func (o *LoginOptions) serverProvided() bool {

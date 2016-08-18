@@ -3,8 +3,6 @@ package user
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	"github.com/openshift/origin/pkg/user/api"
@@ -13,7 +11,7 @@ import (
 // Registry is an interface implemented by things that know how to store User objects.
 type Registry interface {
 	// ListUsers obtains a list of users having labels which match selector.
-	ListUsers(ctx kapi.Context, selector labels.Selector) (*api.UserList, error)
+	ListUsers(ctx kapi.Context, options *kapi.ListOptions) (*api.UserList, error)
 	// GetUser returns a specific user
 	GetUser(ctx kapi.Context, name string) (*api.User, error)
 	// CreateUser creates a user
@@ -29,7 +27,7 @@ type Storage interface {
 	rest.Getter
 
 	Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, error)
-	Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error)
+	Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error)
 }
 
 // storage puts strong typing around storage calls
@@ -43,8 +41,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListUsers(ctx kapi.Context, label labels.Selector) (*api.UserList, error) {
-	obj, err := s.List(ctx, label, fields.Everything())
+func (s *storage) ListUsers(ctx kapi.Context, options *kapi.ListOptions) (*api.UserList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +66,7 @@ func (s *storage) CreateUser(ctx kapi.Context, user *api.User) (*api.User, error
 }
 
 func (s *storage) UpdateUser(ctx kapi.Context, user *api.User) (*api.User, error) {
-	obj, _, err := s.Update(ctx, user)
+	obj, _, err := s.Update(ctx, user.Name, rest.DefaultUpdatedObjectInfo(user, kapi.Scheme))
 	if err != nil {
 		return nil, err
 	}

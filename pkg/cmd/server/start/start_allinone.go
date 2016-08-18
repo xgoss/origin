@@ -9,6 +9,8 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"path"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/coreos/go-systemd/daemon"
@@ -18,9 +20,9 @@ import (
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/cmd/server/admin"
+	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/server/start/kubernetes"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 )
@@ -34,6 +36,7 @@ type AllInOneOptions struct {
 	NodeConfigFile     string
 	PrintIP            bool
 	ServiceNetworkCIDR string
+	Output             io.Writer
 }
 
 const allInOneLong = `
@@ -42,7 +45,7 @@ Start an all-in-one server
 This command helps you launch an all-in-one server, which allows you to run all of the
 components of an enterprise Kubernetes system on a server with Docker. Running:
 
-  $ %[1]s start
+  %[1]s start
 
 will start listening on all interfaces, launch an etcd server to store persistent
 data, and launch the Kubernetes system components. The server will run in the foreground until
@@ -59,7 +62,7 @@ You may also pass --kubeconfig=<path> to connect to an external Kubernetes clust
 
 // NewCommandStartAllInOne provides a CLI handler for 'start' command
 func NewCommandStartAllInOne(basename string, out io.Writer) (*cobra.Command, *AllInOneOptions) {
-	options := &AllInOneOptions{MasterOptions: &MasterOptions{Output: out}}
+	options := &AllInOneOptions{Output: out, MasterOptions: &MasterOptions{Output: out}}
 	options.MasterOptions.DefaultsFromName(basename)
 
 	cmds := &cobra.Command{
@@ -67,23 +70,17 @@ func NewCommandStartAllInOne(basename string, out io.Writer) (*cobra.Command, *A
 		Short: "Launch all-in-one server",
 		Long:  fmt.Sprintf(allInOneLong, basename),
 		Run: func(c *cobra.Command, args []string) {
-			if err := options.Complete(); err != nil {
-				fmt.Fprintln(c.Out(), kcmdutil.UsageError(c, err.Error()))
-				return
-			}
-			if err := options.Validate(args); err != nil {
-				fmt.Fprintln(c.Out(), kcmdutil.UsageError(c, err.Error()))
-				return
-			}
+			kcmdutil.CheckErr(options.Complete())
+			kcmdutil.CheckErr(options.Validate(args))
 
 			startProfiler()
 
 			if err := options.StartAllInOne(); err != nil {
 				if kerrors.IsInvalid(err) {
 					if details := err.(*kerrors.StatusError).ErrStatus.Details; details != nil {
-						fmt.Fprintf(c.Out(), "error: Invalid %s %s\n", details.Kind, details.Name)
+						fmt.Fprintf(c.OutOrStderr(), "error: Invalid %s %s\n", details.Kind, details.Name)
 						for _, cause := range details.Causes {
-							fmt.Fprintf(c.Out(), "  %s: %s\n", cause.Field, cause.Message)
+							fmt.Fprintf(c.OutOrStderr(), "  %s: %s\n", cause.Field, cause.Message)
 						}
 						os.Exit(255)
 					}
@@ -105,18 +102,20 @@ func NewCommandStartAllInOne(basename string, out io.Writer) (*cobra.Command, *A
 
 	masterArgs, nodeArgs, listenArg, imageFormatArgs, _ := GetAllInOneArgs()
 	options.MasterOptions.MasterArgs, options.NodeArgs = masterArgs, nodeArgs
-	// by default, all-in-ones all disabled docker.  Set it here so that if we allow it to be bound later, bindings take precedence
-	options.NodeArgs.AllowDisabledDocker = true
 
 	BindMasterArgs(masterArgs, flags, "")
-	BindNodeArgs(nodeArgs, flags, "")
+	BindNodeArgs(nodeArgs, flags, "", false)
 	BindListenArg(listenArg, flags, "")
 	BindImageFormatArgs(imageFormatArgs, flags, "")
 
 	startMaster, _ := NewCommandStartMaster(basename, out)
 	startNode, _ := NewCommandStartNode(basename, out)
+	startNodeNetwork, _ := NewCommandStartNetwork(basename, out)
+	startEtcdServer, _ := NewCommandStartEtcdServer(RecommendedStartEtcdServerName, basename, out)
 	cmds.AddCommand(startMaster)
 	cmds.AddCommand(startNode)
+	cmds.AddCommand(startNodeNetwork)
+	cmds.AddCommand(startEtcdServer)
 
 	startKube := kubernetes.NewCommand("kubernetes", basename, out)
 	cmds.AddCommand(startKube)
@@ -134,7 +133,14 @@ func GetAllInOneArgs() (*MasterArgs, *NodeArgs, *ListenArg, *ImageFormatArgs, *K
 	masterArgs := NewDefaultMasterArgs()
 	masterArgs.StartAPI = true
 	masterArgs.StartControllers = true
+	masterArgs.OverrideConfig = func(config *configapi.MasterConfig) error {
+		// use node DNS
+		// config.DNSConfig = nil
+		return nil
+	}
+
 	nodeArgs := NewDefaultNodeArgs()
+	nodeArgs.Components.DefaultEnable(ComponentDNS)
 
 	listenArg := NewDefaultListenArg()
 	masterArgs.ListenArg = listenArg
@@ -168,6 +174,9 @@ func (o AllInOneOptions) Validate(args []string) error {
 		return errors.New("config directory must have a value")
 	}
 
+	if len(o.NodeArgs.NodeName) == 0 {
+		return errors.New("--hostname must have a value")
+	}
 	// if we are not starting up using a config file, run the argument validation
 	if !o.IsRunFromConfig() {
 		if err := o.MasterOptions.MasterArgs.Validate(); err != nil {
@@ -197,13 +206,6 @@ func (o *AllInOneOptions) Complete() error {
 		o.NodeArgs.ConfigDir.Default(path.Join(o.ConfigDir.Value(), admin.DefaultNodeDir(o.NodeArgs.NodeName)))
 	}
 
-	nodeList := sets.NewString(strings.ToLower(o.NodeArgs.NodeName))
-	// take everything toLower
-	for _, s := range o.MasterOptions.MasterArgs.NodeList {
-		nodeList.Insert(strings.ToLower(s))
-	}
-	o.MasterOptions.MasterArgs.NodeList = nodeList.List()
-
 	o.MasterOptions.MasterArgs.NetworkArgs.NetworkPluginName = o.NodeArgs.NetworkPluginName
 	o.MasterOptions.MasterArgs.NetworkArgs.ServiceNetworkCIDR = o.ServiceNetworkCIDR
 
@@ -216,10 +218,33 @@ func (o *AllInOneOptions) Complete() error {
 	o.NodeArgs.NodeName = strings.ToLower(o.NodeArgs.NodeName)
 	o.NodeArgs.MasterCertDir = o.MasterOptions.MasterArgs.ConfigDir.Value()
 
-	// in the all-in-one, default ClusterDNS to the master's address
-	if host, _, err := net.SplitHostPort(masterAddr.Host); err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			o.NodeArgs.ClusterDNS = ip
+	// For backward compatibility of DNS queries to the master service IP, enabling node DNS
+	// continues to start the master DNS, but the container DNS server will be the node's.
+	// However, if the user has provided an override DNSAddr, we need to honor the value if
+	// the port is not 53 and we do that by disabling node DNS.
+	if !o.IsRunFromConfig() && o.NodeArgs.Components.Enabled(ComponentDNS) {
+		dnsAddr := &o.MasterOptions.MasterArgs.DNSBindAddr
+
+		if dnsAddr.Provided {
+			if dnsAddr.Port == 53 {
+				// the user has set the DNS port to 53, which is the effective default (node on 53, master on 8053)
+				dnsAddr.Port = 8053
+				dnsAddr.URL.Host = net.JoinHostPort(dnsAddr.Host, strconv.Itoa(dnsAddr.Port))
+			} else {
+				// if the user set the DNS port to anything but 53, disable node DNS since ClusterDNS (and glibc)
+				// can't look up DNS on anything other than 53, so we'll continue to use the proxy.
+				o.NodeArgs.Components.Disable(ComponentDNS)
+				glog.V(2).Infof("Node DNS may not be used with a non-standard DNS port %d - disabled node DNS", dnsAddr.Port)
+			}
+		}
+
+		// if node DNS is still enabled, then default the node cluster DNS to a reachable master address
+		if o.NodeArgs.Components.Enabled(ComponentDNS) && o.NodeArgs.ClusterDNS == nil {
+			if dnsIP, err := findLocalIPForDNS(o.MasterOptions.MasterArgs); err == nil {
+				o.NodeArgs.ClusterDNS = dnsIP
+			} else {
+				glog.V(2).Infof("Unable to find a local address to report as the node DNS - not using node DNS: %v", err)
+			}
 		}
 	}
 
@@ -238,7 +263,7 @@ func (o AllInOneOptions) StartAllInOne() error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(o.MasterOptions.Output, "%s\n", host)
+		fmt.Fprintf(o.Output, "%s\n", host)
 		return nil
 	}
 	masterOptions := *o.MasterOptions
@@ -262,8 +287,10 @@ func (o AllInOneOptions) StartAllInOne() error {
 func startProfiler() {
 	if cmdutil.Env("OPENSHIFT_PROFILE", "") == "web" {
 		go func() {
-			glog.Infof("Starting profiling endpoint at http://127.0.0.1:6060/debug/pprof/")
-			glog.Fatal(http.ListenAndServe("127.0.0.1:6060", nil))
+			runtime.SetBlockProfileRate(1)
+			profile_port := cmdutil.Env("OPENSHIFT_PROFILE_PORT", "6060")
+			glog.Infof(fmt.Sprintf("Starting profiling endpoint at http://127.0.0.1:%s/debug/pprof/", profile_port))
+			glog.Fatal(http.ListenAndServe(fmt.Sprintf("127.0.0.1:%s", profile_port), nil))
 		}()
 	}
 }

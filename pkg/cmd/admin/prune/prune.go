@@ -5,11 +5,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	groups "github.com/openshift/origin/pkg/cmd/admin/groups/sync/cli"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
 const PruneRecommendedName = "prune"
+
+const PruneGroupsRecommendedName = "groups"
 
 const pruneLong = `Remove older versions of resources from the server
 
@@ -28,5 +31,6 @@ func NewCommandPrune(name, fullName string, f *clientcmd.Factory, out io.Writer)
 	cmds.AddCommand(NewCmdPruneBuilds(f, fullName, PruneBuildsRecommendedName, out))
 	cmds.AddCommand(NewCmdPruneDeployments(f, fullName, PruneDeploymentsRecommendedName, out))
 	cmds.AddCommand(NewCmdPruneImages(f, fullName, PruneImagesRecommendedName, out))
+	cmds.AddCommand(groups.NewCmdPrune(PruneGroupsRecommendedName, fullName+" "+PruneGroupsRecommendedName, f, out))
 	return cmds
 }

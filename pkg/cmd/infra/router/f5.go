@@ -3,6 +3,7 @@ package router
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
@@ -10,11 +11,11 @@ import (
 
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
+	ocmd "github.com/openshift/origin/pkg/cmd/cli/cmd"
 	"github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/router/controller"
-	"github.com/openshift/origin/pkg/version"
-	f5plugin "github.com/openshift/origin/plugins/router/f5"
+	f5plugin "github.com/openshift/origin/pkg/router/f5"
 )
 
 const (
@@ -40,6 +41,8 @@ type F5RouterOptions struct {
 
 // F5Router is the config necessary to start an F5 router plugin.
 type F5Router struct {
+	RouterName string
+
 	// Host specifies the hostname or IP address of the F5 BIG-IP host.
 	Host string
 
@@ -76,6 +79,7 @@ type F5Router struct {
 
 // Bind binds F5Router arguments to flags
 func (o *F5Router) Bind(flag *pflag.FlagSet) {
+	flag.StringVar(&o.RouterName, "name", util.Env("ROUTER_SERVICE_NAME", "public"), "The name the router will identify itself with in the route status")
 	flag.StringVar(&o.Host, "f5-host", util.Env("ROUTER_EXTERNAL_HOST_HOSTNAME", ""), "The host of F5 BIG-IP's management interface")
 	flag.StringVar(&o.Username, "f5-username", util.Env("ROUTER_EXTERNAL_HOST_USERNAME", ""), "The username for F5 BIG-IP's management utility")
 	flag.StringVar(&o.Password, "f5-password", util.Env("ROUTER_EXTERNAL_HOST_PASSWORD", ""), "The password for F5 BIG-IP's management utility")
@@ -126,7 +130,7 @@ func NewCommandF5Router(name string) *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(version.NewVersionCommand(name))
+	cmd.AddCommand(ocmd.NewCmdVersion(name, nil, os.Stdout, ocmd.VersionOptions{}))
 
 	flag := cmd.Flags()
 	options.Config.Bind(flag)
@@ -167,12 +171,13 @@ func (o *F5RouterOptions) Run() error {
 		return err
 	}
 
-	plugin := controller.NewUniqueHost(f5Plugin, controller.HostForRoute)
-
 	oc, kc, err := o.Config.Clients()
 	if err != nil {
 		return err
 	}
+
+	statusPlugin := controller.NewStatusAdmitter(f5Plugin, oc, o.RouterName)
+	plugin := controller.NewUniqueHost(statusPlugin, o.RouteSelectionFunc(), statusPlugin)
 
 	factory := o.RouterSelection.NewFactory(oc, kc)
 	controller := factory.Create(plugin)

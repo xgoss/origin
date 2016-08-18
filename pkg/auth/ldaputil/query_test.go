@@ -1,11 +1,13 @@
 package ldaputil
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 
-	"github.com/go-ldap/ldap"
+	"github.com/openshift/origin/pkg/auth/ldaputil/testclient"
+	"gopkg.in/ldap.v2"
 )
 
 const (
@@ -174,6 +176,35 @@ func TestNewSearchRequest(t *testing.T) {
 			expectedRequest: nil,
 			expectedError:   true,
 		},
+		{
+			name: "attribute query no attributes with paging",
+			options: LDAPQueryOnAttribute{
+				LDAPQuery: LDAPQuery{
+					BaseDN:       DefaultBaseDN,
+					Scope:        DefaultScope,
+					DerefAliases: DefaultDerefAliases,
+					TimeLimit:    DefaultTimeLimit,
+					Filter:       DefaultFilter,
+					PageSize:     10,
+				},
+				QueryAttribute: DefaultQueryAttribute,
+			},
+
+			attributeValue: "bar",
+			attributes:     DefaultAttributes,
+			expectedRequest: &ldap.SearchRequest{
+				BaseDN:       DefaultBaseDN,
+				Scope:        int(DefaultScope),
+				DerefAliases: int(DefaultDerefAliases),
+				SizeLimit:    DefaultSizeLimit,
+				TimeLimit:    DefaultTimeLimit,
+				TypesOnly:    DefaultTypesOnly,
+				Filter:       fmt.Sprintf("(&(%s)(%s=%s))", DefaultFilter, DefaultQueryAttribute, "bar"),
+				Attributes:   DefaultAttributes,
+				Controls:     []ldap.Control{ldap.NewControlPaging(10)},
+			},
+			expectedError: false,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -192,5 +223,97 @@ func TestNewSearchRequest(t *testing.T) {
 			t.Errorf("%s: did not correctly create search request:\n\texpected:\n%#v\n\tgot:\n%#v",
 				testCase.name, testCase.expectedRequest, request)
 		}
+	}
+}
+
+// TestErrNoSuchObject tests that our LDAP search correctly wraps the LDAP server error
+func TestErrNoSuchObject(t *testing.T) {
+	var testCases = []struct {
+		name          string
+		searchRequest *ldap.SearchRequest
+		expectedError error
+	}{
+		{
+			name: "valid search",
+			searchRequest: &ldap.SearchRequest{
+				BaseDN: "uid=john,o=users,dc=example,dc=com",
+			},
+			expectedError: nil,
+		},
+		{
+			name: "invalid search",
+			searchRequest: &ldap.SearchRequest{
+				BaseDN: "ou=groups,dc=example,dc=com",
+			},
+			expectedError: &errNoSuchObject{baseDN: "ou=groups,dc=example,dc=com"},
+		},
+	}
+	for _, testCase := range testCases {
+		testClient := testclient.NewMatchingSearchErrorClient(testclient.New(),
+			"ou=groups,dc=example,dc=com",
+			ldap.NewError(ldap.LDAPResultNoSuchObject, errors.New("")),
+		)
+		testConfig := testclient.NewConfig(testClient)
+		if _, err := QueryForEntries(testConfig, testCase.searchRequest); !reflect.DeepEqual(err, testCase.expectedError) {
+			t.Errorf("%s: error did not match:\n\texpected:\n\t%v\n\tgot:\n\t%v", testCase.name, testCase.expectedError, err)
+		}
+	}
+}
+
+// TestErrEntryNotFound checks that we wrap a zero-length list of results correctly if we search for a unique entry
+func TestErrEntryNotFound(t *testing.T) {
+	testConfig := testclient.NewConfig(testclient.New())
+	testSearchRequest := &ldap.SearchRequest{
+		BaseDN:       "dc=example,dc=com",
+		Scope:        ldap.ScopeWholeSubtree,
+		DerefAliases: int(DefaultDerefAliases),
+		SizeLimit:    DefaultSizeLimit,
+		TimeLimit:    DefaultTimeLimit,
+		TypesOnly:    DefaultTypesOnly,
+		Filter:       "(objectClass=*)",
+		Attributes:   append(DefaultAttributes),
+		Controls:     DefaultControls,
+	}
+
+	expectedErr := &errEntryNotFound{baseDN: "dc=example,dc=com", filter: "(objectClass=*)"}
+
+	// test that a unique search errors on no result
+	if _, err := QueryForUniqueEntry(testConfig, testSearchRequest); !reflect.DeepEqual(err, expectedErr) {
+		t.Errorf("query for unique entry did not get correct error:\n\texpected:\n\t%v\n\tgot:\n\t%v", expectedErr, err)
+	}
+
+	// test that a non-unique search doesn't error
+	if _, err := QueryForEntries(testConfig, testSearchRequest); !reflect.DeepEqual(err, nil) {
+		t.Errorf("query for entries did not get correct error:\n\texpected:\n\t%v\n\tgot:\n\t%v", nil, err)
+	}
+}
+
+func TestQueryWithPaging(t *testing.T) {
+	expectedResult := &ldap.SearchResult{
+		Entries: []*ldap.Entry{ldap.NewEntry("cn=paging,ou=paging,dc=paging,dc=com", map[string][]string{"paging": {"true"}})},
+	}
+
+	testConfig := testclient.NewConfig(testclient.NewPagingOnlyClient(testclient.New(),
+		expectedResult,
+	))
+	testSearchRequest := &ldap.SearchRequest{
+		BaseDN:       "dc=example,dc=com",
+		Scope:        ldap.ScopeWholeSubtree,
+		DerefAliases: int(DefaultDerefAliases),
+		SizeLimit:    DefaultSizeLimit,
+		TimeLimit:    DefaultTimeLimit,
+		TypesOnly:    DefaultTypesOnly,
+		Filter:       "(objectClass=*)",
+		Attributes:   append(DefaultAttributes),
+		Controls:     []ldap.Control{ldap.NewControlPaging(5)},
+	}
+
+	// test that a search request with paging controls gets correctly routed to the SearchWithPaging call
+	response, err := QueryForEntries(testConfig, testSearchRequest)
+	if err != nil {
+		t.Errorf("query with paging control should not create error, but got %v", err)
+	}
+	if !reflect.DeepEqual(expectedResult.Entries, response) {
+		t.Errorf("query with paging did not return correct response: expected %v, got %v", expectedResult.Entries, response)
 	}
 }

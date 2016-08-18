@@ -3,19 +3,45 @@ package validation
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/runtime"
 	ktypes "k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	"github.com/openshift/origin/pkg/api"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 )
 
+// Ensures that `nil` can be passed to validation functions validating top-level objects
+func TestNilPath(t *testing.T) {
+	var nilPath *field.Path = nil
+	if s := nilPath.String(); s != "" {
+		t.Errorf("Unexpected nil path: %q", s)
+	}
+
+	child := nilPath.Child("child")
+	if s := child.String(); s != "child" {
+		t.Errorf("Unexpected child path: %q", s)
+	}
+
+	key := nilPath.Key("key")
+	if s := key.String(); s != "[key]" {
+		t.Errorf("Unexpected key path: %q", s)
+	}
+
+	index := nilPath.Index(1)
+	if s := index.String(); s != "[1]" {
+		t.Errorf("Unexpected index path: %q", s)
+	}
+}
+
 func TestNameFunc(t *testing.T) {
+	const nameRulesMessage = `must match the regex [a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)* (e.g. 'example.com')`
+
 	for apiType, validationInfo := range Validator.typeToValidator {
 		if !validationInfo.HasObjectMeta {
 			continue
@@ -29,7 +55,8 @@ func TestNameFunc(t *testing.T) {
 			apiObjectMeta.Set(reflect.ValueOf(kapi.ObjectMeta{Name: illegalName}))
 
 			errList := validationInfo.Validator.Validate(apiValue.Interface().(runtime.Object))
-			_, requiredMessage := api.MinimalNameRequirements(illegalName, false)
+			reasons := api.MinimalNameRequirements(illegalName, false)
+			requiredMessage := strings.Join(reasons, ", ")
 
 			if len(errList) == 0 {
 				t.Errorf("expected error for %v in %v not found amongst %v.  You probably need to add api.MinimalNameRequirements to your name validator..", illegalName, apiType.Elem(), errList)
@@ -38,17 +65,16 @@ func TestNameFunc(t *testing.T) {
 
 			foundExpectedError := false
 			for _, err := range errList {
-				validationError, ok := err.(*fielderrors.ValidationError)
-				if !ok || validationError.Type != fielderrors.ValidationErrorTypeInvalid || validationError.Field != "metadata.name" {
+				validationError := err
+				if validationError.Type != field.ErrorTypeInvalid || validationError.Field != "metadata.name" {
 					continue
 				}
-
 				if validationError.Detail == requiredMessage {
 					foundExpectedError = true
 					break
 				}
 				// this message is from a stock name validation method in kube that covers our requirements in MinimalNameRequirements
-				if validationError.Detail == validation.DNSSubdomainErrorMsg {
+				if validationError.Detail == nameRulesMessage {
 					foundExpectedError = true
 					break
 				}
@@ -66,7 +92,8 @@ func TestNameFunc(t *testing.T) {
 			apiObjectMeta.Set(reflect.ValueOf(kapi.ObjectMeta{Name: illegalName}))
 
 			errList := validationInfo.Validator.Validate(apiValue.Interface().(runtime.Object))
-			_, requiredMessage := api.MinimalNameRequirements(illegalName, false)
+			reasons := api.MinimalNameRequirements(illegalName, false)
+			requiredMessage := strings.Join(reasons, ", ")
 
 			if len(errList) == 0 {
 				t.Errorf("expected error for %v in %v not found amongst %v.  You probably need to add api.MinimalNameRequirements to your name validator.", illegalName, apiType.Elem(), errList)
@@ -75,8 +102,8 @@ func TestNameFunc(t *testing.T) {
 
 			foundExpectedError := false
 			for _, err := range errList {
-				validationError, ok := err.(*fielderrors.ValidationError)
-				if !ok || validationError.Type != fielderrors.ValidationErrorTypeInvalid || validationError.Field != "metadata.name" {
+				validationError := err
+				if validationError.Type != field.ErrorTypeInvalid || validationError.Field != "metadata.name" {
 					continue
 				}
 
@@ -84,7 +111,8 @@ func TestNameFunc(t *testing.T) {
 					foundExpectedError = true
 					break
 				}
-				if validationError.Detail == validation.DNSSubdomainErrorMsg {
+				// this message is from a stock name validation method in kube that covers our requirements in MinimalNameRequirements
+				if validationError.Detail == nameRulesMessage {
 					foundExpectedError = true
 					break
 				}
@@ -113,7 +141,7 @@ func TestObjectMeta(t *testing.T) {
 		}
 
 		errList := validationInfo.Validator.Validate(apiValue.Interface().(runtime.Object))
-		requiredErrors := validation.ValidateObjectMeta(apiObjectMeta.Addr().Interface().(*kapi.ObjectMeta), validationInfo.IsNamespaced, api.MinimalNameRequirements).Prefix("metadata")
+		requiredErrors := validation.ValidateObjectMeta(apiObjectMeta.Addr().Interface().(*kapi.ObjectMeta), validationInfo.IsNamespaced, api.MinimalNameRequirements, field.NewPath("metadata"))
 
 		if len(errList) == 0 {
 			t.Errorf("expected errors %v in %v not found amongst %v.  You probably need to call kube/validation.ValidateObjectMeta in your validator.", requiredErrors, apiType.Elem(), errList)
@@ -124,11 +152,7 @@ func TestObjectMeta(t *testing.T) {
 			foundExpectedError := false
 
 			for _, err := range errList {
-				validationError, ok := err.(*fielderrors.ValidationError)
-				if !ok {
-					continue
-				}
-
+				validationError := err
 				if fmt.Sprintf("%v", validationError) == fmt.Sprintf("%v", requiredError) {
 					foundExpectedError = true
 					break
@@ -184,7 +208,7 @@ func TestObjectMetaUpdate(t *testing.T) {
 		newObjMeta := newAPIObjectMeta.Addr().Interface().(*kapi.ObjectMeta)
 
 		errList := validationInfo.Validator.ValidateUpdate(newObj, oldObj)
-		requiredErrors := validation.ValidateObjectMetaUpdate(newObjMeta, oldObjMeta).Prefix("metadata")
+		requiredErrors := validation.ValidateObjectMetaUpdate(newObjMeta, oldObjMeta, field.NewPath("metadata"))
 
 		if len(errList) == 0 {
 			t.Errorf("expected errors %v in %v not found amongst %v.  You probably need to call kube/validation.ValidateObjectMetaUpdate in your validator.", requiredErrors, apiType.Elem(), errList)
@@ -195,11 +219,7 @@ func TestObjectMetaUpdate(t *testing.T) {
 			foundExpectedError := false
 
 			for _, err := range errList {
-				validationError, ok := err.(*fielderrors.ValidationError)
-				if !ok {
-					continue
-				}
-
+				validationError := err
 				if fmt.Sprintf("%v", validationError) == fmt.Sprintf("%v", requiredError) {
 					foundExpectedError = true
 					break
@@ -210,5 +230,31 @@ func TestObjectMetaUpdate(t *testing.T) {
 				t.Errorf("expected error %v in %v not found amongst %v.  You probably need to call kube/validation.ValidateObjectMetaUpdate in your validator.", requiredError, apiType.Elem(), errList)
 			}
 		}
+	}
+}
+
+func TestPodSpecNodeSelectorUpdateDisallowed(t *testing.T) {
+	oldPod := &kapi.Pod{
+		ObjectMeta: kapi.ObjectMeta{
+			ResourceVersion: "1",
+		},
+		Spec: kapi.PodSpec{
+			NodeSelector: map[string]string{
+				"foo": "bar",
+			},
+		},
+	}
+
+	if errs := validation.ValidatePodUpdate(oldPod, oldPod); len(errs) != 0 {
+		t.Fatal("expected no errors")
+	}
+
+	newPod := *oldPod
+	// use a new map so it doesn't change oldPod's map too
+	newPod.Spec.NodeSelector = map[string]string{"foo": "other"}
+
+	errs := validation.ValidatePodUpdate(&newPod, oldPod)
+	if len(errs) == 0 {
+		t.Fatal("expected at least 1 error")
 	}
 }

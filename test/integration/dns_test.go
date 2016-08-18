@@ -1,16 +1,17 @@
-// +build integration,etcd
-
 package integration
 
 import (
+	"fmt"
+	"hash/fnv"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/util"
+	waitutil "k8s.io/kubernetes/pkg/util/wait"
 
 	"github.com/miekg/dns"
 	testutil "github.com/openshift/origin/test/util"
@@ -18,6 +19,8 @@ import (
 )
 
 func TestDNS(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	masterConfig, clientFile, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -36,10 +39,10 @@ func TestDNS(t *testing.T) {
 	var masterIP net.IP
 	// verify service DNS entry is visible
 	stop := make(chan struct{})
-	util.Until(func() {
+	waitutil.Until(func() {
 		m1 := &dns.Msg{
 			MsgHdr:   dns.MsgHdr{Id: dns.Id(), RecursionDesired: false},
-			Question: []dns.Question{{"kubernetes.default.svc.cluster.local.", dns.TypeA, dns.ClassINET}},
+			Question: []dns.Question{{Name: "kubernetes.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}},
 		}
 		in, err := dns.Exchange(m1, masterConfig.DNSConfig.BindAddress)
 		if err != nil {
@@ -66,6 +69,31 @@ func TestDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
+	// Verify kubernetes service port is 53 and target port is the
+	// configured masterConfig.DNSConfig.BindAddress port.
+	_, dnsPortString, err := net.SplitHostPort(masterConfig.DNSConfig.BindAddress)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dnsPort, err := strconv.Atoi(dnsPortString)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	kubernetesService, err := client.Services(kapi.NamespaceDefault).Get("kubernetes")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, port := range kubernetesService.Spec.Ports {
+		if port.Port == 53 && port.TargetPort.IntVal == int32(dnsPort) && port.Protocol == kapi.ProtocolTCP {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("did not find DNS port in kubernetes service: %#v", kubernetesService)
+	}
+
 	for {
 		if _, err := client.Services(kapi.NamespaceDefault).Create(&kapi.Service{
 			ObjectMeta: kapi.ObjectMeta{
@@ -90,7 +118,7 @@ func TestDNS(t *testing.T) {
 			Subsets: []kapi.EndpointSubset{{
 				Addresses: []kapi.EndpointAddress{{IP: "172.0.0.1"}},
 				Ports: []kapi.EndpointPort{
-					{Port: 2345},
+					{Port: 2345, Name: "http"},
 				},
 			}},
 		}); err != nil {
@@ -99,6 +127,7 @@ func TestDNS(t *testing.T) {
 		break
 	}
 	headlessIP := net.ParseIP("172.0.0.1")
+	headlessIPHash := getHash(headlessIP.String())
 
 	if _, err := client.Services(kapi.NamespaceDefault).Create(&kapi.Service{
 		ObjectMeta: kapi.ObjectMeta{
@@ -126,6 +155,9 @@ func TestDNS(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	headless2IP := net.ParseIP("172.0.0.2")
+	precannedIP := net.ParseIP("10.2.4.50")
+
+	headless2IPHash := getHash(headless2IP.String())
 
 	tests := []struct {
 		dnsQuestionName   string
@@ -146,25 +178,38 @@ func TestDNS(t *testing.T) {
 			dnsQuestionName: "openshift.default.svc.cluster.local.",
 			expect:          []*net.IP{&masterIP},
 		},
+		{ // pod by IP
+			dnsQuestionName: "10-2-4-50.default.pod.cluster.local.",
+			expect:          []*net.IP{&precannedIP},
+		},
 		{ // headless service
 			dnsQuestionName: "headless.default.svc.cluster.local.",
 			expect:          []*net.IP{&headlessIP},
 		},
 		{ // specific port of a headless service
-			dnsQuestionName: "unknown-port-2345.e1.headless.default.svc.cluster.local.",
+			dnsQuestionName: "_http._tcp.headless.default.svc.cluster.local.",
 			expect:          []*net.IP{&headlessIP},
 		},
 		{ // SRV record for that service
 			dnsQuestionName: "headless.default.svc.cluster.local.",
 			srv: []*dns.SRV{
 				{
-					Target: "unknown-port-2345.e1.headless.",
-					Port:   2345,
+					Target: headlessIPHash + ".headless.default.svc.cluster.local.",
+					Port:   0,
+				},
+			},
+		},
+		{ // SRV record for a port
+			dnsQuestionName: "_http._tcp.headless2.default.svc.cluster.local.",
+			srv: []*dns.SRV{
+				{
+					Target: headless2IPHash + ".headless2.default.svc.cluster.local.",
+					Port:   2346,
 				},
 			},
 		},
 		{ // the SRV record resolves to the IP
-			dnsQuestionName: "unknown-port-2345.e1.headless.default.svc.cluster.local.",
+			dnsQuestionName: "_http._tcp.headless.default.svc.cluster.local.",
 			expect:          []*net.IP{&headlessIP},
 		},
 		{ // headless 2 service
@@ -175,22 +220,18 @@ func TestDNS(t *testing.T) {
 			dnsQuestionName: "headless2.default.svc.cluster.local.",
 			srv: []*dns.SRV{
 				{
-					Target: "http.e1.headless2.",
-					Port:   2346,
-				},
-				{
-					Target: "other.e1.headless2.",
-					Port:   2345,
+					Target: headless2IPHash + ".headless2.default.svc.cluster.local.",
+					Port:   0,
 				},
 			},
 		},
 		{ // the SRV record resolves to the IP
-			dnsQuestionName: "other.e1.headless2.default.svc.cluster.local.",
+			dnsQuestionName: headless2IPHash + ".headless2.default.svc.cluster.local.",
 			expect:          []*net.IP{&headless2IP},
 		},
 		{
 			dnsQuestionName:   "www.google.com.",
-			recursionExpected: false,
+			recursionExpected: true,
 		},
 	}
 	for i, tc := range tests {
@@ -199,20 +240,32 @@ func TestDNS(t *testing.T) {
 			qType = dns.TypeSRV
 		}
 		m1 := &dns.Msg{
-			MsgHdr:   dns.MsgHdr{Id: dns.Id(), RecursionDesired: false},
-			Question: []dns.Question{{tc.dnsQuestionName, qType, dns.ClassINET}},
+			MsgHdr:   dns.MsgHdr{Id: dns.Id(), RecursionDesired: tc.recursionExpected},
+			Question: []dns.Question{{Name: tc.dnsQuestionName, Qtype: qType, Qclass: dns.ClassINET}},
 		}
 		ch := make(chan struct{})
 		count := 0
-		util.Until(func() {
+		failedLatency := 0
+		waitutil.Until(func() {
 			count++
 			if count > 100 {
 				t.Errorf("%d: failed after max iterations", i)
 				close(ch)
 				return
 			}
+			before := time.Now()
 			in, err := dns.Exchange(m1, masterConfig.DNSConfig.BindAddress)
 			if err != nil {
+				return
+			}
+			after := time.Now()
+			delta := after.Sub(before)
+			if delta > 500*time.Millisecond {
+				failedLatency++
+				if failedLatency > 10 {
+					t.Errorf("%d: failed after 10 requests took longer than 500ms", i)
+					close(ch)
+				}
 				return
 			}
 			switch {
@@ -246,7 +299,7 @@ func TestDNS(t *testing.T) {
 						}
 					}
 					if !matches {
-						t.Errorf("A record does not match any expected answer: %v", a.A)
+						t.Errorf("%d: A record does not match any expected answer for %q: %v", i, tc.dnsQuestionName, a.A)
 					}
 				case *dns.SRV:
 					matches := false
@@ -257,14 +310,21 @@ func TestDNS(t *testing.T) {
 						}
 					}
 					if !matches {
-						t.Errorf("SRV record does not match any expected answer: %#v", a)
+						t.Errorf("%d: SRV record does not match any expected answer %q: %#v", i, tc.dnsQuestionName, a)
 					}
 				default:
-					t.Errorf("expected an A or SRV record: %#v", in)
+					t.Errorf("%d: expected an A or SRV record %q: %#v", i, tc.dnsQuestionName, in)
 				}
 			}
 			t.Log(in)
 			close(ch)
 		}, 50*time.Millisecond, ch)
 	}
+}
+
+// return a hash for the key name
+func getHash(text string) string {
+	h := fnv.New32a()
+	h.Write([]byte(text))
+	return fmt.Sprintf("%x", h.Sum32())
 }

@@ -1,60 +1,44 @@
 package util
 
 import (
-	"fmt"
 	"io/ioutil"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
+	"k8s.io/kubernetes/pkg/runtime"
+	kyaml "k8s.io/kubernetes/pkg/util/yaml"
+
+	imageapi "github.com/openshift/origin/pkg/image/api"
+	templateapi "github.com/openshift/origin/pkg/template/api"
 )
 
-// CreateSampleImageStream creates an ImageStream in given namespace
-func CreateSampleImageStream(namespace string) *imageapi.ImageStream {
-	var stream imageapi.ImageStream
-	jsonData, err := ioutil.ReadFile("fixtures/test-image-stream.json")
+func GetTemplateFixture(filename string) (*templateapi.Template, error) {
+	data, err := ioutil.ReadFile(filename)
 	if err != nil {
-		fmt.Printf("ERROR: Unable to read: %v", err)
-		return nil
+		return nil, err
 	}
-	latest.Codec.DecodeInto(jsonData, &stream)
-
-	client, _ := GetClusterAdminClient(KubeConfigPath())
-	result, err := client.ImageStreams(namespace).Create(&stream)
+	jsonData, err := kyaml.ToJSON(data)
 	if err != nil {
-		fmt.Printf("ERROR: Unable to create sample ImageStream: %v\n", err)
-		return nil
+		return nil, err
 	}
-	return result
+	obj, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), jsonData)
+	if err != nil {
+		return nil, err
+	}
+	return obj.(*templateapi.Template), nil
 }
 
-// DeleteSampleImageStream removes the ImageStream created in given
-// namespace
-func DeleteSampleImageStream(stream *imageapi.ImageStream, namespace string) {
-	client, _ := GetClusterAdminClient(KubeConfigPath())
-	client.ImageStreams(namespace).Delete(stream.Name)
-}
-
-// GetBuildFixture reads the Build JSON and returns and Build object
-func GetBuildFixture(filename string) *buildapi.Build {
-	var build buildapi.Build
-	jsonData, err := ioutil.ReadFile(filename)
+func GetImageFixture(filename string) (*imageapi.Image, error) {
+	data, err := ioutil.ReadFile(filename)
 	if err != nil {
-		fmt.Printf("ERROR: Unable to read %s: %v", filename, err)
-		return nil
+		return nil, err
 	}
-	latest.Codec.DecodeInto(jsonData, &build)
-	return &build
-}
-
-func GetSecretFixture(filename string) *kapi.Secret {
-	var secret kapi.Secret
-	jsonData, err := ioutil.ReadFile(filename)
+	jsonData, err := kyaml.ToJSON(data)
 	if err != nil {
-		fmt.Printf("ERROR: Unable to read %s: %v", filename, err)
-		return nil
+		return nil, err
 	}
-	latest.Codec.DecodeInto(jsonData, &secret)
-	return &secret
+	obj, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), jsonData)
+	if err != nil {
+		return nil, err
+	}
+	return obj.(*imageapi.Image), nil
 }

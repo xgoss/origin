@@ -5,11 +5,12 @@ import (
 	"sync"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/watch"
 
-	"github.com/openshift/origin/pkg/api/latest"
+	_ "github.com/openshift/origin/pkg/api/install"
 	"github.com/openshift/origin/pkg/client"
 )
 
@@ -27,7 +28,7 @@ type Fake struct {
 
 // NewSimpleFake returns a client that will respond with the provided objects
 func NewSimpleFake(objects ...runtime.Object) *Fake {
-	o := ktestclient.NewObjects(kapi.Scheme, kapi.Scheme)
+	o := ktestclient.NewObjects(kapi.Scheme, kapi.Codecs.UniversalDecoder())
 	for _, obj := range objects {
 		if err := o.Add(obj); err != nil {
 			panic(err)
@@ -35,26 +36,24 @@ func NewSimpleFake(objects ...runtime.Object) *Fake {
 	}
 
 	fakeClient := &Fake{}
-	fakeClient.AddReactor("*", "*", ktestclient.ObjectReaction(o, latest.RESTMapper))
+	fakeClient.AddReactor("*", "*", ktestclient.ObjectReaction(o, registered.RESTMapper()))
 
 	return fakeClient
 }
 
 // AddReactor appends a reactor to the end of the chain
 func (c *Fake) AddReactor(verb, resource string, reaction ktestclient.ReactionFunc) {
-	c.ReactionChain = append(c.ReactionChain, &ktestclient.SimpleReactor{verb, resource, reaction})
+	c.ReactionChain = append(c.ReactionChain, &ktestclient.SimpleReactor{Verb: verb, Resource: resource, Reaction: reaction})
 }
 
 // PrependReactor adds a reactor to the beginning of the chain
 func (c *Fake) PrependReactor(verb, resource string, reaction ktestclient.ReactionFunc) {
-	newChain := make([]ktestclient.Reactor, 0, len(c.ReactionChain)+1)
-	newChain[0] = &ktestclient.SimpleReactor{verb, resource, reaction}
-	newChain = append(newChain, c.ReactionChain...)
+	c.ReactionChain = append([]ktestclient.Reactor{&ktestclient.SimpleReactor{Verb: verb, Resource: resource, Reaction: reaction}}, c.ReactionChain...)
 }
 
 // AddWatchReactor appends a reactor to the end of the chain
 func (c *Fake) AddWatchReactor(resource string, reaction ktestclient.WatchReactionFunc) {
-	c.WatchReactionChain = append(c.WatchReactionChain, &ktestclient.SimpleWatchReactor{resource, reaction})
+	c.WatchReactionChain = append(c.WatchReactionChain, &ktestclient.SimpleWatchReactor{Resource: resource, Reaction: reaction})
 }
 
 // Invokes records the provided Action and then invokes the ReactFn (if provided).
@@ -142,6 +141,16 @@ func (c *Fake) Images() client.ImageInterface {
 	return &FakeImages{Fake: c}
 }
 
+// ImageSignatures provides a fake REST client for ImageSignatures
+func (c *Fake) ImageSignatures() client.ImageSignatureInterface {
+	return &FakeImageSignatures{Fake: c}
+}
+
+// ImageStreams provides a fake REST client for ImageStreams
+func (c *Fake) ImageStreamSecrets(namespace string) client.ImageStreamSecretInterface {
+	return &FakeImageStreamSecrets{Fake: c, Namespace: namespace}
+}
+
 // ImageStreams provides a fake REST client for ImageStreams
 func (c *Fake) ImageStreams(namespace string) client.ImageStreamInterface {
 	return &FakeImageStreams{Fake: c, Namespace: namespace}
@@ -167,6 +176,11 @@ func (c *Fake) DeploymentConfigs(namespace string) client.DeploymentConfigInterf
 	return &FakeDeploymentConfigs{Fake: c, Namespace: namespace}
 }
 
+// DeploymentLogs provides a fake REST client for DeploymentLogs
+func (c *Fake) DeploymentLogs(namespace string) client.DeploymentLogInterface {
+	return &FakeDeploymentLogs{Fake: c, Namespace: namespace}
+}
+
 // Routes provides a fake REST client for Routes
 func (c *Fake) Routes(namespace string) client.RouteInterface {
 	return &FakeRoutes{Fake: c, Namespace: namespace}
@@ -185,6 +199,11 @@ func (c *Fake) NetNamespaces() client.NetNamespaceInterface {
 // ClusterNetwork provides a fake REST client for ClusterNetwork
 func (c *Fake) ClusterNetwork() client.ClusterNetworkInterface {
 	return &FakeClusterNetwork{Fake: c}
+}
+
+// EgressNetworkPolicies provides a fake REST client for EgressNetworkPolicies
+func (c *Fake) EgressNetworkPolicies(namespace string) client.EgressNetworkPolicyInterface {
+	return &FakeEgressNetworkPolicy{Fake: c, Namespace: namespace}
 }
 
 // Templates provides a fake REST client for Templates
@@ -247,6 +266,10 @@ func (c *Fake) PolicyBindings(namespace string) client.PolicyBindingInterface {
 	return &FakePolicyBindings{Fake: c, Namespace: namespace}
 }
 
+func (c *Fake) SelfSubjectRulesReviews(namespace string) client.SelfSubjectRulesReviewInterface {
+	return &FakeSelfSubjectRulesReviews{Fake: c, Namespace: namespace}
+}
+
 // LocalResourceAccessReviews provides a fake REST client for ResourceAccessReviews
 func (c *Fake) LocalResourceAccessReviews(namespace string) client.LocalResourceAccessReviewInterface {
 	return &FakeLocalResourceAccessReviews{Fake: c}
@@ -267,9 +290,20 @@ func (c *Fake) ImpersonateLocalSubjectAccessReviews(namespace, token string) cli
 	return &FakeLocalSubjectAccessReviews{Fake: c, Namespace: namespace}
 }
 
-// OAuthAccessTokens provides a fake REST client for OAuthAccessTokens
+func (c *Fake) OAuthClients() client.OAuthClientInterface {
+	return &FakeOAuthClient{Fake: c}
+}
+
+func (c *Fake) OAuthClientAuthorizations() client.OAuthClientAuthorizationInterface {
+	return &FakeOAuthClientAuthorization{Fake: c}
+}
+
 func (c *Fake) OAuthAccessTokens() client.OAuthAccessTokenInterface {
 	return &FakeOAuthAccessTokens{Fake: c}
+}
+
+func (c *Fake) OAuthAuthorizeTokens() client.OAuthAuthorizeTokenInterface {
+	return &FakeOAuthAuthorizeTokens{Fake: c}
 }
 
 // LocalSubjectAccessReviews provides a fake REST client for SubjectAccessReviews
@@ -300,4 +334,12 @@ func (c *Fake) ClusterRoles() client.ClusterRoleInterface {
 // ClusterRoleBindings provides a fake REST client for ClusterRoleBindings
 func (c *Fake) ClusterRoleBindings() client.ClusterRoleBindingInterface {
 	return &FakeClusterRoleBindings{Fake: c}
+}
+
+func (c *Fake) ClusterResourceQuotas() client.ClusterResourceQuotaInterface {
+	return &FakeClusterResourceQuotas{Fake: c}
+}
+
+func (c *Fake) AppliedClusterResourceQuotas(namespace string) client.AppliedClusterResourceQuotaInterface {
+	return &FakeAppliedClusterResourceQuotas{Fake: c, Namespace: namespace}
 }

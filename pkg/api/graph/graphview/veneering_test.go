@@ -8,7 +8,7 @@ import (
 	"github.com/gonum/graph/concrete"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 
 	osgraph "github.com/openshift/origin/pkg/api/graph"
 	osgraphtest "github.com/openshift/origin/pkg/api/graph/test"
@@ -20,6 +20,7 @@ import (
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	deployedges "github.com/openshift/origin/pkg/deploy/graph"
 	deploygraph "github.com/openshift/origin/pkg/deploy/graph/nodes"
+	imageedges "github.com/openshift/origin/pkg/image/graph"
 )
 
 func TestServiceGroup(t *testing.T) {
@@ -43,13 +44,15 @@ func TestServiceGroup(t *testing.T) {
 	bareBCPipelines, coveredByBCs := AllImagePipelinesFromBuildConfig(g, coveredNodes)
 	coveredNodes.Insert(coveredByBCs.List()...)
 
-	if e, a := 1, len(serviceGroups); e != a {
+	t.Log(g)
+
+	if e, a := 2, len(serviceGroups); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 	if e, a := 0, len(bareDCPipelines); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
-	if e, a := 0, len(bareBCPipelines); e != a {
+	if e, a := 1, len(bareBCPipelines); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 
@@ -57,6 +60,12 @@ func TestServiceGroup(t *testing.T) {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 	if e, a := 1, len(serviceGroups[0].DeploymentConfigPipelines[0].Images); e != a {
+		t.Errorf("expected %v, got %v", e, a)
+	}
+	if e, a := 1, len(serviceGroups[1].DeploymentConfigPipelines); e != a {
+		t.Errorf("expected %v, got %v", e, a)
+	}
+	if e, a := 1, len(serviceGroups[1].DeploymentConfigPipelines[0].Images); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 }
@@ -69,7 +78,7 @@ func TestBareRCGroup(t *testing.T) {
 
 	kubeedges.AddAllExposedPodTemplateSpecEdges(g)
 	kubeedges.AddAllExposedPodEdges(g)
-	kubeedges.AddAllManagedByRCPodEdges(g)
+	kubeedges.AddAllManagedByControllerPodEdges(g)
 
 	coveredNodes := IntSet{}
 
@@ -123,6 +132,26 @@ func TestBareDCGroup(t *testing.T) {
 	}
 }
 
+func TestAllBCImageInputs(t *testing.T) {
+	g, _, err := osgraphtest.BuildGraph("../../../api/graph/test/prereq-image-present.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	buildedges.AddAllInputOutputEdges(g)
+	imageedges.AddAllImageStreamRefEdges(g)
+	imageedges.AddAllImageStreamImageRefEdges(g)
+
+	coveredNodes := IntSet{}
+
+	bareBCPipelines, coveredByBCs := AllImagePipelinesFromBuildConfig(g, coveredNodes)
+	coveredNodes.Insert(coveredByBCs.List()...)
+
+	if e, a := 4, len(bareBCPipelines); e != a {
+		t.Errorf("expected %v, got %v", e, a)
+	}
+}
+
 func TestBareBCGroup(t *testing.T) {
 	g, _, err := osgraphtest.BuildGraph("../../../api/graph/test/bare-bc.yaml")
 	if err != nil {
@@ -145,13 +174,13 @@ func TestBareBCGroup(t *testing.T) {
 	coveredNodes.Insert(coveredByBCs.List()...)
 
 	if e, a := 0, len(serviceGroups); e != a {
-		t.Errorf("expected %v, got %v", e, a)
+		t.Errorf("expected %v services, got %v", e, a)
 	}
 	if e, a := 0, len(bareDCPipelines); e != a {
-		t.Errorf("expected %v, got %v", e, a)
+		t.Errorf("expected %v deploymentConfigs, got %v", e, a)
 	}
 	if e, a := 1, len(bareBCPipelines); e != a {
-		t.Errorf("expected %v, got %v", e, a)
+		t.Errorf("expected %v buildConfigs, got %v", e, a)
 	}
 }
 
@@ -162,8 +191,8 @@ func TestGraph(t *testing.T) {
 		{
 			ObjectMeta: kapi.ObjectMeta{
 				Name:              "build1-1-abc",
-				Labels:            map[string]string{buildapi.BuildConfigLabel: "build1"},
-				CreationTimestamp: util.NewTime(now.Add(-10 * time.Second)),
+				Labels:            map[string]string{buildapi.BuildConfigLabelDeprecated: "build1"},
+				CreationTimestamp: unversioned.NewTime(now.Add(-10 * time.Second)),
 			},
 			Status: buildapi.BuildStatus{
 				Phase: buildapi.BuildPhaseFailed,
@@ -172,8 +201,8 @@ func TestGraph(t *testing.T) {
 		{
 			ObjectMeta: kapi.ObjectMeta{
 				Name:              "build1-2-abc",
-				Labels:            map[string]string{buildapi.BuildConfigLabel: "build1"},
-				CreationTimestamp: util.NewTime(now.Add(-5 * time.Second)),
+				Labels:            map[string]string{buildapi.BuildConfigLabelDeprecated: "build1"},
+				CreationTimestamp: unversioned.NewTime(now.Add(-5 * time.Second)),
 			},
 			Status: buildapi.BuildStatus{
 				Phase: buildapi.BuildPhaseComplete,
@@ -182,8 +211,8 @@ func TestGraph(t *testing.T) {
 		{
 			ObjectMeta: kapi.ObjectMeta{
 				Name:              "build1-3-abc",
-				Labels:            map[string]string{buildapi.BuildConfigLabel: "build1"},
-				CreationTimestamp: util.NewTime(now.Add(-15 * time.Second)),
+				Labels:            map[string]string{buildapi.BuildConfigLabelDeprecated: "build1"},
+				CreationTimestamp: unversioned.NewTime(now.Add(-15 * time.Second)),
 			},
 			Status: buildapi.BuildStatus{
 				Phase: buildapi.BuildPhasePending,
@@ -202,9 +231,8 @@ func TestGraph(t *testing.T) {
 					ImageChange: &buildapi.ImageChangeTrigger{},
 				},
 			},
-			BuildSpec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
 				Strategy: buildapi.BuildStrategy{
-					Type: buildapi.SourceBuildStrategyType,
 					SourceStrategy: &buildapi.SourceBuildStrategy{
 						From: kapi.ObjectReference{Kind: "ImageStreamTag", Name: "test:base-image"},
 					},
@@ -218,7 +246,7 @@ func TestGraph(t *testing.T) {
 	bcTestNode := buildgraph.EnsureBuildConfigNode(g, &buildapi.BuildConfig{
 		ObjectMeta: kapi.ObjectMeta{Namespace: "default", Name: "test"},
 		Spec: buildapi.BuildConfigSpec{
-			BuildSpec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
 				Output: buildapi.BuildOutput{
 					To: &kapi.ObjectReference{Kind: "ImageStreamTag", Name: "other:base-image"},
 				},
@@ -228,7 +256,7 @@ func TestGraph(t *testing.T) {
 	buildgraph.EnsureBuildConfigNode(g, &buildapi.BuildConfig{
 		ObjectMeta: kapi.ObjectMeta{Namespace: "default", Name: "build2"},
 		Spec: buildapi.BuildConfigSpec{
-			BuildSpec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
 				Output: buildapi.BuildOutput{
 					To: &kapi.ObjectReference{Kind: "DockerImage", Name: "mycustom/repo/image:tag2"},
 				},
@@ -260,38 +288,35 @@ func TestGraph(t *testing.T) {
 	})
 	deploygraph.EnsureDeploymentConfigNode(g, &deployapi.DeploymentConfig{
 		ObjectMeta: kapi.ObjectMeta{Namespace: "other", Name: "deploy1"},
-		Triggers: []deployapi.DeploymentTriggerPolicy{
-			{
-				ImageChangeParams: &deployapi.DeploymentTriggerImageChangeParams{
-					From:           kapi.ObjectReference{Namespace: "default", Name: "other"},
-					ContainerNames: []string{"1", "2"},
-					Tag:            "tag1",
+		Spec: deployapi.DeploymentConfigSpec{
+			Triggers: []deployapi.DeploymentTriggerPolicy{
+				{
+					ImageChangeParams: &deployapi.DeploymentTriggerImageChangeParams{
+						From:           kapi.ObjectReference{Kind: "ImageStreamTag", Namespace: "default", Name: "other:tag1"},
+						ContainerNames: []string{"1", "2"},
+					},
 				},
 			},
-		},
-		Template: deployapi.DeploymentTemplate{
-			ControllerTemplate: kapi.ReplicationControllerSpec{
-				Template: &kapi.PodTemplateSpec{
-					ObjectMeta: kapi.ObjectMeta{
-						Labels: map[string]string{
-							"deploymentconfig": "deploy1",
-							"env":              "prod",
-						},
+			Template: &kapi.PodTemplateSpec{
+				ObjectMeta: kapi.ObjectMeta{
+					Labels: map[string]string{
+						"deploymentconfig": "deploy1",
+						"env":              "prod",
 					},
-					Spec: kapi.PodSpec{
-						Containers: []kapi.Container{
-							{
-								Name:  "1",
-								Image: "mycustom/repo/image",
-							},
-							{
-								Name:  "2",
-								Image: "mycustom/repo/image2",
-							},
-							{
-								Name:  "3",
-								Image: "mycustom/repo/image3",
-							},
+				},
+				Spec: kapi.PodSpec{
+					Containers: []kapi.Container{
+						{
+							Name:  "1",
+							Image: "mycustom/repo/image",
+						},
+						{
+							Name:  "2",
+							Image: "mycustom/repo/image2",
+						},
+						{
+							Name:  "3",
+							Image: "mycustom/repo/image3",
 						},
 					},
 				},
@@ -300,21 +325,19 @@ func TestGraph(t *testing.T) {
 	})
 	deploygraph.EnsureDeploymentConfigNode(g, &deployapi.DeploymentConfig{
 		ObjectMeta: kapi.ObjectMeta{Namespace: "default", Name: "deploy2"},
-		Template: deployapi.DeploymentTemplate{
-			ControllerTemplate: kapi.ReplicationControllerSpec{
-				Template: &kapi.PodTemplateSpec{
-					ObjectMeta: kapi.ObjectMeta{
-						Labels: map[string]string{
-							"deploymentconfig": "deploy2",
-							"env":              "dev",
-						},
+		Spec: deployapi.DeploymentConfigSpec{
+			Template: &kapi.PodTemplateSpec{
+				ObjectMeta: kapi.ObjectMeta{
+					Labels: map[string]string{
+						"deploymentconfig": "deploy2",
+						"env":              "dev",
 					},
-					Spec: kapi.PodSpec{
-						Containers: []kapi.Container{
-							{
-								Name:  "1",
-								Image: "someother/image:v1",
-							},
+				},
+				Spec: kapi.PodSpec{
+					Containers: []kapi.Container{
+						{
+							Name:  "1",
+							Image: "someother/image:v1",
 						},
 					},
 				},
@@ -368,7 +391,7 @@ func TestGraph(t *testing.T) {
 	bareDCPipelines, coveredByDCs := AllDeploymentConfigPipelines(g, coveredNodes)
 	coveredNodes.Insert(coveredByDCs.List()...)
 
-	if len(bareDCPipelines) != 1 {
+	if len(bareDCPipelines) != 2 {
 		t.Fatalf("unexpected pipelines: %#v", bareDCPipelines)
 	}
 	if len(coveredNodes) != 10 {
@@ -376,7 +399,7 @@ func TestGraph(t *testing.T) {
 	}
 
 	for _, bareDCPipeline := range bareDCPipelines {
-		t.Logf("from %s", bareDCPipeline.Deployment.Name)
+		t.Logf("from %s", bareDCPipeline.Deployment.DeploymentConfig.Name)
 		for _, path := range bareDCPipeline.Images {
 			t.Logf("  %v", path)
 		}
@@ -390,7 +413,7 @@ func TestGraph(t *testing.T) {
 		indent := "  "
 
 		for _, deployment := range serviceGroup.DeploymentConfigPipelines {
-			t.Logf("%sdeployment %s", indent, deployment.Deployment.Name)
+			t.Logf("%sdeployment %s", indent, deployment.Deployment.DeploymentConfig.Name)
 			for _, image := range deployment.Images {
 				t.Logf("%s  image %s", indent, image.Image.ImageSpec())
 				if image.Build != nil {

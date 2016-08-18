@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	configapilatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
 	"github.com/openshift/origin/pkg/cmd/server/api/validation"
@@ -26,7 +26,9 @@ This command validates that a configuration file intended to be used for a maste
 `
 
 	validateMasterConfigExample = ` // Validate master server configuration file
-  $ %s openshift.local.config/master/master-config.yaml`
+  %s openshift.local.config/master/master-config.yaml`
+
+	validateMasterConfigDeprecationMessage = `This command is deprecated and will be removed. Use 'oadm diagnostics MasterConfigCheck --master-config=path/to/config.yaml' instead.`
 )
 
 type ValidateMasterConfigOptions struct {
@@ -44,10 +46,11 @@ func NewCommandValidateMasterConfig(name, fullName string, out io.Writer) *cobra
 	}
 
 	cmd := &cobra.Command{
-		Use:     fmt.Sprintf("%s SOURCE", name),
-		Short:   "Validate the configuration file for a master server",
-		Long:    validateMasterConfigLong,
-		Example: fmt.Sprintf(validateMasterConfigExample, fullName),
+		Use:        fmt.Sprintf("%s SOURCE", name),
+		Short:      "Validate the configuration file for a master server",
+		Long:       validateMasterConfigLong,
+		Example:    fmt.Sprintf(validateMasterConfigExample, fullName),
+		Deprecated: validateMasterConfigDeprecationMessage,
 		Run: func(c *cobra.Command, args []string) {
 			if err := options.Complete(args); err != nil {
 				cmdutil.CheckErr(cmdutil.UsageError(c, err.Error()))
@@ -60,7 +63,7 @@ func NewCommandValidateMasterConfig(name, fullName string, out io.Writer) *cobra
 				os.Exit(1)
 			}
 
-			fmt.Fprintf(options.Out, "SUCCESS: Validation succeded for file: %s\n", options.MasterConfigFile)
+			fmt.Fprintf(options.Out, "SUCCESS: Validation succeeded for file: %s\n", options.MasterConfigFile)
 		},
 	}
 
@@ -76,14 +79,14 @@ func (o *ValidateMasterConfigOptions) Complete(args []string) error {
 }
 
 // Run runs the master config validation and returns the result of the validation as a boolean as well as any errors
-// that occured trying to validate the file
+// that occurred trying to validate the file
 func (o *ValidateMasterConfigOptions) Run() (bool, error) {
 	masterConfig, err := configapilatest.ReadAndResolveMasterConfig(o.MasterConfigFile)
 	if err != nil {
 		return true, err
 	}
 
-	results := validation.ValidateMasterConfig(masterConfig)
+	results := validation.ValidateMasterConfig(masterConfig, nil)
 	writer := tabwriter.NewWriter(o.Out, minColumnWidth, tabWidth, padding, padchar, flags)
 	err = prettyPrintValidationResults(results, writer)
 	if err != nil {
@@ -94,12 +97,13 @@ func (o *ValidateMasterConfigOptions) Run() (bool, error) {
 }
 
 const (
-	minColumnWidth          = 4
-	tabWidth                = 4
-	padding                 = 2
-	padchar                 = byte(' ')
-	flags                   = 0
-	validationErrorHeadings = "ERROR\tFIELD\tVALUE\tDETAILS\n"
+	minColumnWidth            = 4
+	tabWidth                  = 4
+	padding                   = 2
+	padchar                   = byte(' ')
+	flags                     = 0
+	validationErrorHeadings   = "ERROR\tFIELD\tVALUE\tDETAILS\n"
+	validationWarningHeadings = "WARNING\tFIELD\tVALUE\tDETAILS\n"
 )
 
 // prettyPrintValidationResults prints the contents of the ValidationResults into the buffer of a tabwriter.Writer.
@@ -107,14 +111,14 @@ const (
 func prettyPrintValidationResults(results validation.ValidationResults, writer *tabwriter.Writer) error {
 	if len(results.Errors) > 0 {
 		fmt.Fprintf(writer, "VALIDATION ERRORS:\t\t\t\n")
-		err := prettyPrintValidationErrorList(results.Errors, writer)
+		err := prettyPrintValidationErrorList(validationErrorHeadings, results.Errors, writer)
 		if err != nil {
 			return err
 		}
 	}
 	if len(results.Warnings) > 0 {
 		fmt.Fprintf(writer, "VALIDATION WARNINGS:\t\t\t\n")
-		err := prettyPrintValidationErrorList(results.Errors, writer)
+		err := prettyPrintValidationErrorList(validationWarningHeadings, results.Warnings, writer)
 		if err != nil {
 			return err
 		}
@@ -124,22 +128,13 @@ func prettyPrintValidationResults(results validation.ValidationResults, writer *
 
 // prettyPrintValidationErrorList prints the contents of the ValidationErrorList into the buffer of a tabwriter.Writer.
 // The writer must be Flush()ed after calling this to write the buffered data.
-func prettyPrintValidationErrorList(validationErrors fielderrors.ValidationErrorList, writer *tabwriter.Writer) error {
+func prettyPrintValidationErrorList(headings string, validationErrors field.ErrorList, writer *tabwriter.Writer) error {
 	if len(validationErrors) > 0 {
-		fmt.Fprintf(writer, validationErrorHeadings)
+		fmt.Fprintf(writer, headings)
 		for _, err := range validationErrors {
-			switch validationError := err.(type) {
-			case (*fielderrors.ValidationError):
-				err := prettyPrintValidationError(validationError, writer)
-				if err != nil {
-					return err
-				}
-			default:
-				// This is not a validation error but we can grab the error message for details nonetheless
-				err := prettyPrintGenericError(validationError, writer)
-				if err != nil {
-					return err
-				}
+			err := prettyPrintValidationError(err, writer)
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -148,7 +143,7 @@ func prettyPrintValidationErrorList(validationErrors fielderrors.ValidationError
 
 // prettyPrintValidationError prints the contents of the ValidationError into the buffer of a tabwriter.Writer.
 // The writer must be Flush()ed after calling this to write the buffered data.
-func prettyPrintValidationError(validationError *fielderrors.ValidationError, writer *tabwriter.Writer) error {
+func prettyPrintValidationError(validationError *field.Error, writer *tabwriter.Writer) error {
 	_, printError := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n",
 		toString(validationError.Type),
 		validationError.Field,

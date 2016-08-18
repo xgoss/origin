@@ -15,12 +15,24 @@ func EnsureDeploymentConfigNode(g osgraph.MutableUniqueGraph, dc *depoyapi.Deplo
 		g,
 		dcName,
 		func(node osgraph.Node) graph.Node {
-			return &DeploymentConfigNode{Node: node, DeploymentConfig: dc}
+			return &DeploymentConfigNode{Node: node, DeploymentConfig: dc, IsFound: true}
 		},
 	).(*DeploymentConfigNode)
 
-	rcSpecNode := kubegraph.EnsureReplicationControllerSpecNode(g, &dc.Template.ControllerTemplate, dcName)
-	g.AddEdge(dcNode, rcSpecNode, osgraph.ContainsEdgeKind)
+	if dc.Spec.Template != nil {
+		podTemplateSpecNode := kubegraph.EnsurePodTemplateSpecNode(g, dc.Spec.Template, dc.Namespace, dcName)
+		g.AddEdge(dcNode, podTemplateSpecNode, osgraph.ContainsEdgeKind)
+	}
 
 	return dcNode
+}
+
+func FindOrCreateSyntheticDeploymentConfigNode(g osgraph.MutableUniqueGraph, dc *depoyapi.DeploymentConfig) *DeploymentConfigNode {
+	return osgraph.EnsureUnique(
+		g,
+		DeploymentConfigNodeName(dc),
+		func(node osgraph.Node) graph.Node {
+			return &DeploymentConfigNode{Node: node, DeploymentConfig: dc, IsFound: false}
+		},
+	).(*DeploymentConfigNode)
 }

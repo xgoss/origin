@@ -1,35 +1,42 @@
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/conversion"
+	"k8s.io/kubernetes/pkg/runtime"
 
-	newer "github.com/openshift/origin/pkg/template/api"
+	oapi "github.com/openshift/origin/pkg/api"
+	"github.com/openshift/origin/pkg/api/extension"
+	"github.com/openshift/origin/pkg/template/api"
 )
 
-func convert_api_Template_To_v1_Template(in *newer.Template, out *Template, s conversion.Scope) error {
-	//FIXME: DefaultConvert should not overwrite the Labels field on the
-	//       the base object. This is likely a bug in the DefaultConvert
-	//       code. For now, it is called before converting the labels.
-	if err := s.DefaultConvert(in, out, conversion.IgnoreMissingFields); err != nil {
-		return err
-	}
-	return s.Convert(&in.ObjectLabels, &out.Labels, 0)
-}
-
-func convert_v1_Template_To_api_Template(in *Template, out *newer.Template, s conversion.Scope) error {
-	if err := s.Convert(&in.Labels, &out.ObjectLabels, 0); err != nil {
-		return err
-	}
-	return s.DefaultConvert(in, out, conversion.IgnoreMissingFields)
-}
-
-func init() {
-	err := api.Scheme.AddConversionFuncs(
-		convert_api_Template_To_v1_Template,
-		convert_v1_Template_To_api_Template,
-	)
-	if err != nil {
+func addConversionFuncs(scheme *runtime.Scheme) {
+	if err := scheme.AddFieldLabelConversionFunc("v1", "Template",
+		oapi.GetFieldLabelConversionFunc(api.TemplateToSelectableFields(&api.Template{}), nil),
+	); err != nil {
 		panic(err)
 	}
+}
+
+var _ runtime.NestedObjectDecoder = &Template{}
+var _ runtime.NestedObjectEncoder = &Template{}
+
+// DecodeNestedObjects decodes the object as a runtime.Unknown with JSON content.
+func (c *Template) DecodeNestedObjects(d runtime.Decoder) error {
+	for i := range c.Objects {
+		if c.Objects[i].Object != nil {
+			continue
+		}
+		c.Objects[i].Object = &runtime.Unknown{
+			ContentType: "application/json",
+			Raw:         c.Objects[i].Raw,
+		}
+	}
+	return nil
+}
+func (c *Template) EncodeNestedObjects(e runtime.Encoder) error {
+	for i := range c.Objects {
+		if err := extension.EncodeNestedRawExtension(runtime.UnstructuredJSONScheme, &c.Objects[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

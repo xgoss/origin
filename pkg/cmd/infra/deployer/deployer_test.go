@@ -1,6 +1,7 @@
 package deployer
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"testing"
@@ -9,9 +10,14 @@ import (
 
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	deploytest "github.com/openshift/origin/pkg/deploy/api/test"
-	scalertest "github.com/openshift/origin/pkg/deploy/scaler/test"
+	deployv1 "github.com/openshift/origin/pkg/deploy/api/v1"
+	cmdtest "github.com/openshift/origin/pkg/deploy/cmd/test"
 	"github.com/openshift/origin/pkg/deploy/strategy"
 	deployutil "github.com/openshift/origin/pkg/deploy/util"
+
+	// install all APIs
+	_ "github.com/openshift/origin/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
 )
 
 func TestDeployer_getDeploymentFail(t *testing.T) {
@@ -27,7 +33,7 @@ func TestDeployer_getDeploymentFail(t *testing.T) {
 			t.Fatal("unexpected call")
 			return nil, nil
 		},
-		scaler: &scalertest.FakeScaler{},
+		scaler: &cmdtest.FakeScaler{},
 	}
 
 	err := deployer.Deploy("namespace", "name")
@@ -38,23 +44,23 @@ func TestDeployer_getDeploymentFail(t *testing.T) {
 }
 
 func TestDeployer_deployScenarios(t *testing.T) {
-	mkd := func(version int, status deployapi.DeploymentStatus, replicas int, desired int) *kapi.ReplicationController {
+	mkd := func(version int64, status deployapi.DeploymentStatus, replicas int32, desired int32) *kapi.ReplicationController {
 		deployment := mkdeployment(version, status)
-		deployment.Spec.Replicas = replicas
+		deployment.Spec.Replicas = int32(replicas)
 		if desired > 0 {
-			deployment.Annotations[deployapi.DesiredReplicasAnnotation] = strconv.Itoa(desired)
+			deployment.Annotations[deployapi.DesiredReplicasAnnotation] = strconv.Itoa(int(desired))
 		}
 		return deployment
 	}
 	type scaleEvent struct {
-		version int
-		size    int
+		version int64
+		size    int32
 	}
 	scenarios := []struct {
 		name        string
 		deployments []*kapi.ReplicationController
-		fromVersion int
-		toVersion   int
+		fromVersion int64
+		toVersion   int64
 		scaleEvents []scaleEvent
 	}{
 		{
@@ -112,11 +118,24 @@ func TestDeployer_deployScenarios(t *testing.T) {
 				{2, 0},
 			},
 		},
+		{
+			"version mismatch",
+			// existing deployments
+			[]*kapi.ReplicationController{
+				mkd(1, deployapi.DeploymentStatusComplete, 0, 0),
+				mkd(2, deployapi.DeploymentStatusNew, 3, 0),
+				mkd(3, deployapi.DeploymentStatusComplete, 0, 3),
+			},
+			// from and to version
+			3, 2,
+			// expected scale events
+			[]scaleEvent{},
+		},
 	}
 
 	for _, s := range scenarios {
 		t.Logf("executing scenario %s", s.name)
-		findDeployment := func(version int) *kapi.ReplicationController {
+		findDeployment := func(version int64) *kapi.ReplicationController {
 			for _, d := range s.deployments {
 				if deployutil.DeploymentVersionFor(d) == version {
 					return d
@@ -126,17 +145,19 @@ func TestDeployer_deployScenarios(t *testing.T) {
 		}
 
 		var actualFrom, actualTo *kapi.ReplicationController
-		var actualDesired int
+		var actualDesired int32
 		to := findDeployment(s.toVersion)
-		scaler := &scalertest.FakeScaler{}
+		scaler := &cmdtest.FakeScaler{}
 
 		deployer := &Deployer{
+			out:    &bytes.Buffer{},
+			errOut: &bytes.Buffer{},
 			strategyFor: func(config *deployapi.DeploymentConfig) (strategy.DeploymentStrategy, error) {
 				return &testStrategy{
 					deployFunc: func(from *kapi.ReplicationController, to *kapi.ReplicationController, desiredReplicas int) error {
 						actualFrom = from
 						actualTo = to
-						actualDesired = desiredReplicas
+						actualDesired = int32(desiredReplicas)
 						return nil
 					},
 				}, nil
@@ -155,6 +176,12 @@ func TestDeployer_deployScenarios(t *testing.T) {
 		}
 
 		err := deployer.Deploy(to.Namespace, to.Name)
+		if s.toVersion < s.fromVersion {
+			if err == nil {
+				t.Fatalf("expected error when toVersion is older than newVersion")
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -189,8 +216,8 @@ func TestDeployer_deployScenarios(t *testing.T) {
 	}
 }
 
-func mkdeployment(version int, status deployapi.DeploymentStatus) *kapi.ReplicationController {
-	deployment, _ := deployutil.MakeDeployment(deploytest.OkDeploymentConfig(version), kapi.Codec)
+func mkdeployment(version int64, status deployapi.DeploymentStatus) *kapi.ReplicationController {
+	deployment, _ := deployutil.MakeDeployment(deploytest.OkDeploymentConfig(version), kapi.Codecs.LegacyCodec(deployv1.SchemeGroupVersion))
 	deployment.Annotations[deployapi.DeploymentStatusAnnotation] = string(status)
 	return deployment
 }

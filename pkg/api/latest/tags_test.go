@@ -7,14 +7,16 @@ import (
 	"time"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
+
+	"github.com/openshift/origin/pkg/api"
 )
 
 func TestDescriptions(t *testing.T) {
 	for _, version := range Versions {
-		if version == "v1beta3" {
+		if version == OldestVersion {
 			// we don't care about descriptions here
 			continue
 		}
@@ -32,7 +34,7 @@ func checkDescriptions(objType reflect.Type, seen *map[reflect.Type]bool, t *tes
 		return
 	}
 	(*seen)[objType] = true
-	if !strings.Contains(objType.PkgPath(), "openshift/origin") {
+	if !strings.Contains(objType.PkgPath(), "github.com/openshift/origin/pkg") {
 		return
 	}
 
@@ -43,13 +45,14 @@ func checkDescriptions(objType reflect.Type, seen *map[reflect.Type]bool, t *tes
 		if structField.Name == "TypeMeta" || structField.Name == "ObjectMeta" || structField.Name == "ListMeta" {
 			continue
 		}
-		if structField.Type == reflect.TypeOf(util.Time{}) || structField.Type == reflect.TypeOf(time.Time{}) || structField.Type == reflect.TypeOf(runtime.RawExtension{}) {
+		if structField.Type == reflect.TypeOf(unversioned.Time{}) || structField.Type == reflect.TypeOf(time.Time{}) || structField.Type == reflect.TypeOf(runtime.RawExtension{}) {
 			continue
 		}
 
 		descriptionTag := structField.Tag.Get("description")
-		if len(descriptionTag) == 0 {
-			t.Errorf("%v.%v does not have a description", objType, structField.Name)
+		if len(descriptionTag) > 0 {
+			t.Errorf("%v", structField.Tag)
+			t.Errorf("%v.%v should not have a description tag", objType, structField.Name)
 		}
 
 		switch structField.Type.Kind() {
@@ -62,7 +65,7 @@ func checkDescriptions(objType reflect.Type, seen *map[reflect.Type]bool, t *tes
 func TestInternalJsonTags(t *testing.T) {
 	seen := map[reflect.Type]bool{}
 
-	for _, apiType := range kapi.Scheme.KnownTypes("") {
+	for _, apiType := range kapi.Scheme.KnownTypes(api.SchemeGroupVersion) {
 		checkJsonTags(apiType, &seen, t)
 	}
 }
@@ -76,7 +79,7 @@ func checkJsonTags(objType reflect.Type, seen *map[reflect.Type]bool, t *testing
 		return
 	}
 	(*seen)[objType] = true
-	if !strings.Contains(objType.PkgPath(), "openshift/origin") {
+	if !strings.Contains(objType.PkgPath(), "github.com/openshift/origin/pkg") {
 		return
 	}
 	if internalTypesWithAllowedJsonTags.Has(objType.Name()) {

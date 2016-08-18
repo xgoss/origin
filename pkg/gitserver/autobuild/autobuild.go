@@ -8,10 +8,8 @@ import (
 	"path/filepath"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclientcmd "k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util/errors"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
@@ -74,9 +72,9 @@ func NewAutoLinkBuildsFromEnvironment() (*AutoLinkBuilds, error) {
 	return config, nil
 }
 
-func clientFromConfig(path string) (*kclient.Config, string, error) {
+func clientFromConfig(path string) (*restclient.Config, string, error) {
 	if path == "-" {
-		cfg, err := kclient.InClusterConfig()
+		cfg, err := restclient.InClusterConfig()
 		if err != nil {
 			return nil, "", fmt.Errorf("cluster config not available: %v", err)
 		}
@@ -101,7 +99,7 @@ func (a *AutoLinkBuilds) Link() (map[string]gitserver.Clone, error) {
 	errs := []error{}
 	builders := []*buildapi.BuildConfig{}
 	for _, namespace := range a.Namespaces {
-		list, err := a.Client.BuildConfigs(namespace).List(labels.Everything(), fields.Everything())
+		list, err := a.Client.BuildConfigs(namespace).List(kapi.ListOptions{})
 		if err != nil {
 			errs = append(errs, err)
 			continue

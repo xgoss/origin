@@ -6,10 +6,10 @@ import (
 
 	"github.com/golang/glog"
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
-	buildutil "github.com/openshift/origin/pkg/build/util"
 )
 
 // CustomBuildStrategy creates a build using a custom builder image.
@@ -22,19 +22,40 @@ type CustomBuildStrategy struct {
 
 // CreateBuildPod creates the pod to be used for the Custom build
 func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod, error) {
-	data, err := bs.Codec.Encode(build)
+	strategy := build.Spec.Strategy.CustomStrategy
+	if strategy == nil {
+		return nil, errors.New("CustomBuildStrategy cannot be executed without CustomStrategy parameters")
+	}
+
+	codec := bs.Codec
+	if len(strategy.BuildAPIVersion) != 0 {
+		gv, err := unversioned.ParseGroupVersion(strategy.BuildAPIVersion)
+		if err != nil {
+			return nil, FatalError(fmt.Sprintf("failed to parse buildAPIVersion specified in custom build strategy (%q): %v", strategy.BuildAPIVersion, err))
+		}
+		codec = kapi.Codecs.LegacyCodec(gv)
+	}
+
+	data, err := runtime.Encode(codec, build)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the build: %v", err)
 	}
 
-	strategy := build.Spec.Strategy.CustomStrategy
 	containerEnv := []kapi.EnvVar{{Name: "BUILD", Value: string(data)}}
 
 	if build.Spec.Source.Git != nil {
 		addSourceEnvVars(build.Spec.Source, &containerEnv)
 	}
+	addOriginVersionVar(&containerEnv)
 
-	if strategy == nil || len(strategy.From.Name) == 0 {
+	if build.Spec.Output.To != nil {
+		addOutputEnvVars(build.Spec.Output.To, &containerEnv)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse the output docker tag %q: %v", build.Spec.Output.To.Name, err)
+		}
+	}
+
+	if len(strategy.From.Name) == 0 {
 		return nil, errors.New("CustomBuildStrategy cannot be executed without image")
 	}
 
@@ -50,7 +71,7 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 	privileged := true
 	pod := &kapi.Pod{
 		ObjectMeta: kapi.ObjectMeta{
-			Name:      buildutil.GetBuildPodName(build),
+			Name:      buildapi.GetBuildPodName(build),
 			Namespace: build.Namespace,
 			Labels:    getPodLabels(build),
 		},
@@ -70,9 +91,8 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 			RestartPolicy: kapi.RestartPolicyNever,
 		},
 	}
-
-	if err := setupBuildEnv(build, pod); err != nil {
-		return nil, err
+	if build.Spec.CompletionDeadlineSeconds != nil {
+		pod.Spec.ActiveDeadlineSeconds = build.Spec.CompletionDeadlineSeconds
 	}
 
 	if !strategy.ForcePull {
@@ -82,12 +102,17 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildapi.Build) (*kapi.Pod,
 		pod.Spec.Containers[0].ImagePullPolicy = kapi.PullAlways
 	}
 	pod.Spec.Containers[0].Resources = build.Spec.Resources
+	if build.Spec.Source.Binary != nil {
+		pod.Spec.Containers[0].Stdin = true
+		pod.Spec.Containers[0].StdinOnce = true
+	}
 
 	if strategy.ExposeDockerSocket {
 		setupDockerSocket(pod)
-		setupDockerSecrets(pod, build.Spec.Output.PushSecret, strategy.PullSecret)
+		setupDockerSecrets(pod, build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
 	}
 	setupSourceSecrets(pod, build.Spec.Source.SourceSecret)
+	setupSecrets(pod, build.Spec.Source.Secrets)
 	setupAdditionalSecrets(pod, build.Spec.Strategy.CustomStrategy.Secrets)
 	return pod, nil
 }

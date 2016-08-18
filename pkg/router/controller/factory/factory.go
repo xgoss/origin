@@ -2,6 +2,7 @@ package factory
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	kapi "k8s.io/kubernetes/pkg/api"
@@ -10,7 +11,7 @@ import (
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	utilwait "k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/watch"
 
 	osclient "github.com/openshift/origin/pkg/client"
@@ -80,6 +81,12 @@ func (factory *RouterControllerFactory) Create(plugin router.Plugin) *controller
 			}
 			return eventType, obj.(*routeapi.Route), nil
 		},
+		EndpointsListConsumed: func() bool {
+			return endpointsEventQueue.ListConsumed()
+		},
+		RoutesListConsumed: func() bool {
+			return routeEventQueue.ListConsumed()
+		},
 		Namespaces: factory.Namespaces,
 		// check namespaces a bit more often than we resync events, so that we aren't always waiting
 		// the maximum interval for new items to come into the list
@@ -112,22 +119,22 @@ func (factory *RouterControllerFactory) CreateNotifier(changed func()) RoutesByH
 		// we do not scope endpoints by labels or fields because the route labels != endpoints labels
 	}, &kapi.Endpoints{}, endpointsEventQueue, factory.ResyncInterval).Run()
 
-	go util.Until(func() {
+	go utilwait.Until(func() {
 		for {
 			if _, _, err := routeEventQueue.Pop(); err != nil {
 				return
 			}
 			changed()
 		}
-	}, time.Second, util.NeverStop)
-	go util.Until(func() {
+	}, time.Second, utilwait.NeverStop)
+	go utilwait.Until(func() {
 		for {
 			if _, _, err := endpointsEventQueue.Pop(); err != nil {
 				return
 			}
 			changed()
 		}
-	}, time.Second, util.NeverStop)
+	}, time.Second, utilwait.NeverStop)
 
 	return &routesByHost{
 		routes:    routeStore,
@@ -166,6 +173,15 @@ func (r *routesByHost) Endpoints(namespace, name string) *kapi.Endpoints {
 	return obj.(*kapi.Endpoints)
 }
 
+// routeAge sorts routes from oldest to newest and is stable for all routes.
+type routeAge []routeapi.Route
+
+func (r routeAge) Len() int      { return len(r) }
+func (r routeAge) Swap(i, j int) { r[i], r[j] = r[j], r[i] }
+func (r routeAge) Less(i, j int) bool {
+	return routeapi.RouteLessThan(&r[i], &r[j])
+}
+
 func oldestRoute(routes []interface{}) *routeapi.Route {
 	var oldest *routeapi.Route
 	for i := range routes {
@@ -197,12 +213,27 @@ type routeLW struct {
 	namespace string
 }
 
-func (lw *routeLW) List() (runtime.Object, error) {
-	return lw.client.Routes(lw.namespace).List(lw.label, lw.field)
+func (lw *routeLW) List(options kapi.ListOptions) (runtime.Object, error) {
+	opts := kapi.ListOptions{
+		LabelSelector: lw.label,
+		FieldSelector: lw.field,
+	}
+	routes, err := lw.client.Routes(lw.namespace).List(opts)
+	if err != nil {
+		return nil, err
+	}
+	// return routes in order of age to avoid rejections during resync
+	sort.Sort(routeAge(routes.Items))
+	return routes, nil
 }
 
-func (lw *routeLW) Watch(resourceVersion string) (watch.Interface, error) {
-	return lw.client.Routes(lw.namespace).Watch(lw.label, lw.field, resourceVersion)
+func (lw *routeLW) Watch(options kapi.ListOptions) (watch.Interface, error) {
+	opts := kapi.ListOptions{
+		LabelSelector:   lw.label,
+		FieldSelector:   lw.field,
+		ResourceVersion: options.ResourceVersion,
+	}
+	return lw.client.Routes(lw.namespace).Watch(opts)
 }
 
 // endpointsLW is a list watcher for routes.
@@ -213,10 +244,15 @@ type endpointsLW struct {
 	namespace string
 }
 
-func (lw *endpointsLW) List() (runtime.Object, error) {
-	return lw.client.Endpoints(lw.namespace).List(labels.Everything())
+func (lw *endpointsLW) List(options kapi.ListOptions) (runtime.Object, error) {
+	return lw.client.Endpoints(lw.namespace).List(options)
 }
 
-func (lw *endpointsLW) Watch(resourceVersion string) (watch.Interface, error) {
-	return lw.client.Endpoints(lw.namespace).Watch(lw.label, lw.field, resourceVersion)
+func (lw *endpointsLW) Watch(options kapi.ListOptions) (watch.Interface, error) {
+	opts := kapi.ListOptions{
+		LabelSelector:   lw.label,
+		FieldSelector:   lw.field,
+		ResourceVersion: options.ResourceVersion,
+	}
+	return lw.client.Endpoints(lw.namespace).Watch(opts)
 }

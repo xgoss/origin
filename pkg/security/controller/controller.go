@@ -6,7 +6,7 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/util"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 
 	"github.com/openshift/origin/pkg/security"
 	"github.com/openshift/origin/pkg/security/mcs"
@@ -65,6 +65,7 @@ func (c *Allocation) Next(ns *kapi.Namespace) error {
 	}
 	tx.Add(func() error { return c.uid.Release(block) })
 	ns.Annotations[security.UIDRangeAnnotation] = block.String()
+	ns.Annotations[security.SupplementalGroupsAnnotation] = block.String()
 	if _, ok := ns.Annotations[security.MCSAnnotation]; !ok {
 		if label := c.mcs(block); label != nil {
 			ns.Annotations[security.MCSAnnotation] = label.String()
@@ -102,6 +103,7 @@ func (c *Allocation) Next(ns *kapi.Namespace) error {
 			newNs.Annotations = make(map[string]string)
 		}
 		newNs.Annotations[security.UIDRangeAnnotation] = ns.Annotations[security.UIDRangeAnnotation]
+		newNs.Annotations[security.SupplementalGroupsAnnotation] = ns.Annotations[security.SupplementalGroupsAnnotation]
 		newNs.Annotations[security.MCSAnnotation] = ns.Annotations[security.MCSAnnotation]
 		ns = newNs
 	}
@@ -114,6 +116,9 @@ func changedAndSetAnnotations(old, ns *kapi.Namespace) bool {
 		return true
 	}
 	if value, ok := ns.Annotations[security.MCSAnnotation]; ok && value != old.Annotations[security.MCSAnnotation] {
+		return true
+	}
+	if value, ok := ns.Annotations[security.SupplementalGroupsAnnotation]; ok && value != old.Annotations[security.SupplementalGroupsAnnotation] {
 		return true
 	}
 	return false
@@ -134,7 +139,7 @@ func (tx *tx) HasChanges() bool {
 func (tx *tx) Rollback() {
 	for _, fn := range tx.rollback {
 		if err := fn(); err != nil {
-			util.HandleError(fmt.Errorf("unable to undo tx: %v", err))
+			utilruntime.HandleError(fmt.Errorf("unable to undo tx: %v", err))
 		}
 	}
 }

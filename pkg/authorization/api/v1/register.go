@@ -1,11 +1,24 @@
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/runtime"
 )
 
-func init() {
-	api.Scheme.AddKnownTypes("v1",
+const GroupName = ""
+
+// SchemeGroupVersion is group version used to register these objects
+var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
+
+func AddToScheme(scheme *runtime.Scheme) {
+	addKnownTypes(scheme)
+	addConversionFuncs(scheme)
+	addDefaultingFuncs(scheme)
+}
+
+// Adds the list of known types to api.Scheme.
+func addKnownTypes(scheme *runtime.Scheme) {
+	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Role{},
 		&RoleBinding{},
 		&Policy{},
@@ -15,6 +28,7 @@ func init() {
 		&RoleBindingList{},
 		&RoleList{},
 
+		&SelfSubjectRulesReview{},
 		&ResourceAccessReview{},
 		&SubjectAccessReview{},
 		&LocalResourceAccessReview{},
@@ -33,29 +47,3 @@ func init() {
 		&ClusterRoleList{},
 	)
 }
-
-func (*ClusterRole) IsAnAPIObject()              {}
-func (*ClusterPolicy) IsAnAPIObject()            {}
-func (*ClusterPolicyBinding) IsAnAPIObject()     {}
-func (*ClusterRoleBinding) IsAnAPIObject()       {}
-func (*ClusterPolicyList) IsAnAPIObject()        {}
-func (*ClusterPolicyBindingList) IsAnAPIObject() {}
-func (*ClusterRoleBindingList) IsAnAPIObject()   {}
-func (*ClusterRoleList) IsAnAPIObject()          {}
-
-func (*Role) IsAnAPIObject()              {}
-func (*Policy) IsAnAPIObject()            {}
-func (*PolicyBinding) IsAnAPIObject()     {}
-func (*RoleBinding) IsAnAPIObject()       {}
-func (*PolicyList) IsAnAPIObject()        {}
-func (*PolicyBindingList) IsAnAPIObject() {}
-func (*RoleBindingList) IsAnAPIObject()   {}
-func (*RoleList) IsAnAPIObject()          {}
-
-func (*ResourceAccessReview) IsAnAPIObject()          {}
-func (*SubjectAccessReview) IsAnAPIObject()           {}
-func (*LocalResourceAccessReview) IsAnAPIObject()     {}
-func (*LocalSubjectAccessReview) IsAnAPIObject()      {}
-func (*ResourceAccessReviewResponse) IsAnAPIObject()  {}
-func (*SubjectAccessReviewResponse) IsAnAPIObject()   {}
-func (*IsPersonalSubjectAccessReview) IsAnAPIObject() {}

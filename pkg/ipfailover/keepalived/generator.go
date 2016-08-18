@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclientcmd "k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 
 	dapi "github.com/openshift/origin/pkg/deploy/api"
@@ -19,9 +19,9 @@ const libModulesPath = "/lib/modules"
 
 //  Get kube client configuration from a file containing credentials for
 //  connecting to the master.
-func getClientConfig(path string) (*kclient.Config, error) {
+func getClientConfig(path string) (*restclient.Config, error) {
 	if 0 == len(path) {
-		return nil, fmt.Errorf("You must specify a .kubeconfig file path containing credentials for connecting to the master with --credentials")
+		return nil, nil
 	}
 
 	rules := &kclientcmd.ClientConfigLoadingRules{ExplicitPath: path, Precedence: []string{}}
@@ -35,7 +35,7 @@ func getClientConfig(path string) (*kclient.Config, error) {
 		return nil, fmt.Errorf("Credentials %q error: %v", path, err)
 	}
 
-	if err := kclient.LoadTLSFiles(config); err != nil {
+	if err = restclient.LoadTLSFiles(config); err != nil {
 		return nil, fmt.Errorf("Unable to load certificate info using credentials from %q: %v", path, err)
 	}
 
@@ -43,26 +43,35 @@ func getClientConfig(path string) (*kclient.Config, error) {
 }
 
 //  Generate the IP failover monitor (keepalived) container environment entries.
-func generateEnvEntries(name string, options *ipfailover.IPFailoverConfigCmdOptions, kconfig *kclient.Config) app.Environment {
+func generateEnvEntries(name string, options *ipfailover.IPFailoverConfigCmdOptions, kconfig *restclient.Config) app.Environment {
 	watchPort := strconv.Itoa(options.WatchPort)
-	replicas := strconv.Itoa(options.Replicas)
-	insecureStr := strconv.FormatBool(kconfig.Insecure)
+	replicas := strconv.FormatInt(int64(options.Replicas), 10)
+	VRRPIDOffset := strconv.Itoa(options.VRRPIDOffset)
+	env := app.Environment{}
 
-	return app.Environment{
-		"OPENSHIFT_MASTER":    kconfig.Host,
-		"OPENSHIFT_CA_DATA":   string(kconfig.CAData),
-		"OPENSHIFT_KEY_DATA":  string(kconfig.KeyData),
-		"OPENSHIFT_CERT_DATA": string(kconfig.CertData),
-		"OPENSHIFT_INSECURE":  insecureStr,
+	if kconfig != nil {
+		insecureStr := strconv.FormatBool(kconfig.Insecure)
+		env.Add(app.Environment{
+			"OPENSHIFT_MASTER":    kconfig.Host,
+			"OPENSHIFT_CA_DATA":   string(kconfig.CAData),
+			"OPENSHIFT_KEY_DATA":  string(kconfig.KeyData),
+			"OPENSHIFT_CERT_DATA": string(kconfig.CertData),
+			"OPENSHIFT_INSECURE":  insecureStr,
+		})
+
+	}
+	env.Add(app.Environment{
 
 		"OPENSHIFT_HA_CONFIG_NAME":       name,
 		"OPENSHIFT_HA_VIRTUAL_IPS":       options.VirtualIPs,
 		"OPENSHIFT_HA_NETWORK_INTERFACE": options.NetworkInterface,
 		"OPENSHIFT_HA_MONITOR_PORT":      watchPort,
+		"OPENSHIFT_HA_VRRP_ID_OFFSET":    VRRPIDOffset,
 		"OPENSHIFT_HA_REPLICA_COUNT":     replicas,
 		"OPENSHIFT_HA_USE_UNICAST":       "false",
 		// "OPENSHIFT_HA_UNICAST_PEERS":     "127.0.0.1",
-	}
+	})
+	return env
 }
 
 //  Generate the IP failover monitor (keepalived) container configuration.
@@ -75,8 +84,8 @@ func generateFailoverMonitorContainerConfig(name string, options *ipfailover.IPF
 	//  Container port to expose the service interconnects between keepaliveds.
 	ports := make([]kapi.ContainerPort, 1)
 	ports[0] = kapi.ContainerPort{
-		ContainerPort: options.ServicePort,
-		HostPort:      options.ServicePort,
+		ContainerPort: int32(options.ServicePort),
+		HostPort:      int32(options.ServicePort),
 	}
 
 	mounts := make([]kapi.VolumeMount, 1)
@@ -84,6 +93,16 @@ func generateFailoverMonitorContainerConfig(name string, options *ipfailover.IPF
 		Name:      libModulesVolumeName,
 		ReadOnly:  true,
 		MountPath: libModulesPath,
+	}
+
+	livenessProbe := &kapi.Probe{
+		InitialDelaySeconds: 10,
+
+		Handler: kapi.Handler{
+			Exec: &kapi.ExecAction{
+				Command: []string{"pgrep", "keepalived"},
+			},
+		},
 	}
 
 	privileged := true
@@ -97,6 +116,7 @@ func generateFailoverMonitorContainerConfig(name string, options *ipfailover.IPF
 		ImagePullPolicy: kapi.PullIfNotPresent,
 		VolumeMounts:    mounts,
 		Env:             env.List(),
+		LivenessProbe:   livenessProbe,
 	}
 }
 
@@ -152,39 +172,41 @@ func GenerateDeploymentConfig(name string, options *ipfailover.IPFailoverConfigC
 		return nil, err
 	}
 
+	labels := map[string]string{
+		"ipfailover": name,
+	}
 	podTemplate := &kapi.PodTemplateSpec{
-		ObjectMeta: kapi.ObjectMeta{Labels: selector},
+		ObjectMeta: kapi.ObjectMeta{
+			Labels: labels,
+		},
 		Spec: kapi.PodSpec{
-			HostNetwork:        true,
+			SecurityContext: &kapi.PodSecurityContext{
+				HostNetwork: true,
+			},
 			NodeSelector:       generateNodeSelector(name, selector),
 			Containers:         containers,
 			Volumes:            generateVolumeConfig(),
 			ServiceAccountName: options.ServiceAccount,
 		},
 	}
-
 	return &dapi.DeploymentConfig{
 		ObjectMeta: kapi.ObjectMeta{
 			Name:   name,
-			Labels: selector,
+			Labels: labels,
 		},
-		Triggers: []dapi.DeploymentTriggerPolicy{
-			{Type: dapi.DeploymentTriggerOnConfigChange},
-		},
-		Template: dapi.DeploymentTemplate{
+		Spec: dapi.DeploymentConfigSpec{
 			Strategy: dapi.DeploymentStrategy{
 				Type: dapi.DeploymentStrategyTypeRecreate,
 			},
-
 			// TODO: v0.1 requires a manual resize of the
 			//       replicas to match current cluster state.
 			//       In the future, the PerNodeController in
 			//       kubernetes would remove the need for this
 			//       manual intervention.
-			ControllerTemplate: kapi.ReplicationControllerSpec{
-				Replicas: options.Replicas,
-				Selector: selector,
-				Template: podTemplate,
+			Replicas: options.Replicas,
+			Template: podTemplate,
+			Triggers: []dapi.DeploymentTriggerPolicy{
+				{Type: dapi.DeploymentTriggerOnConfigChange},
 			},
 		},
 	}, nil

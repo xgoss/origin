@@ -6,10 +6,8 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
 	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
@@ -124,7 +122,7 @@ func serviceAccountTokenSecretWithoutTokenData() *api.Secret {
 }
 
 func TestTokenDeletion(t *testing.T) {
-	dockercfgSecretFieldSelector := fields.OneTermEqualSelector(client.SecretType, string(api.SecretTypeDockercfg))
+	dockercfgSecretFieldSelector := fields.OneTermEqualSelector(api.SecretTypeField, string(api.SecretTypeDockercfg))
 
 	testcases := map[string]struct {
 		ClientObjects []runtime.Object
@@ -138,7 +136,7 @@ func TestTokenDeletion(t *testing.T) {
 			DeletedSecret: serviceAccountTokenSecret(),
 
 			ExpectedActions: []testclient.Action{
-				testclient.NewListAction("secrets", "default", labels.Everything(), dockercfgSecretFieldSelector),
+				testclient.NewListAction("secrets", "default", api.ListOptions{FieldSelector: dockercfgSecretFieldSelector}),
 				testclient.NewDeleteAction("secrets", "default", "default-dockercfg-fplln"),
 			},
 		},
@@ -147,7 +145,7 @@ func TestTokenDeletion(t *testing.T) {
 
 			DeletedSecret: serviceAccountTokenSecret(),
 			ExpectedActions: []testclient.Action{
-				testclient.NewListAction("secrets", "default", labels.Everything(), dockercfgSecretFieldSelector),
+				testclient.NewListAction("secrets", "default", api.ListOptions{FieldSelector: dockercfgSecretFieldSelector}),
 				testclient.NewDeleteAction("secrets", "default", "default-dockercfg-fplln"),
 			},
 		},
@@ -156,7 +154,7 @@ func TestTokenDeletion(t *testing.T) {
 
 			DeletedSecret: serviceAccountTokenSecret(),
 			ExpectedActions: []testclient.Action{
-				testclient.NewListAction("secrets", "default", labels.Everything(), dockercfgSecretFieldSelector),
+				testclient.NewListAction("secrets", "default", api.ListOptions{FieldSelector: dockercfgSecretFieldSelector}),
 				testclient.NewDeleteAction("secrets", "default", "default-dockercfg-fplln"),
 			},
 		},

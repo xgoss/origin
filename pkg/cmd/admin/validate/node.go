@@ -25,7 +25,9 @@ This command validates that a configuration file intended to be used for a node 
 `
 
 	valiateNodeConfigExample = ` // Validate node configuration file
-  $ %s openshift.local.config/master/node-config.yaml`
+  %s openshift.local.config/master/node-config.yaml`
+
+	validateNodeConfigDeprecationMessage = `This command is deprecated and will be removed. Use 'oadm diagnostics NodeConfigCheck --node-config=path/to/config.yaml' instead.`
 )
 
 type ValidateNodeConfigOptions struct {
@@ -43,10 +45,11 @@ func NewCommandValidateNodeConfig(name, fullName string, out io.Writer) *cobra.C
 	}
 
 	cmd := &cobra.Command{
-		Use:     fmt.Sprintf("%s SOURCE", name),
-		Short:   "Validate the configuration file for a node",
-		Long:    validateNodeConfigLong,
-		Example: fmt.Sprintf(valiateNodeConfigExample, fullName),
+		Use:        fmt.Sprintf("%s SOURCE", name),
+		Short:      "Validate the configuration file for a node",
+		Long:       validateNodeConfigLong,
+		Example:    fmt.Sprintf(valiateNodeConfigExample, fullName),
+		Deprecated: validateNodeConfigDeprecationMessage,
 		Run: func(c *cobra.Command, args []string) {
 			if err := options.Complete(args); err != nil {
 				cmdutil.CheckErr(cmdutil.UsageError(c, err.Error()))
@@ -75,19 +78,19 @@ func (o *ValidateNodeConfigOptions) Complete(args []string) error {
 }
 
 // Run runs the node config validation and returns the result of the validation as a boolean as well as any errors
-// that occured trying to validate the file
+// that occurred trying to validate the file
 func (o *ValidateNodeConfigOptions) Run() (ok bool, err error) {
 	nodeConfig, err := configapilatest.ReadAndResolveNodeConfig(o.NodeConfigFile)
 	if err != nil {
 		return true, err
 	}
 
-	results := validation.ValidateNodeConfig(nodeConfig)
+	results := validation.ValidateNodeConfig(nodeConfig, nil)
 	writer := tabwriter.NewWriter(o.Out, minColumnWidth, tabWidth, padding, padchar, flags)
-	err = prettyPrintValidationErrorList(results, writer)
+	err = prettyPrintValidationResults(results, writer)
 	if err != nil {
-		return len(results) == 0, fmt.Errorf("could not print results: %v", err)
+		return len(results.Errors) == 0, fmt.Errorf("could not print results: %v", err)
 	}
 	writer.Flush()
-	return len(results) == 0, nil
+	return len(results.Errors) == 0, nil
 }

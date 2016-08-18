@@ -3,8 +3,6 @@ package clusterpolicybinding
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/watch"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -14,7 +12,7 @@ import (
 // Registry is an interface for things that know how to store ClusterPolicyBindings.
 type Registry interface {
 	// ListClusterPolicyBindings obtains list of policyBindings that match a selector.
-	ListClusterPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterPolicyBindingList, error)
+	ListClusterPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterPolicyBindingList, error)
 	// GetClusterPolicyBinding retrieves a specific policyBinding.
 	GetClusterPolicyBinding(ctx kapi.Context, name string) (*authorizationapi.ClusterPolicyBinding, error)
 	// CreateClusterPolicyBinding creates a new policyBinding.
@@ -28,7 +26,12 @@ type Registry interface {
 type WatchingRegistry interface {
 	Registry
 	// WatchClusterPolicyBindings watches policyBindings.
-	WatchClusterPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error)
+	WatchClusterPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error)
+}
+
+type ReadOnlyClusterPolicyInterface interface {
+	List(options kapi.ListOptions) (*authorizationapi.ClusterPolicyBindingList, error)
+	Get(name string) (*authorizationapi.ClusterPolicyBinding, error)
 }
 
 // Storage is an interface for a standard REST Storage backend
@@ -47,8 +50,8 @@ func NewRegistry(s Storage) WatchingRegistry {
 	return &storage{s}
 }
 
-func (s *storage) ListClusterPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.ClusterPolicyBindingList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListClusterPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.ClusterPolicyBindingList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -62,12 +65,12 @@ func (s *storage) CreateClusterPolicyBinding(ctx kapi.Context, policyBinding *au
 }
 
 func (s *storage) UpdateClusterPolicyBinding(ctx kapi.Context, policyBinding *authorizationapi.ClusterPolicyBinding) error {
-	_, _, err := s.Update(ctx, policyBinding)
+	_, _, err := s.Update(ctx, policyBinding.Name, rest.DefaultUpdatedObjectInfo(policyBinding, kapi.Scheme))
 	return err
 }
 
-func (s *storage) WatchClusterPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
-	return s.Watch(ctx, label, field, resourceVersion)
+func (s *storage) WatchClusterPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (watch.Interface, error) {
+	return s.Watch(ctx, options)
 }
 
 func (s *storage) GetClusterPolicyBinding(ctx kapi.Context, name string) (*authorizationapi.ClusterPolicyBinding, error) {
@@ -91,8 +94,8 @@ func NewSimulatedRegistry(clusterRegistry Registry) policybinding.Registry {
 	return &simulatedStorage{clusterRegistry}
 }
 
-func (s *simulatedStorage) ListPolicyBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.PolicyBindingList, error) {
-	ret, err := s.clusterRegistry.ListClusterPolicyBindings(ctx, label, field)
+func (s *simulatedStorage) ListPolicyBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.PolicyBindingList, error) {
+	ret, err := s.clusterRegistry.ListClusterPolicyBindings(ctx, options)
 	return authorizationapi.ToPolicyBindingList(ret), err
 }
 
@@ -111,4 +114,16 @@ func (s *simulatedStorage) GetPolicyBinding(ctx kapi.Context, name string) (*aut
 
 func (s *simulatedStorage) DeletePolicyBinding(ctx kapi.Context, name string) error {
 	return s.clusterRegistry.DeleteClusterPolicyBinding(ctx, name)
+}
+
+type ReadOnlyClusterPolicyBinding struct {
+	Registry
+}
+
+func (s ReadOnlyClusterPolicyBinding) List(options kapi.ListOptions) (*authorizationapi.ClusterPolicyBindingList, error) {
+	return s.ListClusterPolicyBindings(kapi.WithNamespace(kapi.NewContext(), ""), &options)
+}
+
+func (s ReadOnlyClusterPolicyBinding) Get(name string) (*authorizationapi.ClusterPolicyBinding, error) {
+	return s.GetClusterPolicyBinding(kapi.WithNamespace(kapi.NewContext(), ""), name)
 }

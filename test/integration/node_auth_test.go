@@ -1,5 +1,3 @@
-// +build integration,!no-etcd
-
 package integration
 
 import (
@@ -9,12 +7,16 @@ import (
 	"testing"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
+	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 
+	"github.com/openshift/origin/pkg/authorization/authorizer/scope"
 	"github.com/openshift/origin/pkg/cmd/admin/policy"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
+	"github.com/openshift/origin/pkg/cmd/server/origin"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	oauthapi "github.com/openshift/origin/pkg/oauth/api"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -26,6 +28,8 @@ type testRequest struct {
 }
 
 func TestNodeAuth(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	// Server config
 	masterConfig, nodeConfig, adminKubeConfigFile, err := testserver.StartTestAllInOne()
 	if err != nil {
@@ -49,9 +53,9 @@ func TestNodeAuth(t *testing.T) {
 	// Client configs for lesser users
 	masterKubeletClientConfig := configapi.GetKubeletClientConfig(*masterConfig)
 
-	anonymousConfig := clientcmd.AnonymousClientConfig(*adminConfig)
+	anonymousConfig := clientcmd.AnonymousClientConfig(adminConfig)
 
-	badTokenConfig := clientcmd.AnonymousClientConfig(*adminConfig)
+	badTokenConfig := clientcmd.AnonymousClientConfig(adminConfig)
 	badTokenConfig.BearerToken = "bad-token"
 
 	bobClient, _, bobConfig, err := testutil.GetClientForUser(*adminConfig, "bob")
@@ -69,6 +73,25 @@ func TestNodeAuth(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// create a scoped token for bob that is only good for getting user info
+	bobUser, err := bobClient.Users().Get("~")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	whoamiOnlyBobToken := &oauthapi.OAuthAccessToken{
+		ObjectMeta: kapi.ObjectMeta{Name: "whoami-token-plus-some-padding-here-to-make-the-limit"},
+		ClientName: origin.OpenShiftCLIClientID,
+		ExpiresIn:  200,
+		Scopes:     []string{scope.UserInfo},
+		UserName:   bobUser.Name,
+		UserUID:    string(bobUser.UID),
+	}
+	if _, err := originAdminClient.OAuthAccessTokens().Create(whoamiOnlyBobToken); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, _, bobWhoamiOnlyConfig, err := testutil.GetClientForUser(*adminConfig, "bob")
+	bobWhoamiOnlyConfig.BearerToken = whoamiOnlyBobToken.Name
+
 	// Grant sa1 system:cluster-reader, which should let them read metrics and stats
 	addSA1 := &policy.RoleModificationOptions{
 		RoleName:            bootstrappolicy.ClusterReaderRoleName,
@@ -80,10 +103,10 @@ func TestNodeAuth(t *testing.T) {
 	}
 
 	// Wait for policy cache
-	if err := testutil.WaitForClusterPolicyUpdate(bobClient, "get", "nodes/metrics", true); err != nil {
+	if err := testutil.WaitForClusterPolicyUpdate(bobClient, "get", kapi.Resource("nodes/metrics"), true); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := testutil.WaitForClusterPolicyUpdate(sa1Client, "get", "nodes/metrics", true); err != nil {
+	if err := testutil.WaitForClusterPolicyUpdate(sa1Client, "get", kapi.Resource("nodes/metrics"), true); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -97,8 +120,8 @@ func TestNodeAuth(t *testing.T) {
 	}
 	nodeTLS := configapi.UseTLS(nodeConfig.ServingInfo)
 
-	kubeletClientConfig := func(config *kclient.Config) *kclient.KubeletConfig {
-		return &kclient.KubeletConfig{
+	kubeletClientConfig := func(config *restclient.Config) *kubeletclient.KubeletClientConfig {
+		return &kubeletclient.KubeletClientConfig{
 			Port:            uint(nodePortInt),
 			EnableHttps:     nodeTLS,
 			TLSClientConfig: config.TLSClientConfig,
@@ -107,7 +130,7 @@ func TestNodeAuth(t *testing.T) {
 	}
 
 	testCases := map[string]struct {
-		KubeletClientConfig *kclient.KubeletConfig
+		KubeletClientConfig *kubeletclient.KubeletClientConfig
 		Forbidden           bool
 		NodeViewer          bool
 		NodeAdmin           bool
@@ -130,6 +153,11 @@ func TestNodeAuth(t *testing.T) {
 		"bob": {
 			KubeletClientConfig: kubeletClientConfig(bobConfig),
 			NodeViewer:          true,
+		},
+		// bob is normally a viewer, but when using a scoped token, he should end up denied
+		"bob-scoped": {
+			KubeletClientConfig: kubeletClientConfig(bobWhoamiOnlyConfig),
+			Forbidden:           true,
 		},
 		"alice": {
 			KubeletClientConfig: kubeletClientConfig(aliceConfig),
@@ -178,15 +206,18 @@ func TestNodeAuth(t *testing.T) {
 			// Responses to invalid paths are the same for all users
 			{"GET", "/", http.StatusNotFound},
 			{"GET", "/stats", http.StatusMovedPermanently}, // ServeMux redirects to the directory
+			{"GET", "/logs", http.StatusMovedPermanently},  // ServeMux redirects to the directory
 			{"GET", "/invalid", http.StatusNotFound},
 
 			// viewer requests
 			{"GET", "/metrics", viewResult},
 			{"GET", "/stats/", viewResult},
+			{"POST", "/stats/", viewResult}, // stats requests can be POSTs which contain query options
 
 			// successful admin requests
 			{"GET", "/healthz", adminResultOK},
 			{"GET", "/pods", adminResultOK},
+			{"GET", "/logs/", adminResultOK},
 
 			// not found admin requests
 			{"GET", "/containerLogs/mynamespace/mypod/mycontainer", adminResultMissing},
@@ -201,7 +232,7 @@ func TestNodeAuth(t *testing.T) {
 			{"GET", "/attach/mynamespace/mypod/mycontainer", adminResultMissing},
 		}
 
-		rt, err := kclient.MakeTransport(tc.KubeletClientConfig)
+		rt, err := kubeletclient.MakeTransport(tc.KubeletClientConfig)
 		if err != nil {
 			t.Errorf("%s: unexpected error: %v", k, err)
 			continue
@@ -220,7 +251,7 @@ func TestNodeAuth(t *testing.T) {
 			}
 			resp.Body.Close()
 			if resp.StatusCode != r.Result {
-				t.Errorf("%s: %s: expected %d, got %d", k, r.Path, r.Result, resp.StatusCode)
+				t.Errorf("%s: token=%s %s: expected %d, got %d", k, tc.KubeletClientConfig.BearerToken, r.Path, r.Result, resp.StatusCode)
 				continue
 			}
 		}

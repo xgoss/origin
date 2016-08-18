@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	kapierrors "k8s.io/kubernetes/pkg/api/errors"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
@@ -26,6 +26,14 @@ const (
 	AddClusterRoleToUserRecommendedName       = "add-cluster-role-to-user"
 	RemoveClusterRoleFromGroupRecommendedName = "remove-cluster-role-from-group"
 	RemoveClusterRoleFromUserRecommendedName  = "remove-cluster-role-from-user"
+)
+
+const (
+	addRoleToUserExample = `  # Add the 'view' role to user1 in the current project
+  %[1]s view user1
+
+  # Add the 'edit' role to serviceaccount1 in the current project
+  %[1]s edit -z serviceaccount1`
 )
 
 type RoleModificationOptions struct {
@@ -65,12 +73,13 @@ func NewCmdAddRoleToGroup(name, fullName string, f *clientcmd.Factory, out io.Wr
 // NewCmdAddRoleToUser implements the OpenShift cli add-role-to-user command
 func NewCmdAddRoleToUser(name, fullName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
 	options := &RoleModificationOptions{}
-	saNames := util.StringList{}
+	saNames := []string{}
 
 	cmd := &cobra.Command{
-		Use:   name + " ROLE USER [USER ...]",
-		Short: "Add users to a role in the current project",
-		Long:  `Add users to a role in the current project`,
+		Use:     name + " ROLE (USER | -z SERVICEACCOUNT) [USER ...]",
+		Short:   "Add users or serviceaccounts to a role in the current project",
+		Long:    `Add users or serviceaccounts to a role in the current project`,
+		Example: fmt.Sprintf(addRoleToUserExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.CompleteUserWithSA(f, args, saNames); err != nil {
 				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
@@ -83,7 +92,7 @@ func NewCmdAddRoleToUser(name, fullName string, f *clientcmd.Factory, out io.Wri
 	}
 
 	cmd.Flags().StringVar(&options.RoleNamespace, "role-namespace", "", "namespace where the role is located: empty means a role defined in cluster policy")
-	cmd.Flags().VarP(&saNames, "serviceaccount", "z", "service account in the current namespace to use as a user")
+	cmd.Flags().StringSliceVarP(&saNames, "serviceaccount", "z", saNames, "service account in the current namespace to use as a user")
 
 	return cmd
 }
@@ -115,7 +124,7 @@ func NewCmdRemoveRoleFromGroup(name, fullName string, f *clientcmd.Factory, out 
 // NewCmdRemoveRoleFromUser implements the OpenShift cli remove-role-from-user command
 func NewCmdRemoveRoleFromUser(name, fullName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
 	options := &RoleModificationOptions{}
-	saNames := util.StringList{}
+	saNames := []string{}
 
 	cmd := &cobra.Command{
 		Use:   name + " ROLE USER [USER ...]",
@@ -133,7 +142,7 @@ func NewCmdRemoveRoleFromUser(name, fullName string, f *clientcmd.Factory, out i
 	}
 
 	cmd.Flags().StringVar(&options.RoleNamespace, "role-namespace", "", "namespace where the role is located: empty means a role defined in cluster policy")
-	cmd.Flags().VarP(&saNames, "serviceaccount", "z", "service account in the current namespace to use as a user")
+	cmd.Flags().StringSliceVarP(&saNames, "serviceaccount", "z", saNames, "service account in the current namespace to use as a user")
 
 	return cmd
 }
@@ -226,14 +235,18 @@ func NewCmdRemoveClusterRoleFromUser(name, fullName string, f *clientcmd.Factory
 	return cmd
 }
 
-func (o *RoleModificationOptions) CompleteUserWithSA(f *clientcmd.Factory, args []string, saNames util.StringList) error {
-	if (len(args) < 2) && (len(saNames) == 0) {
-		return errors.New("you must specify at least two arguments: <role> <user> [user]...")
+func (o *RoleModificationOptions) CompleteUserWithSA(f *clientcmd.Factory, args []string, saNames []string) error {
+	if len(args) < 1 {
+		return errors.New("you must specify a role")
 	}
 
 	o.RoleName = args[0]
 	if len(args) > 1 {
 		o.Users = append(o.Users, args[1:]...)
+	}
+
+	if (len(o.Users) == 0) && (len(saNames) == 0) {
+		return errors.New("you must specify at least one user or service account")
 	}
 
 	osClient, _, err := f.Clients()
@@ -248,7 +261,7 @@ func (o *RoleModificationOptions) CompleteUserWithSA(f *clientcmd.Factory, args 
 	o.RoleBindingAccessor = NewLocalRoleBindingAccessor(roleBindingNamespace, osClient)
 
 	for _, sa := range saNames {
-		o.Subjects = append(o.Subjects, kapi.ObjectReference{Name: sa, Kind: "ServiceAccount"})
+		o.Subjects = append(o.Subjects, kapi.ObjectReference{Namespace: roleBindingNamespace, Name: sa, Kind: "ServiceAccount"})
 	}
 
 	return nil
@@ -326,6 +339,10 @@ subjectCheck:
 	} else {
 		roleBinding.Name = getUniqueName(o.RoleName, roleBindingNames)
 		err = o.RoleBindingAccessor.CreateRoleBinding(roleBinding)
+		// If the rolebinding was created in the meantime, rerun
+		if kapierrors.IsAlreadyExists(err) {
+			return o.AddRole()
+		}
 	}
 	if err != nil {
 		return err

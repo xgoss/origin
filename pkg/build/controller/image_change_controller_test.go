@@ -257,7 +257,7 @@ func TestBuildConfigUpdateError(t *testing.T) {
 	controller := mockImageChangeController(buildcfg, imageStream, image)
 	bcInstantiator := controller.BuildConfigInstantiator.(*buildConfigInstantiator)
 	bcUpdater := bcInstantiator.buildConfigUpdater
-	bcUpdater.err = kerrors.NewConflict("BuildConfig", buildcfg.Name, errors.New("foo"))
+	bcUpdater.err = kerrors.NewConflict(buildapi.Resource("BuildConfig"), buildcfg.Name, errors.New("foo"))
 
 	err := controller.HandleImageRepo(imageStream)
 	if len(bcInstantiator.name) == 0 {
@@ -302,14 +302,17 @@ func (m *mockBuildConfigUpdater) Update(buildcfg *buildapi.BuildConfig) error {
 }
 
 func mockBuildConfig(baseImage, triggerImage, repoName, repoTag string) *buildapi.BuildConfig {
+	dockerfile := "FROM foo"
 	return &buildapi.BuildConfig{
 		ObjectMeta: kapi.ObjectMeta{
 			Name: "testBuildCfg",
 		},
 		Spec: buildapi.BuildConfigSpec{
-			BuildSpec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{
+					Dockerfile: &dockerfile,
+				},
 				Strategy: buildapi.BuildStrategy{
-					Type: buildapi.DockerBuildStrategyType,
 					DockerStrategy: &buildapi.DockerBuildStrategy{
 						From: &kapi.ObjectReference{
 							Kind: "ImageStreamTag",

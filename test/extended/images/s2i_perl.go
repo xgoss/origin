@@ -7,16 +7,18 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
+	kapi "k8s.io/kubernetes/pkg/api"
+
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("images: s2i: perl", func() {
+var _ = g.Describe("[images][perl][Slow] hot deploy for openshift perl image", func() {
 	defer g.GinkgoRecover()
 	var (
 		dancerTemplate = "https://raw.githubusercontent.com/openshift/dancer-ex/master/openshift/templates/dancer-mysql.json"
 		oc             = exutil.NewCLI("s2i-perl", exutil.KubeConfigPath())
 		modifyCommand  = []string{"sed", "-ie", `s/data => \$data\[0\]/data => "1337"/`, "lib/default.pm"}
-		pageCountFunc  = func(count int) string { return fmt.Sprintf(`<span class="code" id="count-value">%d</span>`, count) }
+		pageCountFn    = func(count int) string { return fmt.Sprintf(`<span class="code" id="count-value">%d</span>`, count) }
 		dcName         = "dancer-mysql-example-1"
 		dcLabel        = exutil.ParseLabelsOrDie(fmt.Sprintf("deployment=%s", dcName))
 	)
@@ -25,12 +27,21 @@ var _ = g.Describe("images: s2i: perl", func() {
 		g.It(fmt.Sprintf("should work with hot deploy"), func() {
 			oc.SetOutputDir(exutil.TestContext.OutputDir)
 
+			exutil.CheckOpenShiftNamespaceImageStreams(oc)
 			g.By(fmt.Sprintf("calling oc new-app -f %q", dancerTemplate))
 			err := oc.Run("new-app").Args("-f", dancerTemplate).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for build to finish")
-			err = exutil.WaitForABuild(oc.REST().Builds(oc.Namespace()), "dancer-mysql-example-1", exutil.CheckBuildSuccessFunc, exutil.CheckBuildFailedFunc)
+			err = exutil.WaitForABuild(oc.REST().Builds(oc.Namespace()), "dancer-mysql-example-1", exutil.CheckBuildSuccessFn, exutil.CheckBuildFailedFn)
+			if err != nil {
+				exutil.DumpBuildLogs("dancer-mysql-example", oc)
+			}
+			o.Expect(err).NotTo(o.HaveOccurred())
+
+			// oc.KubeFramework().WaitForAnEndpoint currently will wait forever;  for now, prefacing with our WaitForADeploymentToComplete,
+			// which does have a timeout, since in most cases a failure in the service coming up stems from a failed deployment
+			err = exutil.WaitForADeploymentToComplete(oc.KubeREST().ReplicationControllers(oc.Namespace()), "dancer-mysql-example", oc)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for endpoint")
@@ -38,10 +49,10 @@ var _ = g.Describe("images: s2i: perl", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			assertPageCountIs := func(i int) {
-				_, err := exutil.WaitForPods(oc.KubeREST().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunningFunc, 1, 120*time.Second)
+				_, err := exutil.WaitForPods(oc.KubeREST().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunningFn, 1, 2*time.Minute)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
-				result, err := CheckPageContains(oc, "dancer-mysql-example", "", pageCountFunc(i))
+				result, err := CheckPageContains(oc, "dancer-mysql-example", "", pageCountFn(i))
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(result).To(o.BeTrue())
 			}
@@ -54,7 +65,7 @@ var _ = g.Describe("images: s2i: perl", func() {
 			RunInPodContainer(oc, dcLabel, modifyCommand)
 			assertPageCountIs(3)
 
-			pods, err := oc.KubeREST().Pods(oc.Namespace()).List(dcLabel, nil)
+			pods, err := oc.KubeREST().Pods(oc.Namespace()).List(kapi.ListOptions{LabelSelector: dcLabel})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			o.Expect(len(pods.Items)).To(o.Equal(1))
 
@@ -63,7 +74,7 @@ var _ = g.Describe("images: s2i: perl", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = oc.Run("scale").Args("rc", dcName, "--replicas=0").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			err = exutil.WaitUntilPodIsGone(oc.KubeREST().Pods(oc.Namespace()), pods.Items[0].Name, 60*time.Second)
+			err = exutil.WaitUntilPodIsGone(oc.KubeREST().Pods(oc.Namespace()), pods.Items[0].Name, 1*time.Minute)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = oc.Run("scale").Args("rc", dcName, "--replicas=1").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())

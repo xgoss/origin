@@ -77,11 +77,11 @@
       "kind": "ImageStream",
       "apiVersion": "v1",
       "metadata": {
-        "name": "ruby-20-centos7",
+        "name": "ruby-22-centos7",
         "creationTimestamp": null
       },
       "spec": {
-        "dockerImageRepository": "openshift/ruby-20-centos7"
+        "dockerImageRepository": "centos/ruby-22-centos7"
       },
       "status": {
         "dockerImageRepository": ""
@@ -108,7 +108,8 @@
           {
             "type": "Generic",
             "generic": {
-              "secret": "secret101"
+              "secret": "secret101",
+              "allowEnv": true
             }
           },
           {
@@ -130,21 +131,24 @@
           "sourceStrategy": {
             "from": {
               "kind": "ImageStreamTag",
-              "name": "ruby-20-centos7:latest"
-            }
-          },
-          "env": [
-            {
-              "name": "EXAMPLE",
-              "value": "sample-app"
-            }
-          ]
+              "name": "ruby-22-centos7:latest"
+            },
+            "env": [
+              {
+                "name": "EXAMPLE",
+                "value": "sample-app"
+              }
+            ]
+          }
         },
         "output": {
           "to": {
             "kind": "ImageStreamTag",
             "name": "origin-ruby-sample:latest"
           }
+        },
+        "postCommit": {
+          "args": ["bundle", "exec", "rake", "test"]
         },
         "resources": {}
       },
@@ -328,7 +332,24 @@
                     "value": "custom_value1"
                   }
                 ],
-                "containerName": "ruby-helloworld-database"
+                "containerName": "ruby-helloworld-database",
+                "volumes": ["ruby-helloworld-data"]
+              }
+            },
+            "mid": {
+              "failurePolicy": "Abort",
+              "execNewPod": {
+                "command": [
+                  "/bin/true"
+                ],
+                "env": [
+                  {
+                    "name": "CUSTOM_VAR2",
+                    "value": "custom_value2"
+                  }
+                ],
+                "containerName": "ruby-helloworld-database",
+                "volumes": ["ruby-helloworld-data"]
               }
             },
             "post": {
@@ -343,7 +364,8 @@
                     "value": "custom_value2"
                   }
                 ],
-                "containerName": "ruby-helloworld-database"
+                "containerName": "ruby-helloworld-database",
+                "volumes": ["ruby-helloworld-data"]
               }
             }
           },
@@ -391,11 +413,25 @@
                   }
                 ],
                 "resources": {},
+                "volumeMounts": [
+                  {
+                    "name": "ruby-helloworld-data",
+                    "mountPath": "/var/lib/mysql/data"
+                  }
+                ],
                 "terminationMessagePath": "/dev/termination-log",
                 "imagePullPolicy": "Always",
                 "securityContext": {
                   "capabilities": {},
                   "privileged": false
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "ruby-helloworld-data",
+                "emptyDir": {
+                  "medium": ""
                 }
               }
             ],

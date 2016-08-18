@@ -19,6 +19,7 @@ func TestChainDescriber(t *testing.T) {
 		testName         string
 		namespaces       sets.String
 		output           string
+		reverse          bool
 		defaultNamespace string
 		name             string
 		tag              string
@@ -29,19 +30,32 @@ func TestChainDescriber(t *testing.T) {
 		includeInputImg  bool
 	}{
 		{
+			testName:         "circular test",
+			namespaces:       sets.NewString("example"),
+			output:           "",
+			defaultNamespace: "example",
+			name:             "ruby-22-centos7",
+			tag:              "latest",
+			path:             "../../../api/graph/test/circular.yaml",
+			humanReadable: map[string]int{
+				"Cycle detected in build configurations: bc/ruby-22-centos7 -> istag/ruby-hello-world:latest -> bc/ruby-hello-world -> istag/ruby-something-else:latest -> bc/ruby-something-else -> istag/ruby-22-centos7:latest -> bc/ruby-22-centos7": 1,
+			},
+			expectedErr: nil,
+		},
+		{
 			testName:         "human readable test - single namespace",
 			namespaces:       sets.NewString("test"),
 			output:           "",
 			defaultNamespace: "test",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/single-namespace-bcs.yaml",
 			humanReadable: map[string]int{
-				"imagestreamtag/ruby-20-centos7:latest":        1,
-				"\tbc/ruby-hello-world":                        1,
-				"\t\timagestreamtag/ruby-hello-world:latest":   1,
-				"\tbc/ruby-sample-build":                       1,
-				"\t\timagestreamtag/origin-ruby-sample:latest": 1,
+				"istag/ruby-22-centos7:latest":        1,
+				"\tbc/ruby-hello-world":               1,
+				"\t\tistag/ruby-hello-world:latest":   1,
+				"\tbc/ruby-sample-build":              1,
+				"\t\tistag/origin-ruby-sample:latest": 1,
 			},
 			expectedErr: nil,
 		},
@@ -50,16 +64,16 @@ func TestChainDescriber(t *testing.T) {
 			namespaces:       sets.NewString("test"),
 			output:           "dot",
 			defaultNamespace: "test",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/single-namespace-bcs.yaml",
 			dot: []string{
-				"digraph \"ruby-20-centos7:latest\" {",
+				"digraph \"ruby-22-centos7:latest\" {",
 				"// Node definitions.",
 				"[label=\"BuildConfig|test/ruby-hello-world\"];",
 				"[label=\"BuildConfig|test/ruby-sample-build\"];",
 				"[label=\"ImageStreamTag|test/ruby-hello-world:latest\"];",
-				"[label=\"ImageStreamTag|test/ruby-20-centos7:latest\"];",
+				"[label=\"ImageStreamTag|test/ruby-22-centos7:latest\"];",
 				"[label=\"ImageStreamTag|test/origin-ruby-sample:latest\"];",
 				"",
 				"// Edge definitions.",
@@ -76,15 +90,15 @@ func TestChainDescriber(t *testing.T) {
 			namespaces:       sets.NewString("test", "master", "default"),
 			output:           "",
 			defaultNamespace: "master",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/multiple-namespaces-bcs.yaml",
 			humanReadable: map[string]int{
-				"<master imagestreamtag/ruby-20-centos7:latest>":         1,
-				"\t<default bc/ruby-hello-world>":                        1,
-				"\t\t<test imagestreamtag/ruby-hello-world:latest>":      1,
-				"\t<test bc/ruby-sample-build>":                          1,
-				"\t\t<another imagestreamtag/origin-ruby-sample:latest>": 1,
+				"<master istag/ruby-22-centos7:latest>":         1,
+				"\t<default bc/ruby-hello-world>":               1,
+				"\t\t<test istag/ruby-hello-world:latest>":      1,
+				"\t<test bc/ruby-sample-build>":                 1,
+				"\t\t<another istag/origin-ruby-sample:latest>": 1,
 			},
 			expectedErr: nil,
 		},
@@ -93,16 +107,16 @@ func TestChainDescriber(t *testing.T) {
 			namespaces:       sets.NewString("test", "master", "default"),
 			output:           "dot",
 			defaultNamespace: "master",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/multiple-namespaces-bcs.yaml",
 			dot: []string{
-				"digraph \"ruby-20-centos7:latest\" {",
+				"digraph \"ruby-22-centos7:latest\" {",
 				"// Node definitions.",
 				"[label=\"BuildConfig|default/ruby-hello-world\"];",
 				"[label=\"BuildConfig|test/ruby-sample-build\"];",
 				"[label=\"ImageStreamTag|test/ruby-hello-world:latest\"];",
-				"[label=\"ImageStreamTag|master/ruby-20-centos7:latest\"];",
+				"[label=\"ImageStreamTag|master/ruby-22-centos7:latest\"];",
 				"[label=\"ImageStreamTag|another/origin-ruby-sample:latest\"];",
 				"",
 				"// Edge definitions.",
@@ -116,57 +130,75 @@ func TestChainDescriber(t *testing.T) {
 		},
 		{
 			testName:         "human readable - multiple triggers - triggeronly",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			defaultNamespace: "test",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/multiple-trigger-bcs.yaml",
 			namespaces:       sets.NewString("test"),
 			humanReadable: map[string]int{
-				"imagestreamtag/ruby-20-centos7:latest":   1,
-				"\tbc/parent1":                            1,
-				"\t\timagestreamtag/parent1img:latest":    1,
-				"\t\t\tbc/child2":                         2,
-				"\t\t\t\timagestreamtag/child2img:latest": 2,
-				"\tbc/parent2":                            1,
-				"\t\timagestreamtag/parent2img:latest":    1,
-				"\t\t\tbc/child3":                         2,
-				"\t\t\t\timagestreamtag/child3img:latest": 2,
-				"\t\t\tbc/child1":                         1,
-				"\t\t\t\timagestreamtag/child1img:latest": 1,
-				"\tbc/parent3":                            1,
-				"\t\timagestreamtag/parent3img:latest":    1,
+				"istag/ruby-22-centos7:latest":   1,
+				"\tbc/parent1":                   1,
+				"\t\tistag/parent1img:latest":    1,
+				"\t\t\tbc/child2":                2,
+				"\t\t\t\tistag/child2img:latest": 2,
+				"\tbc/parent2":                   1,
+				"\t\tistag/parent2img:latest":    1,
+				"\t\t\tbc/child3":                2,
+				"\t\t\t\tistag/child3img:latest": 2,
+				"\t\t\tbc/child1":                1,
+				"\t\t\t\tistag/child1img:latest": 1,
+				"\tbc/parent3":                   1,
+				"\t\tistag/parent3img:latest":    1,
 			},
 		},
 		{
 			testName:         "human readable - multiple triggers - trigger+input",
-			name:             "ruby-20-centos7",
+			name:             "ruby-22-centos7",
 			defaultNamespace: "test",
 			tag:              "latest",
 			path:             "../../../../pkg/cmd/experimental/buildchain/test/multiple-trigger-bcs.yaml",
 			namespaces:       sets.NewString("test"),
 			includeInputImg:  true,
 			humanReadable: map[string]int{
-				"imagestreamtag/ruby-20-centos7:latest":   1,
-				"\tbc/parent1":                            1,
-				"\t\timagestreamtag/parent1img:latest":    1,
-				"\t\t\tbc/child1":                         2,
-				"\t\t\t\timagestreamtag/child1img:latest": 2,
-				"\t\t\tbc/child2":                         2,
-				"\t\t\t\timagestreamtag/child2img:latest": 2,
-				"\t\t\tbc/child3":                         3,
-				"\t\t\t\timagestreamtag/child3img:latest": 3,
-				"\tbc/parent2":                            1,
-				"\t\timagestreamtag/parent2img:latest":    1,
-				"\tbc/parent3":                            1,
-				"\t\timagestreamtag/parent3img:latest":    1,
+				"istag/ruby-22-centos7:latest":   1,
+				"\tbc/parent1":                   1,
+				"\t\tistag/parent1img:latest":    1,
+				"\t\t\tbc/child1":                2,
+				"\t\t\t\tistag/child1img:latest": 2,
+				"\t\t\tbc/child2":                2,
+				"\t\t\t\tistag/child2img:latest": 2,
+				"\t\t\tbc/child3":                3,
+				"\t\t\t\tistag/child3img:latest": 3,
+				"\tbc/parent2":                   1,
+				"\t\tistag/parent2img:latest":    1,
+				"\tbc/parent3":                   1,
+				"\t\tistag/parent3img:latest":    1,
+			},
+		},
+		{
+			testName:         "human readable - multiple triggers - triggeronly - reverse",
+			name:             "child2img",
+			reverse:          true,
+			defaultNamespace: "test",
+			tag:              "latest",
+			path:             "../../../../pkg/cmd/experimental/buildchain/test/multiple-trigger-bcs.yaml",
+			namespaces:       sets.NewString("test"),
+			humanReadable: map[string]int{
+				"istag/child2img:latest":               1,
+				"\tbc/child2":                          1,
+				"\t\tistag/parent1img:latest":          1,
+				"\t\t\tbc/parent1":                     1,
+				"\t\t\t\tistag/ruby-22-centos7:latest": 2,
+				"\t\tistag/parent3img:latest":          1,
+				"\t\t\tbc/parent3":                     1,
 			},
 		},
 	}
 
 	for _, test := range tests {
-		o := ktestclient.NewObjects(kapi.Scheme, kapi.Scheme)
+		o := ktestclient.NewObjects(kapi.Scheme, kapi.Codecs.UniversalDecoder())
 		if len(test.path) > 0 {
-			if err := ktestclient.AddObjectsFromPath(test.path, o, kapi.Scheme); err != nil {
+			if err := ktestclient.AddObjectsFromPath(test.path, o, kapi.Codecs.UniversalDecoder()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -174,7 +206,7 @@ func TestChainDescriber(t *testing.T) {
 		oc, _ := testclient.NewFixtureClients(o)
 		ist := imagegraph.MakeImageStreamTagObjectMeta(test.defaultNamespace, test.name, test.tag)
 
-		desc, err := NewChainDescriber(oc, test.namespaces, test.output).Describe(ist, test.includeInputImg)
+		desc, err := NewChainDescriber(oc, test.namespaces, test.output).Describe(ist, test.includeInputImg, test.reverse)
 		t.Logf("%s: output:\n%s\n\n", test.testName, desc)
 		if err != test.expectedErr {
 			t.Fatalf("%s: error mismatch: expected %v, got %v", test.testName, test.expectedErr, err)

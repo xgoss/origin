@@ -54,6 +54,9 @@ func AddAdditionalCommands(g CommandGroups, message string, cmds []*cobra.Comman
 func filter(cmds []*cobra.Command, names ...string) []*cobra.Command {
 	out := []*cobra.Command{}
 	for _, c := range cmds {
+		if c.Hidden {
+			continue
+		}
 		skip := false
 		for _, name := range names {
 			if name == c.Name() {
@@ -73,7 +76,8 @@ type FlagExposer interface {
 	ExposeFlags(cmd *cobra.Command, flags ...string) FlagExposer
 }
 
-func ActsAsRootCommand(cmd *cobra.Command, groups ...CommandGroup) FlagExposer {
+// ActsAsRootCommand displays command usage using a root command usage template
+func ActsAsRootCommand(cmd *cobra.Command, filters []string, groups ...CommandGroup) FlagExposer {
 	if cmd == nil {
 		panic("nil root command")
 	}
@@ -82,6 +86,7 @@ func ActsAsRootCommand(cmd *cobra.Command, groups ...CommandGroup) FlagExposer {
 		RootCmd:       cmd,
 		UsageTemplate: MainUsageTemplate(),
 		CommandGroups: groups,
+		Filtered:      filters,
 	}
 	cmd.SetUsageFunc(templater.UsageFunc())
 	return templater
@@ -99,6 +104,7 @@ type templater struct {
 	UsageTemplate string
 	RootCmd       *cobra.Command
 	CommandGroups
+	Filtered []string
 }
 
 func (templater *templater) ExposeFlags(cmd *cobra.Command, flags ...string) FlagExposer {
@@ -123,6 +129,7 @@ func (templater *templater) UsageFunc(exposedFlags ...string) func(*cobra.Comman
 			"rootCmd":             templater.rootCmdName,
 			"isRootCmd":           templater.isRootCmd,
 			"optionsCmdFor":       templater.optionsCmdFor,
+			"usageLine":           templater.usageLine,
 			"exposed": func(c *cobra.Command) *flag.FlagSet {
 				exposed := flag.NewFlagSet("exposed", flag.ContinueOnError)
 				if len(exposedFlags) > 0 {
@@ -137,15 +144,16 @@ func (templater *templater) UsageFunc(exposedFlags ...string) func(*cobra.Comman
 		})
 
 		template.Must(t.Parse(templater.UsageTemplate))
-		return t.Execute(c.Out(), c)
+		return t.Execute(c.OutOrStderr(), c)
 	}
 }
 
 func (templater *templater) cmdGroups(c *cobra.Command, all []*cobra.Command) []CommandGroup {
-	all = filter(all, "options")
-	if len(templater.CommandGroups) > 0 && templater.isRootCmd(c) {
+	if len(templater.CommandGroups) > 0 && c == templater.RootCmd {
+		all = filter(all, templater.Filtered...)
 		return AddAdditionalCommands(templater.CommandGroups, "Other Commands:", all)
 	}
+	all = filter(all, "options")
 	return []CommandGroup{
 		{
 			Message:  "Available Commands:",
@@ -185,20 +193,43 @@ func (t *templater) optionsCmdFor(c *cobra.Command) string {
 	if !c.Runnable() {
 		return ""
 	}
-	rootCmdStructure := t.parents(c)
-	for i := len(rootCmdStructure) - 1; i >= 0; i-- {
-		cmd := rootCmdStructure[i]
-		if _, _, err := cmd.Find([]string{"options"}); err == nil {
-			return cmd.CommandPath() + " options"
+
+	parentCmdHasOptsArg := false
+	currentCmdHasOptsArg := false
+
+	if t.RootCmd.HasParent() {
+		if _, _, err := t.RootCmd.Parent().Find([]string{"options"}); err == nil {
+			parentCmdHasOptsArg = true
 		}
 	}
-	return ""
+
+	if _, _, err := t.RootCmd.Find([]string{"options"}); err == nil {
+		currentCmdHasOptsArg = true
+	}
+
+	if (parentCmdHasOptsArg && currentCmdHasOptsArg) || !t.RootCmd.HasParent() {
+		return t.RootCmd.CommandPath() + " options"
+	}
+
+	return t.RootCmd.Parent().CommandPath() + " options"
+}
+
+func (t *templater) usageLine(c *cobra.Command) string {
+	usage := c.UseLine()
+	suffix := "[options]"
+	if c.HasFlags() && !strings.Contains(usage, suffix) {
+		usage += " " + suffix
+	}
+	return usage
 }
 
 func flagsUsages(f *flag.FlagSet) string {
 	x := new(bytes.Buffer)
 
 	f.VisitAll(func(flag *flag.Flag) {
+		if flag.Hidden {
+			return
+		}
 		format := "--%s=%s: %s\n"
 
 		if flag.Value.Type() == "string" {

@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -14,6 +12,7 @@ import (
 
 	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/manifest/schema1"
 	_ "github.com/docker/distribution/registry/storage/driver/inmemory"
 	"github.com/docker/libtrust"
 
@@ -26,24 +25,20 @@ import (
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
-func init() {
-	testutil.RequireEtcd()
-}
-
 func signedManifest(name string) ([]byte, digest.Digest, error) {
 	key, err := libtrust.GenerateECP256PrivateKey()
 	if err != nil {
 		return []byte{}, "", fmt.Errorf("error generating EC key: %s", err)
 	}
 
-	mappingManifest := manifest.Manifest{
+	mappingManifest := schema1.Manifest{
 		Versioned: manifest.Versioned{
 			SchemaVersion: 1,
 		},
 		Name:         name,
 		Tag:          imageapi.DefaultImageTag,
 		Architecture: "amd64",
-		History: []manifest.History{
+		History: []schema1.History{
 			{
 				V1Compatibility: `{"id": "foo"}`,
 			},
@@ -54,10 +49,7 @@ func signedManifest(name string) ([]byte, digest.Digest, error) {
 	if err != nil {
 		return []byte{}, "", fmt.Errorf("error marshaling manifest: %s", err)
 	}
-	dgst, err := digest.FromBytes(manifestBytes)
-	if err != nil {
-		return []byte{}, "", fmt.Errorf("error calculating manifest digest: %s", err)
-	}
+	dgst := digest.FromBytes(manifestBytes)
 
 	jsonSignature, err := libtrust.NewJSONSignature(manifestBytes)
 	if err != nil {
@@ -77,7 +69,9 @@ func signedManifest(name string) ([]byte, digest.Digest, error) {
 }
 
 func TestV2RegistryGetTags(t *testing.T) {
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("error starting master: %v", err)
 	}
@@ -100,7 +94,8 @@ func TestV2RegistryGetTags(t *testing.T) {
 	}
 
 	config := `version: 0.1
-loglevel: debug
+log:
+  level: debug
 http:
   addr: 127.0.0.1:5000
 storage:
@@ -108,7 +103,11 @@ storage:
 auth:
   openshift:
 middleware:
+  registry:
+    - name: openshift
   repository:
+    - name: openshift
+  storage:
     - name: openshift
 `
 
@@ -116,7 +115,7 @@ middleware:
 	os.Setenv("OPENSHIFT_CERT_DATA", string(clusterAdminClientConfig.CertData))
 	os.Setenv("OPENSHIFT_KEY_DATA", string(clusterAdminClientConfig.KeyData))
 	os.Setenv("OPENSHIFT_MASTER", clusterAdminClientConfig.Host)
-	os.Setenv("REGISTRY_URL", "127.0.0.1:5000")
+	os.Setenv("DOCKER_REGISTRY_URL", "127.0.0.1:5000")
 
 	go dockerregistry.Execute(strings.NewReader(config))
 
@@ -170,7 +169,7 @@ middleware:
 		t.Fatalf("unexpected status code: %d", resp.StatusCode)
 	}
 	body, err := ioutil.ReadAll(resp.Body)
-	var retrievedManifest manifest.Manifest
+	var retrievedManifest schema1.Manifest
 	if err := json.Unmarshal(body, &retrievedManifest); err != nil {
 		t.Fatalf("error unmarshaling retrieved manifest")
 	}
@@ -275,7 +274,7 @@ func putManifest(name, user, token string) (digest.Digest, error) {
 		return "", fmt.Errorf("error putting manifest: %s", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("unexpected put status code: %d", resp.StatusCode)
 	}
 	return dgst, nil

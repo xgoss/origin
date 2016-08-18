@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/cmd/server/crypto"
@@ -23,7 +22,7 @@ type CreateServerCertOptions struct {
 	CertFile string
 	KeyFile  string
 
-	Hostnames util.StringList
+	Hostnames []string
 	Overwrite bool
 	Output    io.Writer
 }
@@ -37,12 +36,12 @@ components such as the router, authentication server, etc.
 
 Example: Creating a secure router certificate.
 
-    $ CA=openshift.local.config/master
-	$ %[1]s --signer-cert=$CA/ca.crt \
+    CA=openshift.local.config/master
+	%[1]s --signer-cert=$CA/ca.crt \
 	          --signer-key=$CA/ca.key --signer-serial=$CA/ca.serial.txt \
 	          --hostnames='*.cloudapps.example.com' \
 	          --cert=cloudapps.crt --key=cloudapps.key
-    $ cat cloudapps.crt cloudapps.key $CA/ca.crt > cloudapps.router.pem
+    cat cloudapps.crt cloudapps.key $CA/ca.crt > cloudapps.router.pem
 `
 
 func NewCommandCreateServerCert(commandName string, fullName string, out io.Writer) *cobra.Command {
@@ -69,7 +68,7 @@ func NewCommandCreateServerCert(commandName string, fullName string, out io.Writ
 	flags.StringVar(&options.CertFile, "cert", "", "The certificate file. Choose a name that indicates what the service is.")
 	flags.StringVar(&options.KeyFile, "key", "", "The key file. Choose a name that indicates what the service is.")
 
-	flags.Var(&options.Hostnames, "hostnames", "Every hostname or IP you want server certs to be valid for. Comma delimited list")
+	flags.StringSliceVar(&options.Hostnames, "hostnames", options.Hostnames, "Every hostname or IP you want server certs to be valid for. Comma delimited list")
 	flags.BoolVar(&options.Overwrite, "overwrite", true, "Overwrite existing cert files if found.  If false, any existing file will be left as-is.")
 
 	// autocompletion hints
@@ -114,7 +113,7 @@ func (o CreateServerCertOptions) CreateServerCert() (*crypto.TLSCertificateConfi
 	var ca *crypto.TLSCertificateConfig
 	written := true
 	if o.Overwrite {
-		ca, err = signerCert.MakeServerCert(o.CertFile, o.KeyFile, sets.NewString([]string(o.Hostnames)...))
+		ca, err = signerCert.MakeAndWriteServerCert(o.CertFile, o.KeyFile, sets.NewString([]string(o.Hostnames)...))
 	} else {
 		ca, written, err = signerCert.EnsureServerCert(o.CertFile, o.KeyFile, sets.NewString([]string(o.Hostnames)...))
 	}

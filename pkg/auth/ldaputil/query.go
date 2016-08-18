@@ -4,49 +4,33 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-ldap/ldap"
 	"github.com/golang/glog"
+	"gopkg.in/ldap.v2"
 
+	"github.com/openshift/origin/pkg/auth/ldaputil/ldapclient"
 	"github.com/openshift/origin/pkg/cmd/server/api"
 )
 
-// errEntryNotFound is an error that occurs when trying to find a specific entry fails.
-type errEntryNotFound struct {
-}
-
-// Error returns the error string for the out-of-bounds query
-func (e *errEntryNotFound) Error() string {
-	return "search for entry did not return any results"
-}
-
-func IsEntryNotFoundError(err error) bool {
-	if err == nil {
-		return false
+// NewLDAPQuery converts a user-provided LDAPQuery into a version we can use
+func NewLDAPQuery(config api.LDAPQuery) (LDAPQuery, error) {
+	scope, err := DetermineLDAPScope(config.Scope)
+	if err != nil {
+		return LDAPQuery{}, err
 	}
 
-	_, ok := err.(*errEntryNotFound)
-	return ok
-}
-
-// errQueryOutOfBounds is an error that occurs when trying to search by DN for an entry that exists
-// outside of the tree specified with the BaseDN for search.
-type errQueryOutOfBounds struct {
-	BaseDN  string
-	QueryDN string
-}
-
-// Error returns the error string for the out-of-bounds query
-func (q *errQueryOutOfBounds) Error() string {
-	return fmt.Sprintf("search for entry with dn=%q would search outside of the base dn specified (dn=%q)", q.QueryDN, q.BaseDN)
-}
-
-func IsQueryOutOfBoundsError(err error) bool {
-	if err == nil {
-		return false
+	derefAliases, err := DetermineDerefAliasesBehavior(config.DerefAliases)
+	if err != nil {
+		return LDAPQuery{}, err
 	}
 
-	_, ok := err.(*errQueryOutOfBounds)
-	return ok
+	return LDAPQuery{
+		BaseDN:       config.BaseDN,
+		Scope:        scope,
+		DerefAliases: derefAliases,
+		TimeLimit:    config.TimeLimit,
+		Filter:       config.Filter,
+		PageSize:     config.PageSize,
+	}, nil
 }
 
 // LDAPQuery encodes an LDAP query
@@ -67,10 +51,17 @@ type LDAPQuery struct {
 
 	// Filter is a valid LDAP search filter that retrieves all relevant entries from the LDAP server with the base DN
 	Filter string
+
+	// PageSize is the maximum preferred page size, measured in LDAP entries. A page size of 0 means no paging will be done.
+	PageSize int
 }
 
 // NewSearchRequest creates a new search request for the LDAP query and optionally includes more attributes
 func (q *LDAPQuery) NewSearchRequest(additionalAttributes []string) *ldap.SearchRequest {
+	var controls []ldap.Control
+	if q.PageSize > 0 {
+		controls = append(controls, ldap.NewControlPaging(uint32(q.PageSize)))
+	}
 	return ldap.NewSearchRequest(
 		q.BaseDN,
 		int(q.Scope),
@@ -80,8 +71,22 @@ func (q *LDAPQuery) NewSearchRequest(additionalAttributes []string) *ldap.Search
 		false, // not types only
 		q.Filter,
 		additionalAttributes,
-		nil, // no controls
+		controls,
 	)
+}
+
+// NewLDAPQueryOnAttribute converts a user-provided LDAPQuery into a version we can use by parsing
+// the input and combining it with a set of name attributes
+func NewLDAPQueryOnAttribute(config api.LDAPQuery, attribute string) (LDAPQueryOnAttribute, error) {
+	ldapQuery, err := NewLDAPQuery(config)
+	if err != nil {
+		return LDAPQueryOnAttribute{}, err
+	}
+
+	return LDAPQueryOnAttribute{
+		LDAPQuery:      ldapQuery,
+		QueryAttribute: attribute,
+	}, nil
 }
 
 // LDAPQueryOnAttribute encodes an LDAP query that conjoins two filters to extract a specific LDAP entry
@@ -96,40 +101,15 @@ type LDAPQueryOnAttribute struct {
 	QueryAttribute string
 }
 
-// NewLDAPQueryOnAttribute converts a user-provided LDAPQuery into a version we can use by parsing
-// the input and combining it with a set of name attributes
-func NewLDAPQueryOnAttribute(config api.LDAPQuery, attribute string) (LDAPQueryOnAttribute, error) {
-	scope, err := DetermineLDAPScope(config.Scope)
-	if err != nil {
-		return LDAPQueryOnAttribute{}, err
-	}
-
-	derefAliases, err := DetermineDerefAliasesBehavior(config.DerefAliases)
-	if err != nil {
-		return LDAPQueryOnAttribute{}, err
-	}
-
-	return LDAPQueryOnAttribute{
-		LDAPQuery: LDAPQuery{
-			BaseDN:       config.BaseDN,
-			Scope:        scope,
-			DerefAliases: derefAliases,
-			TimeLimit:    config.TimeLimit,
-			Filter:       config.Filter,
-		},
-		QueryAttribute: attribute,
-	}, nil
-}
-
 // NewSearchRequest creates a new search request from the identifying query by internalizing the value of
 // the attribute to be filtered as well as any attributes that need to be recovered
 func (o *LDAPQueryOnAttribute) NewSearchRequest(attributeValue string, attributes []string) (*ldap.SearchRequest, error) {
 	if strings.EqualFold(o.QueryAttribute, "dn") {
-		if !strings.Contains(attributeValue, o.BaseDN) {
-			return nil, &errQueryOutOfBounds{QueryDN: attributeValue, BaseDN: o.BaseDN}
-		}
 		if _, err := ldap.ParseDN(attributeValue); err != nil {
 			return nil, fmt.Errorf("could not search by dn, invalid dn value: %v", err)
+		}
+		if !strings.Contains(attributeValue, o.BaseDN) {
+			return nil, NewQueryOutOfBoundsError(attributeValue, o.BaseDN)
 		}
 		return o.buildDNQuery(attributeValue, attributes), nil
 
@@ -142,6 +122,10 @@ func (o *LDAPQueryOnAttribute) NewSearchRequest(attributeValue string, attribute
 // this is done by setting the DN to be the base DN for the search and setting the search scope
 // to only consider the base object found
 func (o *LDAPQueryOnAttribute) buildDNQuery(dn string, attributes []string) *ldap.SearchRequest {
+	var controls []ldap.Control
+	if o.PageSize > 0 {
+		controls = append(controls, ldap.NewControlPaging(uint32(o.PageSize)))
+	}
 	return ldap.NewSearchRequest(
 		dn,
 		ldap.ScopeBaseObject, // over-ride original
@@ -151,7 +135,7 @@ func (o *LDAPQueryOnAttribute) buildDNQuery(dn string, attributes []string) *lda
 		false,             // not types only
 		"(objectClass=*)", // filter that returns all values
 		attributes,
-		nil, // no controls
+		controls,
 	)
 }
 
@@ -165,6 +149,11 @@ func (o *LDAPQueryOnAttribute) buildAttributeQuery(attributeValue string,
 
 	filter := fmt.Sprintf("(&(%s)(%s))", o.Filter, specificFilter)
 
+	var controls []ldap.Control
+	if o.PageSize > 0 {
+		controls = append(controls, ldap.NewControlPaging(uint32(o.PageSize)))
+	}
+
 	return ldap.NewSearchRequest(
 		o.BaseDN,
 		int(o.Scope),
@@ -174,20 +163,20 @@ func (o *LDAPQueryOnAttribute) buildAttributeQuery(attributeValue string,
 		false, // not types only
 		filter,
 		attributes,
-		nil, // no controls
+		controls,
 	)
 }
 
 // QueryForUniqueEntry queries for an LDAP entry with the given searchRequest. The query is expected
 // to return one unqiue result. If this is not the case, errors are raised
-func QueryForUniqueEntry(clientConfig LDAPClientConfig, query *ldap.SearchRequest) (*ldap.Entry, error) {
+func QueryForUniqueEntry(clientConfig ldapclient.Config, query *ldap.SearchRequest) (*ldap.Entry, error) {
 	result, err := QueryForEntries(clientConfig, query)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(result) == 0 {
-		return nil, &errEntryNotFound{}
+		return nil, NewEntryNotFoundError(query.BaseDN, query.Filter)
 	}
 
 	if len(result) > 1 {
@@ -215,20 +204,35 @@ func formatResult(results []*ldap.Entry) string {
 }
 
 // QueryForEntries queries for LDAP with the given searchRequest
-func QueryForEntries(clientConfig LDAPClientConfig, query *ldap.SearchRequest) ([]*ldap.Entry, error) {
+func QueryForEntries(clientConfig ldapclient.Config, query *ldap.SearchRequest) ([]*ldap.Entry, error) {
 	connection, err := clientConfig.Connect()
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to the LDAP server: %v", err)
 	}
 	defer connection.Close()
 
-	if _, err := clientConfig.Bind(connection); err != nil {
-		return nil, fmt.Errorf("could not bind to the LDAP server: %v", err)
+	if bindDN, bindPassword := clientConfig.GetBindCredentials(); len(bindDN) > 0 {
+		if err := connection.Bind(bindDN, bindPassword); err != nil {
+			return nil, fmt.Errorf("could not bind to the LDAP server: %v", err)
+		}
 	}
 
-	glog.V(4).Infof("searching LDAP server %v://%v at dn=%q with scope %v for %s requesting %v", clientConfig.Scheme, clientConfig.Host, query.BaseDN, query.Scope, query.Filter, query.Attributes)
-	searchResult, err := connection.Search(query)
+	var searchResult *ldap.SearchResult
+	control := ldap.FindControl(query.Controls, ldap.ControlTypePaging)
+	if control == nil {
+		glog.V(4).Infof("searching LDAP server with config %v with dn=%q and scope %v for %s requesting %v", clientConfig, query.BaseDN, query.Scope, query.Filter, query.Attributes)
+		searchResult, err = connection.Search(query)
+	} else if pagingControl, ok := control.(*ldap.ControlPaging); ok {
+		glog.V(4).Infof("searching LDAP server with config %v with dn=%q and scope %v for %s requesting %v with pageSize=%d", clientConfig, query.BaseDN, query.Scope, query.Filter, query.Attributes, pagingControl.PagingSize)
+		searchResult, err = connection.SearchWithPaging(query, pagingControl.PagingSize)
+	} else {
+		err = fmt.Errorf("invalid paging control type: %v", control)
+	}
+
 	if err != nil {
+		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			return nil, NewNoSuchObjectError(query.BaseDN)
+		}
 		return nil, err
 	}
 

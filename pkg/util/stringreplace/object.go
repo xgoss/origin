@@ -14,6 +14,15 @@ func VisitObjectStrings(obj interface{}, visitor func(string) string) {
 }
 
 func visitValue(v reflect.Value, visitor func(string) string) {
+	// you'll never be able to substitute on a nil.  Check the kind first or you'll accidentally
+	// end up panic-ing
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		if v.IsNil() {
+			return
+		}
+	}
+
 	switch v.Kind() {
 
 	case reflect.Ptr:
@@ -34,9 +43,12 @@ func visitValue(v reflect.Value, visitor func(string) string) {
 
 	case reflect.Map:
 		vt := v.Type().Elem()
-		for _, k := range v.MapKeys() {
-			val := visitUnsettableValues(vt, v.MapIndex(k), visitor)
-			v.SetMapIndex(k, val)
+		for _, oldKey := range v.MapKeys() {
+			newKey := visitUnsettableValues(oldKey.Type(), oldKey, visitor)
+			oldValue := v.MapIndex(oldKey)
+			newValue := visitUnsettableValues(vt, oldValue, visitor)
+			v.SetMapIndex(oldKey, reflect.Value{})
+			v.SetMapIndex(newKey, newValue)
 		}
 
 	case reflect.String:

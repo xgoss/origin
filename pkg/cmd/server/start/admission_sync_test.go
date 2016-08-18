@@ -10,27 +10,40 @@ import (
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/util/sets"
 
-	"github.com/openshift/origin/pkg/cmd/server/kubernetes"
+	"github.com/openshift/origin/pkg/cmd/server/origin"
+	imageadmission "github.com/openshift/origin/pkg/image/admission"
 )
 
 var admissionPluginsNotUsedByKube = sets.NewString(
 	"AlwaysAdmit",            // from kube, no need for this by default
 	"AlwaysDeny",             // from kube, no need for this by default
+	"AlwaysPullImages",       // from kube, not enabled by default.  This is only applicable to some environments.  This will ensure that containers cannot use pre-pulled copies of images without authorization.
 	"NamespaceAutoProvision", // from kube, it creates a namespace if a resource is created in a non-existent namespace.  We don't want this behavior
 	"SecurityContextDeny",    // from kube, it denies pods that want to use SCC capabilities.  We have different rules to allow this in openshift.
-	"DenyExecOnPrivileged",   // from kube, it denies exec to pods that have certain privileges.  This is superceded in origin by SCCExecRestrictions that checks against SCC rules.
+	"DenyExecOnPrivileged",   // from kube (deprecated, see below), it denies exec to pods that have certain privileges.  This is superseded in origin by SCCExecRestrictions that checks against SCC rules.
+	"DenyEscalatingExec",     // from kube, it denies exec to pods that have certain privileges.  This is superseded in origin by SCCExecRestrictions that checks against SCC rules.
+	"PodSecurityPolicy",      // from kube, this will eventually replace SecurityContextConstraints but for now origin does not use it.
+	"ResourceQuota",          // from kube, we replace this with quotaadmission.PluginName
 
-	"BuildByStrategy",          // from origin, only needed for managing builds, not kubernetes resources
-	"OriginNamespaceLifecycle", // from origin, only needed for rejecting openshift resources, so not needed by kube
+	"BuildByStrategy",                  // from origin, only needed for managing builds, not kubernetes resources
+	"BuildDefaults",                    // from origin, only needed for managing builds, not kubernetes resources
+	"BuildOverrides",                   // from origin, only needed for managing builds, not kubernetes resources
+	imageadmission.PluginName,          // from origin, used for limiting image sizes, not kubernetes resources
+	"openshift.io/JenkinsBootstrapper", // from origin, only needed for managing builds, not kubernetes resources
+	"OriginNamespaceLifecycle",         // from origin, only needed for rejecting openshift resources, so not needed by kube
+	"ProjectRequestLimit",              // from origin, used for limiting project requests by user (online use case)
+	"RunOnceDuration",                  // from origin, used for overriding the ActiveDeadlineSeconds for run-once pods
 
-	"NamespaceExists",  // superceded by NamespaceLifecycle
+	"NamespaceExists",  // superseded by NamespaceLifecycle
 	"InitialResources", // do we want this? https://github.com/kubernetes/kubernetes/blob/master/docs/proposals/initial-resources.md
+
+	"PersistentVolumeLabel", // do we want this? disable by default
 )
 
 func TestKubeAdmissionControllerUsage(t *testing.T) {
 	registeredKubePlugins := sets.NewString(admission.GetPlugins()...)
 
-	usedAdmissionPlugins := sets.NewString(kubernetes.AdmissionPlugins...)
+	usedAdmissionPlugins := sets.NewString(origin.KubeAdmissionPlugins...)
 
 	if missingPlugins := usedAdmissionPlugins.Difference(registeredKubePlugins); len(missingPlugins) != 0 {
 		t.Errorf("%v not found", missingPlugins.List())

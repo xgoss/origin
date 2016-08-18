@@ -1,34 +1,104 @@
 package controller
 
 import (
-	"fmt"
-	"time"
+	"errors"
+
+	"github.com/golang/glog"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/util"
+	apierrs "k8s.io/kubernetes/pkg/api/errors"
 
 	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/dockerregistry"
 	"github.com/openshift/origin/pkg/image/api"
 )
 
+var ErrNotImportable = errors.New("the specified stream cannot be imported")
+
 type ImportController struct {
-	streams  client.ImageStreamsNamespacer
-	mappings client.ImageStreamMappingsNamespacer
-	// injected for testing
-	client dockerregistry.Client
+	streams client.ImageStreamsNamespacer
 }
 
-// needsImport returns true if the provided image stream should have its tags imported.
-func needsImport(stream *api.ImageStream) bool {
-	if len(stream.Spec.DockerImageRepository) == 0 {
+// Notifier provides information about when the controller makes a decision
+type Notifier interface {
+	// Importing is invoked when the controller is going to import an image stream
+	Importing(stream *api.ImageStream)
+}
+
+// NotifierFunc implements Notifier
+type NotifierFunc func(stream *api.ImageStream)
+
+// Importing adapts NotifierFunc to Notifier
+func (fn NotifierFunc) Importing(stream *api.ImageStream) {
+	fn(stream)
+}
+
+// tagImportable is true if the given TagReference is importable by this controller
+func tagImportable(tagRef api.TagReference) bool {
+	if tagRef.From == nil {
 		return false
 	}
-	if stream.Annotations != nil && len(stream.Annotations[api.DockerImageRepositoryCheckAnnotation]) != 0 {
+	if tagRef.From.Kind != "DockerImage" || tagRef.Reference {
 		return false
 	}
 	return true
+}
+
+// tagNeedsImport is true if the observed tag generation for this tag is older than the
+// specified tag generation (if no tag generation is specified, the controller does not
+// need to import this tag).
+func tagNeedsImport(stream *api.ImageStream, tag string, tagRef api.TagReference, importWhenGenerationNil bool) bool {
+	if !tagImportable(tagRef) {
+		return false
+	}
+	if tagRef.Generation == nil {
+		return importWhenGenerationNil
+	}
+	return *tagRef.Generation > api.LatestObservedTagGeneration(stream, tag)
+}
+
+// needsImport returns true if the provided image stream should have tags imported. Partial is returned
+// as true if the spec.dockerImageRepository does not need to be refreshed (if only tags have to be imported).
+func needsImport(stream *api.ImageStream) (ok bool, partial bool) {
+	if stream.Annotations == nil || len(stream.Annotations[api.DockerImageRepositoryCheckAnnotation]) == 0 {
+		if len(stream.Spec.DockerImageRepository) > 0 {
+			return true, false
+		}
+		// for backwards compatibility, if any of our tags are importable, trigger a partial import when the
+		// annotation is cleared.
+		for _, tagRef := range stream.Spec.Tags {
+			if tagImportable(tagRef) {
+				return true, true
+			}
+		}
+	}
+	// find any tags with a newer generation than their status
+	for tag, tagRef := range stream.Spec.Tags {
+		if tagNeedsImport(stream, tag, tagRef, false) {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+// needsScheduling returns true if this image stream has any scheduled tags
+func needsScheduling(stream *api.ImageStream) bool {
+	for _, tagRef := range stream.Spec.Tags {
+		if tagImportable(tagRef) && tagRef.ImportPolicy.Scheduled {
+			return true
+		}
+	}
+	return false
+}
+
+// resetScheduledTags artificially increments the generation on the tags that should be imported.
+func resetScheduledTags(stream *api.ImageStream) {
+	next := stream.Generation + 1
+	for tag, tagRef := range stream.Spec.Tags {
+		if tagImportable(tagRef) && tagRef.ImportPolicy.Scheduled {
+			tagRef.Generation = &next
+			stream.Spec.Tags[tag] = tagRef
+		}
+	}
 }
 
 // retryCount is the number of times to retry on a conflict when updating an image stream
@@ -37,149 +107,90 @@ const retryCount = 2
 // Next processes the given image stream, looking for streams that have DockerImageRepository
 // set but have not yet been marked as "ready". If transient errors occur, err is returned but
 // the image stream is not modified (so it will be tried again later). If a permanent
-// failure occurs the image is marked with an annotation. The tags of the original spec image
-// are left as is (those are updated through status).
-func (c *ImportController) Next(stream *api.ImageStream) error {
-	if !needsImport(stream) {
+// failure occurs the image is marked with an annotation and conditions are set on the status
+// tags. The tags of the original spec image are left as is (those are updated through status).
+//
+// There are 3 scenarios:
+//
+// 1. spec.DockerImageRepository defined without any tags results in all tags being imported
+//    from upstream image repository
+//
+// 2. spec.DockerImageRepository + tags defined - import all tags from upstream image repository,
+//    and all the specified which (if name matches) will overwrite the default ones.
+//    Additionally:
+//    for kind == DockerImage import or reference underlying image, exact tag (not provided means latest),
+//    for kind != DockerImage reference tag from the same or other ImageStream
+//
+// 3. spec.DockerImageRepository not defined - import tags per each definition.
+//
+// Notifier, if passed, will be invoked if the stream is going to be imported.
+func (c *ImportController) Next(stream *api.ImageStream, notifier Notifier) error {
+	ok, partial := needsImport(stream)
+	if !ok {
 		return nil
 	}
-	name := stream.Spec.DockerImageRepository
+	glog.V(3).Infof("Importing stream %s/%s partial=%t...", stream.Namespace, stream.Name, partial)
 
-	ref, err := api.ParseDockerImageReference(name)
-	if err != nil {
-		err = fmt.Errorf("invalid docker image repository, cannot import data: %v", err)
-		util.HandleError(err)
-		return c.done(stream, err.Error(), retryCount)
+	if notifier != nil {
+		notifier.Importing(stream)
 	}
 
-	insecure := stream.Annotations != nil && stream.Annotations[api.InsecureRepositoryAnnotation] == "true"
-
-	client := c.client
-	if client == nil {
-		client = dockerregistry.NewClient()
+	isi := &api.ImageStreamImport{
+		ObjectMeta: kapi.ObjectMeta{
+			Name:            stream.Name,
+			Namespace:       stream.Namespace,
+			ResourceVersion: stream.ResourceVersion,
+			UID:             stream.UID,
+		},
+		Spec: api.ImageStreamImportSpec{Import: true},
 	}
-	conn, err := client.Connect(ref.Registry, insecure)
-	if err != nil {
-		return err
-	}
-	tags, err := conn.ImageTags(ref.Namespace, ref.Name)
-	switch {
-	case dockerregistry.IsRepositoryNotFound(err), dockerregistry.IsRegistryNotFound(err):
-		return c.done(stream, err.Error(), retryCount)
-	case err != nil:
-		return err
-	}
-
-	imageToTag := make(map[string][]string)
-	for tag, image := range tags {
-		if specTag, ok := stream.Spec.Tags[tag]; ok && specTag.From != nil {
-			// spec tag is set to track another tag - do not import
+	for tag, tagRef := range stream.Spec.Tags {
+		if !(partial && tagImportable(tagRef)) && !tagNeedsImport(stream, tag, tagRef, true) {
 			continue
 		}
-
-		imageToTag[image] = append(imageToTag[image], tag)
+		isi.Spec.Images = append(isi.Spec.Images, api.ImageImportSpec{
+			From:         kapi.ObjectReference{Kind: "DockerImage", Name: tagRef.From.Name},
+			To:           &kapi.LocalObjectReference{Name: tag},
+			ImportPolicy: tagRef.ImportPolicy,
+		})
 	}
-
-	// no tags to import
-	if len(imageToTag) == 0 {
-		return c.done(stream, "", retryCount)
-	}
-
-	for id, tags := range imageToTag {
-		dockerImage, err := conn.ImageByID(ref.Namespace, ref.Name, id)
-		switch {
-		case dockerregistry.IsRepositoryNotFound(err), dockerregistry.IsRegistryNotFound(err):
-			return c.done(stream, err.Error(), retryCount)
-		case dockerregistry.IsImageNotFound(err):
-			continue
-		case err != nil:
-			return err
-		}
-		var image api.DockerImage
-		if err := kapi.Scheme.Convert(&dockerImage.Image, &image); err != nil {
-			err = fmt.Errorf("could not convert image: %#v", err)
-			util.HandleError(err)
-			return c.done(stream, err.Error(), retryCount)
-		}
-
-		idTagPresent := false
-		if len(tags) > 1 && hasTag(tags, id) {
-			// only set to true if we have at least 1 tag that isn't the image id
-			idTagPresent = true
-		}
-		for _, tag := range tags {
-			if idTagPresent && id == tag {
-				continue
-			}
-
-			pullRef := api.DockerImageReference{
-				Registry:  ref.Registry,
-				Namespace: ref.Namespace,
-				Name:      ref.Name,
-				Tag:       tag,
-			}
-			// prefer to pull by ID always
-			if dockerImage.PullByID {
-				// if the registry indicates the image is pullable by ID, clear the tag
-				pullRef.Tag = ""
-				pullRef.ID = dockerImage.ID
-			} else if idTagPresent {
-				// if there is a tag for the image by its id (tag=tag), we can pull by id
-				pullRef.Tag = id
-			}
-
-			mapping := &api.ImageStreamMapping{
-				ObjectMeta: kapi.ObjectMeta{
-					Name:      stream.Name,
-					Namespace: stream.Namespace,
-				},
-				Tag: tag,
-				Image: api.Image{
-					ObjectMeta: kapi.ObjectMeta{
-						Name: dockerImage.ID,
-					},
-					DockerImageReference: pullRef.String(),
-					DockerImageMetadata:  image,
-				},
-			}
-			if err := c.mappings.ImageStreamMappings(stream.Namespace).Create(mapping); err != nil {
-				if errors.IsNotFound(err) {
-					return c.done(stream, err.Error(), retryCount)
-				}
-				return err
-			}
+	if repo := stream.Spec.DockerImageRepository; !partial && len(repo) > 0 {
+		insecure := stream.Annotations[api.InsecureRepositoryAnnotation] == "true"
+		isi.Spec.Repository = &api.RepositoryImportSpec{
+			From:         kapi.ObjectReference{Kind: "DockerImage", Name: repo},
+			ImportPolicy: api.TagImportPolicy{Insecure: insecure},
 		}
 	}
-
-	// we've completed our updates
-	return c.done(stream, "", retryCount)
+	result, err := c.streams.ImageStreams(stream.Namespace).Import(isi)
+	if err != nil {
+		if apierrs.IsNotFound(err) && client.IsStatusErrorKind(err, "imageStream") {
+			return ErrNotImportable
+		}
+		glog.V(4).Infof("Import stream %s/%s partial=%t error: %v", stream.Namespace, stream.Name, partial, err)
+	} else {
+		glog.V(5).Infof("Import stream %s/%s partial=%t import: %#v", stream.Namespace, stream.Name, partial, result.Status.Import)
+	}
+	return err
 }
 
-// done marks the stream as being processed due to an error or failure condition
-func (c *ImportController) done(stream *api.ImageStream, reason string, retry int) error {
-	if len(reason) == 0 {
-		reason = util.Now().UTC().Format(time.RFC3339)
-	}
-	if stream.Annotations == nil {
-		stream.Annotations = make(map[string]string)
-	}
-	stream.Annotations[api.DockerImageRepositoryCheckAnnotation] = reason
-	if _, err := c.streams.ImageStreams(stream.Namespace).Update(stream); err != nil && !errors.IsNotFound(err) {
-		if errors.IsConflict(err) && retry > 0 {
-			if stream, err := c.streams.ImageStreams(stream.Namespace).Get(stream.Name); err == nil {
-				return c.done(stream, reason, retry-1)
-			}
+func (c *ImportController) NextTimedByName(namespace, name string) error {
+	stream, err := c.streams.ImageStreams(namespace).Get(name)
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			return ErrNotImportable
 		}
 		return err
 	}
-	return nil
+	return c.NextTimed(stream)
 }
 
-func hasTag(tags []string, tag string) bool {
-	for _, s := range tags {
-		if s == tag {
-			return true
-		}
+func (c *ImportController) NextTimed(stream *api.ImageStream) error {
+	if !needsScheduling(stream) {
+		return ErrNotImportable
 	}
-	return false
+	resetScheduledTags(stream)
+
+	glog.V(3).Infof("Scheduled import of stream %s/%s...", stream.Namespace, stream.Name)
+
+	return c.Next(stream, nil)
 }

@@ -7,9 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/fields"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/labels"
 
 	"github.com/openshift/origin/pkg/client"
 	cliconfig "github.com/openshift/origin/pkg/cmd/cli/config"
@@ -22,6 +21,11 @@ type NewProjectOptions struct {
 	DisplayName string
 	Description string
 
+	Name   string
+	Server string
+
+	SkipConfigWrite bool
+
 	Client client.Interface
 
 	ProjectOptions *ProjectOptions
@@ -32,22 +36,23 @@ const (
 	requestProjectLong = `
 Create a new project for yourself
 
-Assuming your cluster admin has granted you permission, this command will create a new project
-for you and assign you as the project admin. If your administrator has not given you permission to
-create your own projects, contact your system administrator.
+If your administrator allows self-service, this command will create a new project for you and assign you
+as the project admin.
 
-After your project is created it will be made your default project in your config.`
+After your project is created it will become the default project in your config.`
 
 	requestProjectExample = `  # Create a new project with minimal information
-  $ %[1]s web-team-dev
+  %[1]s web-team-dev
 
   # Create a new project with a display name and description
-  $ %[1]s web-team-dev --display-name="Web Team Development" --description="Development project for the web team."`
+  %[1]s web-team-dev --display-name="Web Team Development" --description="Development project for the web team."`
 )
 
-func NewCmdRequestProject(name, fullName, ocLoginName, ocProjectName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
+func NewCmdRequestProject(baseName, name, ocLoginName, ocProjectName string, f *clientcmd.Factory, out io.Writer) *cobra.Command {
 	options := &NewProjectOptions{}
 	options.Out = out
+	options.Name = baseName
+	fullName := fmt.Sprintf("%s %s", baseName, name)
 
 	cmd := &cobra.Command{
 		Use:     fmt.Sprintf("%s NAME [--display-name=DISPLAYNAME] [--description=DESCRIPTION]", name),
@@ -71,6 +76,7 @@ func NewCmdRequestProject(name, fullName, ocLoginName, ocProjectName string, f *
 
 	cmd.Flags().StringVar(&options.DisplayName, "display-name", "", "Project display name")
 	cmd.Flags().StringVar(&options.Description, "description", "", "Project description")
+	cmd.Flags().BoolVar(&options.SkipConfigWrite, "skip-config-write", false, "If true, the project will not be set as a cluster entry in kubeconfig after being created")
 
 	return cmd
 }
@@ -84,10 +90,18 @@ func (o *NewProjectOptions) complete(cmd *cobra.Command, f *clientcmd.Factory) e
 
 	o.ProjectName = args[0]
 
-	o.ProjectOptions = &ProjectOptions{}
-	o.ProjectOptions.PathOptions = cliconfig.NewPathOptions(cmd)
-	if err := o.ProjectOptions.Complete(f, []string{""}, o.Out); err != nil {
-		return err
+	if !o.SkipConfigWrite {
+		o.ProjectOptions = &ProjectOptions{}
+		o.ProjectOptions.PathOptions = cliconfig.NewPathOptions(cmd)
+		if err := o.ProjectOptions.Complete(f, []string{""}, o.Out); err != nil {
+			return err
+		}
+	} else {
+		clientConfig, err := f.OpenShiftClientConfig.ClientConfig()
+		if err != nil {
+			return err
+		}
+		o.Server = clientConfig.Host
 	}
 
 	return nil
@@ -95,7 +109,7 @@ func (o *NewProjectOptions) complete(cmd *cobra.Command, f *clientcmd.Factory) e
 
 func (o *NewProjectOptions) Run() error {
 	// TODO eliminate this when we get better forbidden messages
-	_, err := o.Client.ProjectRequests().List(labels.Everything(), fields.Everything())
+	_, err := o.Client.ProjectRequests().List(kapi.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -114,10 +128,26 @@ func (o *NewProjectOptions) Run() error {
 	if o.ProjectOptions != nil {
 		o.ProjectOptions.ProjectName = project.Name
 		o.ProjectOptions.ProjectOnly = true
+		o.ProjectOptions.SkipAccessValidation = true
 
 		if err := o.ProjectOptions.RunProject(); err != nil {
 			return err
 		}
+
+		fmt.Fprintf(o.Out, `
+You can add applications to this project with the 'new-app' command. For example, try:
+
+    %[1]s new-app centos/ruby-22-centos7~https://github.com/openshift/ruby-ex.git
+
+to build a new example application in Ruby.
+`, o.Name)
+	} else {
+		fmt.Fprintf(o.Out, `Project %[2]q created on server %[3]q.
+
+To switch to this project and start adding applications, use:
+
+    %[1]s project %[2]s
+`, o.Name, o.ProjectName, o.Server)
 	}
 
 	return nil

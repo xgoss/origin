@@ -40,6 +40,9 @@ const (
 func AddBuildEdges(g osgraph.MutableUniqueGraph, node *buildgraph.BuildConfigNode) {
 	for _, n := range g.(graph.Graph).Nodes() {
 		if buildNode, ok := n.(*buildgraph.BuildNode); ok {
+			if buildNode.Build.Namespace != node.BuildConfig.Namespace {
+				continue
+			}
 			if belongsToBuildConfig(node.BuildConfig, buildNode.Build) {
 				g.AddEdge(node, buildNode, BuildEdgeKind)
 			}
@@ -79,6 +82,9 @@ func imageRefNode(g osgraph.MutableUniqueGraph, ref *kapi.ObjectReference, bc *b
 
 // AddOutputEdges links the build config to its output image node.
 func AddOutputEdges(g osgraph.MutableUniqueGraph, node *buildgraph.BuildConfigNode) {
+	if node.BuildConfig.Spec.Output.To == nil {
+		return
+	}
 	out := imageRefNode(g, node.BuildConfig.Spec.Output.To, node.BuildConfig)
 	g.AddEdge(node, out, BuildOutputEdgeKind)
 }
@@ -88,7 +94,7 @@ func AddInputEdges(g osgraph.MutableUniqueGraph, node *buildgraph.BuildConfigNod
 	if in := buildgraph.EnsureSourceRepositoryNode(g, node.BuildConfig.Spec.Source); in != nil {
 		g.AddEdge(in, node, BuildInputEdgeKind)
 	}
-	inputImage := buildutil.GetImageStreamForStrategy(node.BuildConfig.Spec.Strategy)
+	inputImage := buildutil.GetInputReference(node.BuildConfig.Spec.Strategy)
 	if input := imageRefNode(g, inputImage, node.BuildConfig); input != nil {
 		g.AddEdge(input, node, BuildInputImageEdgeKind)
 	}
@@ -102,7 +108,7 @@ func AddTriggerEdges(g osgraph.MutableUniqueGraph, node *buildgraph.BuildConfigN
 		}
 		from := trigger.ImageChange.From
 		if trigger.ImageChange.From == nil {
-			from = buildutil.GetImageStreamForStrategy(node.BuildConfig.Spec.Strategy)
+			from = buildutil.GetInputReference(node.BuildConfig.Spec.Strategy)
 		}
 		triggerNode := imageRefNode(g, from, node.BuildConfig)
 		g.AddEdge(triggerNode, node, BuildTriggerImageEdgeKind)

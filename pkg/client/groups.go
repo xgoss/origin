@@ -1,9 +1,10 @@
 package client
 
 import (
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/watch"
+
 	userapi "github.com/openshift/origin/pkg/user/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 )
 
 // GroupsInterface has methods to work with Group resources
@@ -13,11 +14,12 @@ type GroupsInterface interface {
 
 // GroupInterface exposes methods on group resources.
 type GroupInterface interface {
-	List(label labels.Selector, field fields.Selector) (*userapi.GroupList, error)
+	List(opts kapi.ListOptions) (*userapi.GroupList, error)
 	Get(name string) (*userapi.Group, error)
 	Create(group *userapi.Group) (*userapi.Group, error)
 	Update(group *userapi.Group) (*userapi.Group, error)
 	Delete(name string) error
+	Watch(opts kapi.ListOptions) (watch.Interface, error)
 }
 
 // groups implements GroupInterface interface
@@ -33,12 +35,11 @@ func newGroups(c *Client) *groups {
 }
 
 // List returns a list of groups that match the label and field selectors.
-func (c *groups) List(label labels.Selector, field fields.Selector) (result *userapi.GroupList, err error) {
+func (c *groups) List(opts kapi.ListOptions) (result *userapi.GroupList, err error) {
 	result = &userapi.GroupList{}
 	err = c.r.Get().
 		Resource("groups").
-		LabelsSelectorParam(label).
-		FieldsSelectorParam(field).
+		VersionedParams(&opts, kapi.ParameterCodec).
 		Do().
 		Into(result)
 	return
@@ -68,4 +69,13 @@ func (c *groups) Update(group *userapi.Group) (result *userapi.Group, err error)
 // Delete takes the name of the groups, and returns an error if one occurs during deletion of the groups
 func (c *groups) Delete(name string) error {
 	return c.r.Delete().Resource("groups").Name(name).Do().Error()
+}
+
+// Watch returns a watch.Interface that watches the requested groups.
+func (c *groups) Watch(opts kapi.ListOptions) (watch.Interface, error) {
+	return c.r.Get().
+		Prefix("watch").
+		Resource("groups").
+		VersionedParams(&opts, kapi.ParameterCodec).
+		Watch()
 }

@@ -1,16 +1,23 @@
 #debuginfo not supported with Go
 %global debug_package %{nil}
+# modifying the Go binaries breaks the DWARF debugging
+%global __os_install_post %{_rpmconfigdir}/brp-compress
+
 %global gopath      %{_datadir}/gocode
 %global import_path github.com/openshift/origin
+# The following should only be used for cleanup of sdn-ovs upgrades
 %global kube_plugin_path /usr/libexec/kubernetes/kubelet-plugins/net/exec/redhat~openshift-ovs-subnet
-%global sdn_import_path github.com/openshift/openshift-sdn
 
 # docker_version is the version of docker requires by packages
-%global docker_version 1.6.2
+%global docker_version 1.9.1
 # tuned_version is the version of tuned requires by packages
 %global tuned_version  2.3
 # openvswitch_version is the version of openvswitch requires by packages
 %global openvswitch_version 2.3.1
+# this is the version we obsolete up to. The packaging changed for Origin
+# 1.0.6 and OSE 3.1 such that 'openshift' package names were no longer used.
+%global package_refector_version 3.0.2.900
+%global golang_version 1.6.2
 # %commit and %ldflags are intended to be set by tito custom builders provided
 # in the .tito/lib directory. The values in this spec file will not be kept up to date.
 %{!?commit:
@@ -21,6 +28,18 @@
 %{!?ldflags:
 %global ldflags -X github.com/openshift/origin/pkg/version.majorFromGit 0 -X github.com/openshift/origin/pkg/version.minorFromGit 0+ -X github.com/openshift/origin/pkg/version.versionFromGit v0.0.1 -X github.com/openshift/origin/pkg/version.commitFromGit 86b5e46 -X k8s.io/kubernetes/pkg/version.gitCommit 6241a21 -X k8s.io/kubernetes/pkg/version.gitVersion v0.11.0-330-g6241a21
 }
+# os_git_vars needed to run hack scripts during rpm builds
+# TODO Automatically generate these using tito
+#  For man pages, blank is fine
+%{!?os_git_vars:
+%global os_git_vars OS_GIT_VERSION='' OS_GIT_COMMIT='' OS_GIT_MAJOR='' OS_GIT_MINOR=''
+}
+
+%if 0%{?fedora} || 0%{?epel}
+%global make_redistributable 0
+%else
+%global make_redistributable 1
+%endif
 
 %if "%{dist}" == ".el7aos"
 %global package_name atomic-openshift
@@ -41,12 +60,29 @@ URL:            https://%{import_path}
 ExclusiveArch:  x86_64
 Source0:        https://%{import_path}/archive/%{commit}/%{name}-%{version}.tar.gz
 BuildRequires:  systemd
-BuildRequires:  golang >= 1.4
+BuildRequires:  golang = %{golang_version}
+BuildRequires:  krb5-devel
+BuildRequires:  rsync
 Requires:       %{name}-clients = %{version}-%{release}
-Obsoletes:      openshift < 1.0.6
+Requires:       iptables
+Obsoletes:      openshift < %{package_refector_version}
+
+#
+# The following Bundled Provides entries are populated automatically by the
+# OpenShift Origin tito custom builder found here:
+#   https://github.com/openshift/origin/blob/master/.tito/lib/origin/builder/
+#
+# These are defined as per:
+# https://fedoraproject.org/wiki/Packaging:Guidelines#Bundling_and_Duplication_of_system_libraries
+#
+### AUTO-BUNDLED-GEN-ENTRY-POINT
 
 %description
-%{summary}
+Origin is a distribution of Kubernetes optimized for enterprise application
+development and deployment, used by OpenShift 3 and Atomic Enterprise. Origin
+adds developer and operational centric tools on top of Kubernetes to enable
+rapid application development, easy deployment and scaling, and long-term
+lifecycle maintenance for small and large teams and applications.
 
 %package master
 Summary:        %{product_name} Master
@@ -54,24 +90,32 @@ Requires:       %{name} = %{version}-%{release}
 Requires(post):   systemd
 Requires(preun):  systemd
 Requires(postun): systemd
-Obsoletes:      openshift-master < 1.0.6
+Obsoletes:      openshift-master < %{package_refector_version}
 
 %description master
+%{summary}
+
+%package tests
+Summary: %{product_name} Test Suite
+Requires:       %{name} = %{version}-%{release}
+
+%description tests
 %{summary}
 
 %package node
 Summary:        %{product_name} Node
 Requires:       %{name} = %{version}-%{release}
-Requires:       docker-io >= %{docker_version}
+Requires:       docker >= %{docker_version}
 Requires:       tuned-profiles-%{name}-node = %{version}-%{release}
 Requires:       util-linux
 Requires:       socat
 Requires:       nfs-utils
 Requires:       ethtool
+Requires:       device-mapper-persistent-data >= 0.6.2
 Requires(post):   systemd
 Requires(preun):  systemd
 Requires(postun): systemd
-Obsoletes:      openshift-node < 1.0.6
+Obsoletes:      openshift-node < %{package_refector_version}
 
 %description node
 %{summary}
@@ -79,26 +123,27 @@ Obsoletes:      openshift-node < 1.0.6
 %package -n tuned-profiles-%{name}-node
 Summary:        Tuned profiles for %{product_name} Node hosts
 Requires:       tuned >= %{tuned_version}
-Obsoletes:      tuned-profiles-openshift-node < 1.0.6
+Obsoletes:      tuned-profiles-openshift-node < %{package_refector_version}
 
 %description -n tuned-profiles-%{name}-node
 %{summary}
 
 %package clients
 Summary:        %{product_name} Client binaries for Linux
-Obsoletes:      openshift-clients < 1.0.6
+Obsoletes:      openshift-clients < %{package_refector_version}
+Requires:       git
 
 %description clients
 %{summary}
 
+%if 0%{?make_redistributable}
 %package clients-redistributable
 Summary:        %{product_name} Client binaries for Linux, Mac OSX, and Windows
-BuildRequires:  golang-pkg-darwin-amd64
-BuildRequires:  golang-pkg-windows-386
-Obsoletes:      openshift-clients-redistributable < 1.0.6
+Obsoletes:      openshift-clients-redistributable < %{package_refector_version}
 
 %description clients-redistributable
 %{summary}
+%endif
 
 %package dockerregistry
 Summary:        Docker Registry v2 for %{product_name}
@@ -109,7 +154,6 @@ Requires:       %{name} = %{version}-%{release}
 
 %package pod
 Summary:        %{product_name} Pod
-Requires:       %{name} = %{version}-%{release}
 
 %description pod
 %{summary}
@@ -120,7 +164,9 @@ Requires:         openvswitch >= %{openvswitch_version}
 Requires:         %{name}-node = %{version}-%{release}
 Requires:         bridge-utils
 Requires:         ethtool
-Obsoletes:        openshift-sdn-ovs < 1.0.6
+Requires:         procps-ng
+Requires:         iproute
+Obsoletes:        openshift-sdn-ovs < %{package_refector_version}
 
 %description sdn-ovs
 %{summary}
@@ -141,28 +187,33 @@ popd
 
 
 # Gaming the GOPATH to include the third party bundled libs at build
-# time. This is bad and I feel bad.
+# time.
 mkdir _thirdpartyhacks
 pushd _thirdpartyhacks
     ln -s \
-        $(dirs +1 -l)/Godeps/_workspace/src/ \
+        $(dirs +1 -l)/vendor/ \
             src
 popd
 export GOPATH=$(pwd)/_build:$(pwd)/_thirdpartyhacks:%{buildroot}%{gopath}:%{gopath}
 # Build all linux components we care about
-for cmd in oc openshift dockerregistry
-do
-        go install -ldflags "%{ldflags}" %{import_path}/cmd/${cmd}
-done
+go install -ldflags "%{ldflags}" %{import_path}/cmd/dockerregistry
+go install -ldflags "%{ldflags}" -tags=gssapi %{import_path}/cmd/openshift
+go install -ldflags "%{ldflags}" -tags=gssapi %{import_path}/cmd/oc
+go test -c -o _build/bin/extended.test -ldflags "%{ldflags}" %{import_path}/test/extended
 
+%if 0%{?make_redistributable}
 # Build clients for other platforms
-GOOS=windows GOARCH=386 go install -ldflags "%{ldflags}" %{import_path}/cmd/oc
-GOOS=darwin GOARCH=amd64 go install -ldflags "%{ldflags}" %{import_path}/cmd/oc
+GOOS=windows GOARCH=386 go install -pkgdir %{buildroot}/pkgdir -ldflags "%{ldflags}" %{import_path}/cmd/oc
+GOOS=darwin GOARCH=amd64 go install -pkgdir %{buildroot}/pkgdir -ldflags "%{ldflags}" %{import_path}/cmd/oc
+%endif
 
 #Build our pod
 pushd images/pod/
     go build -ldflags "%{ldflags}" pod.go
 popd
+
+# Create/Update man pages
+%{os_git_vars} hack/update-generated-docs.sh
 
 %install
 
@@ -174,12 +225,16 @@ do
   echo "+++ INSTALLING ${bin}"
   install -p -m 755 _build/bin/${bin} %{buildroot}%{_bindir}/${bin}
 done
+install -d %{buildroot}%{_libexecdir}/%{name}
+install -p -m 755 _build/bin/extended.test %{buildroot}%{_libexecdir}/%{name}/
 
+%if 0%{?make_redistributable}
 # Install client executable for windows and mac
 install -d %{buildroot}%{_datadir}/%{name}/{linux,macosx,windows}
 install -p -m 755 _build/bin/oc %{buildroot}%{_datadir}/%{name}/linux/oc
 install -p -m 755 _build/bin/darwin_amd64/oc %{buildroot}/%{_datadir}/%{name}/macosx/oc
 install -p -m 755 _build/bin/windows_386/oc.exe %{buildroot}/%{_datadir}/%{name}/windows/oc.exe
+%endif
 
 #Install pod
 install -p -m 755 images/pod/pod %{buildroot}%{_bindir}/
@@ -188,12 +243,27 @@ install -d -m 0755 %{buildroot}%{_unitdir}
 
 mkdir -p %{buildroot}%{_sysconfdir}/sysconfig
 
-for cmd in openshift-router openshift-deploy openshift-sti-build openshift-docker-build origin atomic-enterprise \
-  oadm kubernetes kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler ; do
-    ln -s %{_bindir}/openshift %{buildroot}%{_bindir}/$cmd
+for cmd in \
+    atomic-enterprise \
+    kube-apiserver \
+    kube-controller-manager \
+    kube-proxy \
+    kube-scheduler \
+    kubelet \
+    kubernetes \
+    oadm \
+    openshift-deploy \
+    openshift-docker-build \
+    openshift-f5-router \
+    openshift-recycle \
+    openshift-router \
+    openshift-sti-build \
+    origin
+do
+    ln -s openshift %{buildroot}%{_bindir}/$cmd
 done
 
-ln -s %{_bindir}/oc %{buildroot}%{_bindir}/kubectl
+ln -s oc %{buildroot}%{_bindir}/kubectl
 
 install -d -m 0755 %{buildroot}%{_sysconfdir}/origin/{master,node}
 
@@ -206,53 +276,76 @@ install -m 0644 contrib/systemd/origin-node.sysconfig %{buildroot}%{_sysconfdir}
 install -d -m 0755 %{buildroot}%{_prefix}/lib/tuned/%{name}-node-{guest,host}
 install -m 0644 contrib/tuned/origin-node-guest/tuned.conf %{buildroot}%{_prefix}/lib/tuned/%{name}-node-guest/tuned.conf
 install -m 0644 contrib/tuned/origin-node-host/tuned.conf %{buildroot}%{_prefix}/lib/tuned/%{name}-node-host/tuned.conf
+
+# Install man1 man pages
+install -d -m 0755 %{buildroot}%{_mandir}/man1
+install -m 0644 docs/man/man1/* %{buildroot}%{_mandir}/man1/
+
+# Patch and install the manpage for tuned profiles on aos
 install -d -m 0755 %{buildroot}%{_mandir}/man7
+%if "%{dist}" == ".el7aos"
+%{__sed} -e 's|origin-node|atomic-openshift-node|g' \
+ -e 's|ORIGIN_NODE|ATOMIC_OPENSHIFT_NODE|' \
+ contrib/tuned/man/tuned-profiles-origin-node.7 > %{buildroot}%{_mandir}/man7/tuned-profiles-%{name}-node.7
+%else
 install -m 0644 contrib/tuned/man/tuned-profiles-origin-node.7 %{buildroot}%{_mandir}/man7/tuned-profiles-%{name}-node.7
+%endif
 
 mkdir -p %{buildroot}%{_sharedstatedir}/origin
 
 
 # Install sdn scripts
-install -d -m 0755 %{buildroot}%{kube_plugin_path}
 install -d -m 0755 %{buildroot}%{_unitdir}/docker.service.d
 install -p -m 0644 contrib/systemd/docker-sdn-ovs.conf %{buildroot}%{_unitdir}/docker.service.d/
-pushd _thirdpartyhacks/src/%{sdn_import_path}/ovssubnet/controller/kube/bin
-   install -p -m 755 openshift-ovs-subnet %{buildroot}%{kube_plugin_path}/openshift-ovs-subnet
-   install -p -m 755 openshift-sdn-kube-subnet-setup.sh %{buildroot}%{_bindir}/openshift-sdn-kube-subnet-setup.sh
-popd
-pushd _thirdpartyhacks/src/%{sdn_import_path}/ovssubnet/controller/multitenant/bin
-   install -p -m 755 openshift-ovs-multitenant %{buildroot}%{_bindir}/openshift-ovs-multitenant
-   install -p -m 755 openshift-sdn-multitenant-setup.sh %{buildroot}%{_bindir}/openshift-sdn-multitenant-setup.sh
+pushd pkg/sdn/plugin/bin
+   install -p -m 755 openshift-sdn-ovs %{buildroot}%{_bindir}/openshift-sdn-ovs
+   install -p -m 755 openshift-sdn-docker-setup.sh %{buildroot}%{_bindir}/openshift-sdn-docker-setup.sh
 popd
 install -d -m 0755 %{buildroot}%{_unitdir}/%{name}-node.service.d
 install -p -m 0644 contrib/systemd/openshift-sdn-ovs.conf %{buildroot}%{_unitdir}/%{name}-node.service.d/openshift-sdn-ovs.conf
 
 # Install bash completions
 install -d -m 755 %{buildroot}%{_sysconfdir}/bash_completion.d/
-install -p -m 644 contrib/completions/bash/* %{buildroot}%{_sysconfdir}/bash_completion.d/
-# Generate atomic-enterprise bash completions
-%{__sed} -e "s|openshift|atomic-enterprise|g" contrib/completions/bash/openshift > %{buildroot}%{_sysconfdir}/bash_completion.d/atomic-enterprise
+for bin in oadm oc openshift atomic-enterprise
+do
+  echo "+++ INSTALLING BASH COMPLETIONS FOR ${bin} "
+  %{buildroot}%{_bindir}/${bin} completion bash > %{buildroot}%{_sysconfdir}/bash_completion.d/${bin}
+  chmod 644 %{buildroot}%{_sysconfdir}/bash_completion.d/${bin}
+done
+
+# Install origin-accounting
+install -d -m 755 %{buildroot}%{_sysconfdir}/systemd/system.conf.d/
+install -p -m 644 contrib/systemd/origin-accounting.conf %{buildroot}%{_sysconfdir}/systemd/system.conf.d/
 
 %files
-%defattr(-,root,root,-)
-%doc README.md LICENSE
+%doc README.md
+%license LICENSE
 %{_bindir}/openshift
-%{_bindir}/openshift-router
-%{_bindir}/openshift-deploy
-%{_bindir}/openshift-sti-build
-%{_bindir}/openshift-docker-build
-%{_bindir}/origin
 %{_bindir}/atomic-enterprise
-%{_bindir}/oadm
-%{_bindir}/kubernetes
-%{_bindir}/kubelet
-%{_bindir}/kube-proxy
 %{_bindir}/kube-apiserver
 %{_bindir}/kube-controller-manager
+%{_bindir}/kube-proxy
 %{_bindir}/kube-scheduler
+%{_bindir}/kubelet
+%{_bindir}/kubernetes
+%{_bindir}/oadm
+%{_bindir}/openshift-deploy
+%{_bindir}/openshift-docker-build
+%{_bindir}/openshift-f5-router
+%{_bindir}/openshift-recycle
+%{_bindir}/openshift-router
+%{_bindir}/openshift-sti-build
+%{_bindir}/origin
 %{_sharedstatedir}/origin
-%{_sysconfdir}/bash_completion.d/*
+%{_sysconfdir}/bash_completion.d/atomic-enterprise
+%{_sysconfdir}/bash_completion.d/oadm
+%{_sysconfdir}/bash_completion.d/openshift
+%defattr(-,root,root,0700)
 %dir %config(noreplace) %{_sysconfdir}/origin
+%ghost %dir %config(noreplace) %{_sysconfdir}/origin
+%ghost %config(noreplace) %{_sysconfdir}/origin/.config_managed
+%{_mandir}/man1/oadm*
+%{_mandir}/man1/openshift*
 
 %pre
 # If /etc/openshift exists and /etc/origin doesn't, symlink it to /etc/origin
@@ -267,11 +360,15 @@ if [ -d "%{_sharedstatedir}/openshift" ]; then
   fi
 fi
 
+%files tests
+%{_libexecdir}/%{name}
+%{_libexecdir}/%{name}/extended.test
+
 
 %files master
-%defattr(-,root,root,-)
 %{_unitdir}/%{name}-master.service
 %config(noreplace) %{_sysconfdir}/sysconfig/%{name}-master
+%defattr(-,root,root,0700)
 %config(noreplace) %{_sysconfdir}/origin/master
 %ghost %config(noreplace) %{_sysconfdir}/origin/admin.crt
 %ghost %config(noreplace) %{_sysconfdir}/origin/admin.key
@@ -300,17 +397,14 @@ fi
 %ghost %config(noreplace) %{_sysconfdir}/origin/policy.json
 %ghost %config(noreplace) %{_sysconfdir}/origin/serviceaccounts.private.key
 %ghost %config(noreplace) %{_sysconfdir}/origin/serviceaccounts.public.key
+%ghost %config(noreplace) %{_sysconfdir}/origin/.config_managed
 
 %post master
-%systemd_post %{basename:%{name}-master.service}
+%systemd_post %{name}-master.service
 # Create master config and certs if both do not exist
 if [[ ! -e %{_sysconfdir}/origin/master/master-config.yaml &&
      ! -e %{_sysconfdir}/origin/master/ca.crt ]]; then
-%if "%{dist}" == ".el7aos"
-  %{_bindir}/atomic-enterprise start master --write-config=%{_sysconfdir}/origin/master
-%else
   %{_bindir}/openshift start master --write-config=%{_sysconfdir}/origin/master
-%endif
   # Create node configs if they do not already exist
   if ! find %{_sysconfdir}/origin/ -type f -name "node-config.yaml" | grep -E "node-config.yaml"; then
     %{_bindir}/oadm create-node-config --node-dir=%{_sysconfdir}/origin/node/ --node=localhost --hostnames=localhost,127.0.0.1 --node-client-certificate-authority=%{_sysconfdir}/origin/master/ca.crt --signer-cert=%{_sysconfdir}/origin/master/ca.crt --signer-key=%{_sysconfdir}/origin/master/ca.key --signer-serial=%{_sysconfdir}/origin/master/ca.serial.txt --certificate-authority=%{_sysconfdir}/origin/master/ca.crt
@@ -321,37 +415,51 @@ fi
 
 
 %preun master
-%systemd_preun %{basename:%{name}-master.service}
+%systemd_preun %{name}-master.service
 
 %postun master
 %systemd_postun
 
 %files node
-%defattr(-,root,root,-)
 %{_unitdir}/%{name}-node.service
+%{_sysconfdir}/systemd/system.conf.d/origin-accounting.conf
 %config(noreplace) %{_sysconfdir}/sysconfig/%{name}-node
+%defattr(-,root,root,0700)
 %config(noreplace) %{_sysconfdir}/origin/node
+%ghost %config(noreplace) %{_sysconfdir}/origin/node/node-config.yaml
+%ghost %config(noreplace) %{_sysconfdir}/origin/.config_managed
 
 %post node
-%systemd_post %{basename:%{name}-node.service}
+%systemd_post %{name}-node.service
+# If accounting is not currently enabled systemd reexec
+if [[ `systemctl show docker %{name}-node | grep -q -e CPUAccounting=no -e MemoryAccounting=no; echo $?` == 0 ]]; then
+  systemctl daemon-reexec
+fi
 
 %preun node
-%systemd_preun %{basename:%{name}-node.service}
+%systemd_preun %{name}-node.service
 
 %postun node
 %systemd_postun
 
 %files sdn-ovs
-%defattr(-,root,root,-)
-%{_bindir}/openshift-sdn-kube-subnet-setup.sh
-%{_bindir}/openshift-ovs-multitenant
-%{_bindir}/openshift-sdn-multitenant-setup.sh
-%{kube_plugin_path}/openshift-ovs-subnet
+%dir %{_unitdir}/docker.service.d/
+%dir %{_unitdir}/%{name}-node.service.d/
+%{_bindir}/openshift-sdn-ovs
+%{_bindir}/openshift-sdn-docker-setup.sh
 %{_unitdir}/%{name}-node.service.d/openshift-sdn-ovs.conf
 %{_unitdir}/docker.service.d/docker-sdn-ovs.conf
 
+%posttrans sdn-ovs
+# This path was installed by older packages but the directory wasn't owned by
+# RPM so we need to clean it up otherwise kubelet throws an error trying to
+# load the directory as a plugin
+if [ -d %{kube_plugin_path} ]; then
+  rmdir %{kube_plugin_path}
+fi
+
 %files -n tuned-profiles-%{name}-node
-%defattr(-,root,root,-)
+%license LICENSE
 %{_prefix}/lib/tuned/%{name}-node-host
 %{_prefix}/lib/tuned/%{name}-node-guest
 %{_mandir}/man7/tuned-profiles-%{name}-node.7*
@@ -373,22 +481,27 @@ if [ "$1" = 0 ]; then
 fi
 
 %files clients
+%license LICENSE
 %{_bindir}/oc
 %{_bindir}/kubectl
+%{_sysconfdir}/bash_completion.d/oc
+%{_mandir}/man1/oc*
 
+%if 0%{?make_redistributable}
 %files clients-redistributable
+%dir %{_datadir}/%{name}/linux/
+%dir %{_datadir}/%{name}/macosx/
+%dir %{_datadir}/%{name}/windows/
 %{_datadir}/%{name}/linux/oc
 %{_datadir}/%{name}/macosx/oc
 %{_datadir}/%{name}/windows/oc.exe
+%endif
 
 %files dockerregistry
-%defattr(-,root,root,-)
 %{_bindir}/dockerregistry
 
 %files pod
-%defattr(-,root,root,-)
 %{_bindir}/pod
-
 
 %changelog
 * Fri Sep 18 2015 Scott Dodson <sdodson@redhat.com> 0.2-9

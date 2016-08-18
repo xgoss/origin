@@ -6,10 +6,11 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
-	"k8s.io/kubernetes/cmd/kube-controller-manager/app"
+	controllerapp "k8s.io/kubernetes/cmd/kube-controller-manager/app"
+	controlleroptions "k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
 	"k8s.io/kubernetes/pkg/util"
+	kflag "k8s.io/kubernetes/pkg/util/flag"
 )
 
 const controllersLong = `
@@ -19,7 +20,7 @@ This command launches an instance of the Kubernetes controller-manager (kube-con
 
 // NewControllersCommand provides a CLI handler for the 'controller-manager' command
 func NewControllersCommand(name, fullName string, out io.Writer) *cobra.Command {
-	s := app.NewCMServer()
+	controllerOptions := controlleroptions.NewCMServer()
 
 	cmd := &cobra.Command{
 		Use:   name,
@@ -31,7 +32,7 @@ func NewControllersCommand(name, fullName string, out io.Writer) *cobra.Command 
 			util.InitLogs()
 			defer util.FlushLogs()
 
-			if err := s.Run(pflag.CommandLine.Args()); err != nil {
+			if err := controllerapp.Run(controllerOptions); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -40,9 +41,8 @@ func NewControllersCommand(name, fullName string, out io.Writer) *cobra.Command 
 	cmd.SetOutput(out)
 
 	flags := cmd.Flags()
-	//TODO: uncomment after picking up a newer cobra
-	//pflag.AddFlagSetToPFlagSet(flag, flags)
-	s.AddFlags(flags)
+	flags.SetNormalizeFunc(kflag.WordSepNormalizeFunc)
+	controllerOptions.AddFlags(flags)
 
 	return cmd
 }

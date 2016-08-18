@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -8,7 +6,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 
@@ -22,14 +20,12 @@ import (
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
-func init() {
-	testutil.RequireEtcd()
-}
-
 func TestLogin(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	clientcmd.DefaultCluster = clientcmdapi.Cluster{Server: ""}
 
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	_, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -143,7 +139,7 @@ func newLoginOptions(server string, username string, password string, insecure b
 	return loginOptions
 }
 
-func whoami(clientCfg *kclient.Config) (*api.User, error) {
+func whoami(clientCfg *restclient.Config) (*api.User, error) {
 	oClient, err := client.New(clientCfg)
 	if err != nil {
 		return nil, err

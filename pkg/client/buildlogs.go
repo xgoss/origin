@@ -1,7 +1,8 @@
 package client
 
 import (
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/restclient"
 
 	api "github.com/openshift/origin/pkg/build/api"
 )
@@ -13,7 +14,7 @@ type BuildLogsNamespacer interface {
 
 // BuildLogsInterface exposes methods on BuildLogs resources.
 type BuildLogsInterface interface {
-	Get(name string, opts api.BuildLogOptions) *kclient.Request
+	Get(name string, opts api.BuildLogOptions) *restclient.Request
 }
 
 // buildLogs implements BuildLogsNamespacer interface
@@ -31,13 +32,6 @@ func newBuildLogs(c *Client, namespace string) *buildLogs {
 }
 
 // Get builds and returns a buildLog request
-func (c *buildLogs) Get(name string, opt api.BuildLogOptions) *kclient.Request {
-	req := c.r.Get().Namespace(c.ns).Resource("builds").Name(name).SubResource("log")
-	if opt.NoWait {
-		req.Param("nowait", "true")
-	}
-	if opt.Follow {
-		req.Param("follow", "true")
-	}
-	return req
+func (c *buildLogs) Get(name string, opts api.BuildLogOptions) *restclient.Request {
+	return c.r.Get().Namespace(c.ns).Resource("builds").Name(name).SubResource("log").VersionedParams(&opts, kapi.ParameterCodec)
 }

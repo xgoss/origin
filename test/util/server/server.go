@@ -12,9 +12,8 @@ import (
 	"github.com/golang/glog"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util/wait"
 
 	"github.com/openshift/origin/pkg/client"
@@ -24,22 +23,22 @@ import (
 	"github.com/openshift/origin/pkg/cmd/server/kubernetes"
 	"github.com/openshift/origin/pkg/cmd/server/start"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	utilflags "github.com/openshift/origin/pkg/cmd/util/flags"
 	"github.com/openshift/origin/test/util"
+
+	// install all APIs
+	_ "github.com/openshift/origin/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/api/install"
+	_ "k8s.io/kubernetes/pkg/apis/extensions/install"
 )
 
 // ServiceAccountWaitTimeout is used to determine how long to wait for the service account
 // controllers to start up, and populate the service accounts in the test namespace
 const ServiceAccountWaitTimeout = 30 * time.Second
 
-// RequireServer verifies if the etcd, docker and the OpenShift server are
-// available and you can successfully connected to them.
-func RequireServer() {
-	util.RequireEtcd()
-	util.RequireDocker()
-	if _, err := util.GetClusterAdminClient(util.KubeConfigPath()); err != nil {
-		os.Exit(1)
-	}
-}
+// PodCreationWaitTimeout is used to determine how long to wait after the service account token
+// is available for the admission control cache to catch up and allow pod creation
+const PodCreationWaitTimeout = 10 * time.Second
 
 // FindAvailableBindAddress returns a bind address on 127.0.0.1 with a free port in the low-high range.
 // If lowPort is 0, an ephemeral port is allocated.
@@ -63,32 +62,43 @@ func FindAvailableBindAddress(lowPort, highPort int) (string, error) {
 	return "", fmt.Errorf("Could not find available port in the range %d-%d", lowPort, highPort)
 }
 
-func setupStartOptions() (*start.MasterArgs, *start.NodeArgs, *start.ListenArg, *start.ImageFormatArgs, *start.KubeConnectionArgs) {
+func setupStartOptions(startEtcd, useDefaultPort bool) (*start.MasterArgs, *start.NodeArgs, *start.ListenArg, *start.ImageFormatArgs, *start.KubeConnectionArgs) {
 	masterArgs, nodeArgs, listenArg, imageFormatArgs, kubeConnectionArgs := start.GetAllInOneArgs()
 
 	basedir := util.GetBaseDir()
 
 	nodeArgs.NodeName = "127.0.0.1"
 	nodeArgs.VolumeDir = path.Join(basedir, "volume")
-	masterArgs.EtcdDir = path.Join(basedir, "etcd")
+
+	// Allows to override the default etcd directory from the shell script.
+	etcdDir := os.Getenv("TEST_ETCD_DIR")
+	if len(etcdDir) == 0 {
+		etcdDir = path.Join(basedir, "etcd")
+	}
+
+	masterArgs.EtcdDir = etcdDir
 	masterArgs.ConfigDir.Default(path.Join(basedir, "openshift.local.config", "master"))
 	nodeArgs.ConfigDir.Default(path.Join(basedir, "openshift.local.config", nodeArgs.NodeName))
 	nodeArgs.MasterCertDir = masterArgs.ConfigDir.Value()
 
-	// don't wait for nodes to come up
-	masterAddr := os.Getenv("OS_MASTER_ADDR")
-	if len(masterAddr) == 0 {
-		if addr, err := FindAvailableBindAddress(12000, 12999); err != nil {
-			glog.Fatalf("Couldn't find free address for master: %v", err)
-		} else {
-			masterAddr = addr
+	if !useDefaultPort {
+		// don't wait for nodes to come up
+		masterAddr := os.Getenv("OS_MASTER_ADDR")
+		if len(masterAddr) == 0 {
+			if addr, err := FindAvailableBindAddress(12000, 12999); err != nil {
+				glog.Fatalf("Couldn't find free address for master: %v", err)
+			} else {
+				masterAddr = addr
+			}
 		}
+		fmt.Printf("masterAddr: %#v\n", masterAddr)
+		masterArgs.MasterAddr.Set(masterAddr)
+		listenArg.ListenAddr.Set(masterAddr)
 	}
-	fmt.Printf("masterAddr: %#v\n", masterAddr)
 
-	masterArgs.MasterAddr.Set(masterAddr)
-	listenArg.ListenAddr.Set(masterAddr)
-	masterArgs.EtcdAddr.Set(util.GetEtcdURL())
+	if !startEtcd {
+		masterArgs.EtcdAddr.Set(util.GetEtcdURL())
+	}
 
 	dnsAddr := os.Getenv("OS_DNS_ADDR")
 	if len(dnsAddr) == 0 {
@@ -98,15 +108,18 @@ func setupStartOptions() (*start.MasterArgs, *start.NodeArgs, *start.ListenArg, 
 			dnsAddr = addr
 		}
 	}
-	fmt.Printf("dnsAddr: %#v\n", dnsAddr)
 	masterArgs.DNSBindAddr.Set(dnsAddr)
 
 	return masterArgs, nodeArgs, listenArg, imageFormatArgs, kubeConnectionArgs
 }
 
 func DefaultMasterOptions() (*configapi.MasterConfig, error) {
+	return DefaultMasterOptionsWithTweaks(false, false)
+}
+
+func DefaultMasterOptionsWithTweaks(startEtcd, useDefaultPort bool) (*configapi.MasterConfig, error) {
 	startOptions := start.MasterOptions{}
-	startOptions.MasterArgs, _, _, _, _ = setupStartOptions()
+	startOptions.MasterArgs, _, _, _, _ = setupStartOptions(startEtcd, useDefaultPort)
 	startOptions.Complete()
 	startOptions.MasterArgs.ConfigDir.Default(path.Join(util.GetBaseDir(), "openshift.local.config", "master"))
 
@@ -121,6 +134,8 @@ func DefaultMasterOptions() (*configapi.MasterConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	masterConfig.ImagePolicyConfig.ScheduledImageImportMinimumIntervalSeconds = 1
 
 	// force strict handling of service account secret references by default, so that all our examples and controllers will handle it.
 	masterConfig.ServiceAccountConfig.LimitSecretReferences = true
@@ -193,7 +208,7 @@ func CreateNodeCerts(nodeArgs *start.NodeArgs, masterURL string) error {
 	createNodeConfig.Hostnames = []string{nodeArgs.NodeName}
 	createNodeConfig.ListenAddr = nodeArgs.ListenArg.ListenAddr
 	createNodeConfig.APIServerURL = masterURL
-	createNodeConfig.APIServerCAFile = admin.DefaultCertFilename(nodeArgs.MasterCertDir, "ca")
+	createNodeConfig.APIServerCAFiles = []string{admin.DefaultCertFilename(nodeArgs.MasterCertDir, "ca")}
 	createNodeConfig.NodeClientCAFile = admin.DefaultCertFilename(nodeArgs.MasterCertDir, "ca")
 
 	if err := createNodeConfig.Validate(nil); err != nil {
@@ -206,11 +221,11 @@ func CreateNodeCerts(nodeArgs *start.NodeArgs, masterURL string) error {
 	return nil
 }
 
-func DefaultAllInOneOptions() (*configapi.MasterConfig, *configapi.NodeConfig, error) {
+func DefaultAllInOneOptions() (*configapi.MasterConfig, *configapi.NodeConfig, *utilflags.ComponentFlag, error) {
 	startOptions := start.AllInOneOptions{MasterOptions: &start.MasterOptions{}, NodeArgs: &start.NodeArgs{}}
-	startOptions.MasterOptions.MasterArgs, startOptions.NodeArgs, _, _, _ = setupStartOptions()
-	startOptions.MasterOptions.MasterArgs.NodeList = nil
+	startOptions.MasterOptions.MasterArgs, startOptions.NodeArgs, _, _, _ = setupStartOptions(false, false)
 	startOptions.NodeArgs.AllowDisabledDocker = true
+	startOptions.NodeArgs.Components.Disable("plugins", "proxy", "dns")
 	startOptions.ServiceNetworkCIDR = start.NewDefaultNetworkArgs().ServiceNetworkCIDR
 	startOptions.Complete()
 	startOptions.MasterOptions.MasterArgs.ConfigDir.Default(path.Join(util.GetBaseDir(), "openshift.local.config", "master"))
@@ -218,36 +233,42 @@ func DefaultAllInOneOptions() (*configapi.MasterConfig, *configapi.NodeConfig, e
 	startOptions.NodeArgs.MasterCertDir = startOptions.MasterOptions.MasterArgs.ConfigDir.Value()
 
 	if err := CreateMasterCerts(startOptions.MasterOptions.MasterArgs); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := CreateBootstrapPolicy(startOptions.MasterOptions.MasterArgs); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := CreateNodeCerts(startOptions.NodeArgs, startOptions.MasterOptions.MasterArgs.MasterAddr.String()); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	masterOptions, err := startOptions.MasterOptions.MasterArgs.BuildSerializeableMasterConfig()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	if fn := startOptions.MasterOptions.MasterArgs.OverrideConfig; fn != nil {
+		if err := fn(masterOptions); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 
 	nodeOptions, err := startOptions.NodeArgs.BuildSerializeableNodeConfig()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return masterOptions, nodeOptions, nil
+	return masterOptions, nodeOptions, startOptions.NodeArgs.Components, nil
 }
 
-func StartConfiguredAllInOne(masterConfig *configapi.MasterConfig, nodeConfig *configapi.NodeConfig) (string, error) {
+func StartConfiguredAllInOne(masterConfig *configapi.MasterConfig, nodeConfig *configapi.NodeConfig, components *utilflags.ComponentFlag) (string, error) {
 	adminKubeConfigFile, err := StartConfiguredMaster(masterConfig)
 	if err != nil {
 		return "", err
 	}
 
-	if err := StartConfiguredNode(nodeConfig); err != nil {
+	if err := StartConfiguredNode(nodeConfig, components); err != nil {
 		return "", err
 	}
 
@@ -255,25 +276,26 @@ func StartConfiguredAllInOne(masterConfig *configapi.MasterConfig, nodeConfig *c
 }
 
 func StartTestAllInOne() (*configapi.MasterConfig, *configapi.NodeConfig, string, error) {
-	master, node, err := DefaultAllInOneOptions()
+	master, node, components, err := DefaultAllInOneOptions()
 	if err != nil {
 		return nil, nil, "", err
 	}
 
-	adminKubeConfigFile, err := StartConfiguredAllInOne(master, node)
+	adminKubeConfigFile, err := StartConfiguredAllInOne(master, node, components)
 	return master, node, adminKubeConfigFile, err
 }
 
 type TestOptions struct {
-	DeleteAllEtcdKeys bool
+	EnableControllers bool
 }
 
 func DefaultTestOptions() TestOptions {
-	return TestOptions{true}
+	return TestOptions{EnableControllers: true}
 }
 
-func StartConfiguredNode(nodeConfig *configapi.NodeConfig) error {
+func StartConfiguredNode(nodeConfig *configapi.NodeConfig, components *utilflags.ComponentFlag) error {
 	kubernetes.SetFakeCadvisorInterfaceForIntegrationTest()
+	kubernetes.SetFakeContainerManagerInterfaceForIntegrationTest()
 
 	_, nodePort, err := net.SplitHostPort(nodeConfig.ServingInfo.BindAddress)
 	if err != nil {
@@ -281,7 +303,7 @@ func StartConfiguredNode(nodeConfig *configapi.NodeConfig) error {
 	}
 	nodeTLS := configapi.UseTLS(nodeConfig.ServingInfo)
 
-	if err := start.StartNode(*nodeConfig); err != nil {
+	if err := start.StartNode(*nodeConfig, components); err != nil {
 		return err
 	}
 
@@ -297,12 +319,14 @@ func StartConfiguredMaster(masterConfig *configapi.MasterConfig) (string, error)
 	return StartConfiguredMasterWithOptions(masterConfig, DefaultTestOptions())
 }
 
-func StartConfiguredMasterWithOptions(masterConfig *configapi.MasterConfig, testOptions TestOptions) (string, error) {
-	if testOptions.DeleteAllEtcdKeys {
-		util.DeleteAllEtcdKeys()
-	}
+func StartConfiguredMasterAPI(masterConfig *configapi.MasterConfig) (string, error) {
+	options := DefaultTestOptions()
+	options.EnableControllers = false
+	return StartConfiguredMasterWithOptions(masterConfig, options)
+}
 
-	if err := start.NewMaster(masterConfig, true, true).Start(); err != nil {
+func StartConfiguredMasterWithOptions(masterConfig *configapi.MasterConfig, testOptions TestOptions) (string, error) {
+	if err := start.NewMaster(masterConfig, testOptions.EnableControllers, true).Start(); err != nil {
 		return "", err
 	}
 	adminKubeConfigFile := util.KubeConfigPath()
@@ -323,7 +347,7 @@ func StartConfiguredMasterWithOptions(masterConfig *configapi.MasterConfig, test
 	for {
 		// confirm that we can actually query from the api server
 		if client, err := util.GetClusterAdminClient(adminKubeConfigFile); err == nil {
-			if _, err := client.ClusterPolicies().List(labels.Everything(), fields.Everything()); err == nil {
+			if _, err := client.ClusterPolicies().List(kapi.ListOptions{}); err == nil {
 				break
 			}
 		}
@@ -341,6 +365,16 @@ func StartTestMaster() (*configapi.MasterConfig, string, error) {
 	}
 
 	adminKubeConfigFile, err := StartConfiguredMaster(master)
+	return master, adminKubeConfigFile, err
+}
+
+func StartTestMasterAPI() (*configapi.MasterConfig, string, error) {
+	master, err := DefaultMasterOptions()
+	if err != nil {
+		return nil, "", err
+	}
+
+	adminKubeConfigFile, err := StartConfiguredMasterAPI(master)
 	return master, adminKubeConfigFile, err
 }
 
@@ -367,6 +401,37 @@ func serviceAccountSecretsExist(client *kclient.Client, namespace string, sa *ka
 	return foundTokenSecret && foundDockercfgSecret
 }
 
+// WaitForPodCreationServiceAccounts ensures that the service account needed for pod creation exists
+// and that the cache for the admission control that checks for pod tokens has caught up to allow
+// pod creation.
+func WaitForPodCreationServiceAccounts(client *kclient.Client, namespace string) error {
+	if err := WaitForServiceAccounts(client, namespace, []string{bootstrappolicy.DefaultServiceAccountName}); err != nil {
+		return err
+	}
+
+	testPod := &kapi.Pod{}
+	testPod.GenerateName = "test"
+	testPod.Spec.Containers = []kapi.Container{
+		{
+			Name:  "container",
+			Image: "openshift/origin-pod:latest",
+		},
+	}
+
+	return wait.PollImmediate(time.Second, PodCreationWaitTimeout, func() (bool, error) {
+		pod, err := client.Pods(namespace).Create(testPod)
+		if err != nil {
+			glog.Warningf("Error attempting to create test pod: %v", err)
+			return false, nil
+		}
+		err = client.Pods(namespace).Delete(pod.Name, kapi.NewDeleteOptions(0))
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+}
+
 // WaitForServiceAccounts ensures the service accounts needed by build pods exist in the namespace
 // The extra controllers tend to starve the service account controller
 func WaitForServiceAccounts(client *kclient.Client, namespace string, accounts []string) error {
@@ -386,7 +451,7 @@ func WaitForServiceAccounts(client *kclient.Client, namespace string, accounts [
 
 // CreateNewProject creates a new project using the clusterAdminClient, then gets a token for the adminUser and returns
 // back a client for the admin user
-func CreateNewProject(clusterAdminClient *client.Client, clientConfig kclient.Config, projectName, adminUser string) (*client.Client, error) {
+func CreateNewProject(clusterAdminClient *client.Client, clientConfig restclient.Config, projectName, adminUser string) (*client.Client, error) {
 	newProjectOptions := &newproject.NewProjectOptions{
 		Client:      clusterAdminClient,
 		ProjectName: projectName,

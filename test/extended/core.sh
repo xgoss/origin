@@ -1,113 +1,40 @@
 #!/bin/bash
 #
-# This scripts starts the OpenShift server with a default configuration.
-# The OpenShift Docker registry and router are installed.
-# It will run all tests that are imported into test/extended.
+# Runs all standard extended tests against either an existing cluster (TEST_ONLY=1)
+# or a standard started server.
+source "$(dirname "${BASH_SOURCE}")/../../hack/lib/init.sh"
+source "${OS_ROOT}/test/extended/setup.sh"
 
-set -o errexit
-set -o nounset
-set -o pipefail
-
-OS_ROOT=$(dirname "${BASH_SOURCE}")/../..
-source "${OS_ROOT}/hack/util.sh"
-source "${OS_ROOT}/hack/common.sh"
-os::log::install_errexit
-cd "${OS_ROOT}"
-
-ensure_ginkgo_or_die
-ensure_iptables_or_die
-
-os::build::setup_env
-if [[ -z ${TEST_ONLY+x} ]]; then
-  go test -c ./test/extended -o ${OS_OUTPUT_BINPATH}/extended.test
-fi
-
-export TMPDIR="${TMPDIR:-"/tmp"}"
-export BASETMPDIR="${TMPDIR}/openshift-extended-tests/core"
-export EXTENDED_TEST_PATH="${OS_ROOT}/test/extended"
-export KUBE_REPO_ROOT="${OS_ROOT}/../../../k8s.io/kubernetes"
+os::test::extended::setup
+os::test::extended::focus "$@"
 
 function join { local IFS="$1"; shift; echo "$*"; }
 
-# The following skip rules excludes upstream e2e tests that fail.
-# TODO: add all users to privileged
-SKIP_TESTS=(
-  "\[Skipped\]"           # Explicitly skipped upstream
+parallel_only=()
+parallel_exclude=( "${EXCLUDED_TESTS[@]}" "${SERIAL_TESTS[@]}" )
+serial_only=( "${SERIAL_TESTS[@]}" )
+serial_exclude=( "${EXCLUDED_TESTS[@]}" )
 
-  # Depends on external components, may not need yet
-  Monitoring              # Not installed, should be
-  "Cluster level logging" # Not installed yet
-  Kibana                  # Not installed
-  DNS                     # Can't depend on kube-dns
-  kube-ui                 # Not installed by default
-  DaemonRestart           # Experimental mode not enabled yet
-  "Daemon set"            # Experimental mode not enabled yet
+pf=$(join '|' "${parallel_only[@]:-}")
+ps=$(join '|' "${parallel_exclude[@]}")
+sf=$(join '|' "${serial_only[@]}")
+ss=$(join '|' "${serial_exclude[@]}")
 
-  # Need fixing
-  "Cluster upgrade"       # panic because createNS not called, refactor framework?
-  PersistentVolume        # Not skipping on non GCE environments?
-  EmptyDir                # TRIAGE
-  Proxy                   # TRIAGE
-  "Examples e2e"          # TRIAGE: Some are failing due to permissions
-  Kubectl                 # TRIAGE: we don't support the kubeconfig flag, and images won't run
-  Namespaces              # Namespace controller broken, issue #4731
-  "hostPath"              # Need to add ability for the test case to use to hostPath
-  "mount an API token into pods" # We add 6 secrets, not 1
-  "create a functioning NodePort service" # Tries to bind to port 80, needs cap netsys upstream
-  "Networking should function for intra-pod" # Needs two nodes, add equiv test for 1 node, then use networking suite
-  "environment variables for services" # Tries to proxy directly to the node, but the underlying cert is wrong?  Is proxy broken?
-  "should provide labels and annotations files" # the image can't read the files
-  "Ask kubelet to report container resource usage" # container resource usage not exposed yet?
-  "should provide Internet connection for containers" # DNS inside container failing!!!
-  "able to delete 10 pods per node" # Panic because stats port isn't exposed
 
-  "authentication: OpenLDAP" # needs separate setup and bucketing for openldap bootstrapping
+# print the tests we are skipping
+echo "[INFO] The following tests are excluded:"
+TEST_REPORT_DIR= TEST_OUTPUT_QUIET=true ${EXTENDEDTEST} "--ginkgo.skip=${ss}" --ginkgo.dryRun --ginkgo.noColor | grep skip | cut -c 20- | sort
+echo
 
-  # Needs triage to determine why it is failing
-  "Addon update"          # TRIAGE
-  SSH                     # TRIAGE
-  Probing                 # TRIAGE
-)
-DEFAULT_SKIP=$(join '|' "${SKIP_TESTS[@]}")
-SKIP="${SKIP:-$DEFAULT_SKIP}"
+exitstatus=0
 
-if [[ -z ${TEST_ONLY+x} ]]; then
-  function cleanup()
-  {
-    out=$?
-    cleanup_openshift
-    echo "[INFO] Exiting"
-    exit $out
-  }
+# run parallel tests
+nodes="${PARALLEL_NODES:-5}"
+echo "[INFO] Running parallel tests N=${nodes}"
+TEST_REPORT_FILE_NAME=core_parallel ${GINKGO} -v "-focus=${pf}" "-skip=${ps}" -p -nodes "${nodes}" ${EXTENDEDTEST} -- -ginkgo.v -test.timeout 6h || exitstatus=$?
 
-  trap "exit" INT TERM
-  trap "cleanup" EXIT
-  echo "[INFO] Starting server"
+# run tests in serial
+echo "[INFO] Running serial tests"
+TEST_REPORT_FILE_NAME=core_serial ${GINKGO} -v "-focus=${sf}" "-skip=${ss}" ${EXTENDEDTEST} -- -ginkgo.v -test.timeout 2h || exitstatus=$?
 
-  setup_env_vars
-  reset_tmp_dir
-  # when selinux is enforcing, the volume dir selinux label needs to be
-  # svirt_sandbox_file_t
-  #
-  # TODO: fix the selinux policy to either allow openshift_var_lib_dir_t
-  # or to default the volume dir to svirt_sandbox_file_t.
-  if selinuxenabled; then
-         sudo chcon -t svirt_sandbox_file_t ${VOLUME_DIR}
-  fi
-  configure_os_server
-  start_os_server
-
-  export KUBECONFIG="${ADMIN_KUBECONFIG}"
-
-  install_registry
-  wait_for_registry
-  CREATE_ROUTER_CERT=1 install_router
-
-  echo "[INFO] Creating image streams"
-  oc create -n openshift -f examples/image-streams/image-streams-centos7.json --config="${ADMIN_KUBECONFIG}"
-fi
-
-echo "[INFO] Running extended tests"
-
-# Run the tests
-TMPDIR=${BASETMPDIR} ginkgo -progress -stream -v "-skip=${SKIP}" "$@" ${OS_OUTPUT_BINPATH}/extended.test
+exit $exitstatus

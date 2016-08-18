@@ -2,7 +2,6 @@ package scmauth
 
 import (
 	"io/ioutil"
-	"os"
 	"path/filepath"
 )
 
@@ -13,7 +12,7 @@ type SSHPrivateKey struct{}
 
 // Setup creates a wrapper script for SSH command to be able to use the provided
 // SSH key while accessing private repository.
-func (_ SSHPrivateKey) Setup(baseDir string) error {
+func (_ SSHPrivateKey) Setup(baseDir string, context SCMAuthContext) error {
 	script, err := ioutil.TempFile("", "gitssh")
 	if err != nil {
 		return err
@@ -28,7 +27,7 @@ func (_ SSHPrivateKey) Setup(baseDir string) error {
 		return err
 	}
 	// set environment variable to tell git to use the SSH wrapper
-	if err := os.Setenv("GIT_SSH", script.Name()); err != nil {
+	if err := context.Set("GIT_SSH", script.Name()); err != nil {
 		return err
 	}
 	return nil

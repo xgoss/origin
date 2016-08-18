@@ -3,7 +3,8 @@ package describe
 import (
 	"bytes"
 	"fmt"
-	"sort"
+	"regexp"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -22,8 +23,7 @@ const emptyString = "<none>"
 
 func tabbedString(f func(*tabwriter.Writer) error) (string, error) {
 	out := new(tabwriter.Writer)
-	b := make([]byte, 1024)
-	buf := bytes.NewBuffer(b)
+	buf := &bytes.Buffer{}
 	out.Init(buf, 0, 8, 1, '\t', 0)
 
 	err := f(out)
@@ -88,69 +88,127 @@ func extractAnnotations(annotations map[string]string, keys ...string) ([]string
 	return extracted, remaining
 }
 
+func formatMapStringString(out *tabwriter.Writer, label string, items map[string]string) {
+	keys := sets.NewString()
+	for k := range items {
+		keys.Insert(k)
+	}
+	if keys.Len() == 0 {
+		formatString(out, label, "")
+		return
+	}
+	for i, key := range keys.List() {
+		if i == 0 {
+			formatString(out, label, fmt.Sprintf("%s=%s", key, items[key]))
+		} else {
+			fmt.Fprintf(out, "%s\t%s=%s\n", "", key, items[key])
+		}
+	}
+}
+
 func formatAnnotations(out *tabwriter.Writer, m api.ObjectMeta, prefix string) {
 	values, annotations := extractAnnotations(m.Annotations, "description")
 	if len(values[0]) > 0 {
 		formatString(out, prefix+"Description", values[0])
 	}
-	keys := sets.NewString()
-	for k := range annotations {
-		keys.Insert(k)
-	}
-	for i, key := range keys.List() {
-		if i == 0 {
-			formatString(out, prefix+"Annotations", fmt.Sprintf("%s=%s", key, annotations[key]))
-		} else {
-			fmt.Fprintf(out, "%s\t%s=%s\n", prefix, key, annotations[key])
-		}
-	}
+	formatMapStringString(out, prefix+"Annotations", annotations)
 }
 
 var timeNowFn = func() time.Time {
 	return time.Now()
 }
 
+// Receives a time.Duration and returns Docker go-utils'
+// human-readable output
+func formatToHumanDuration(dur time.Duration) string {
+	return units.HumanDuration(dur)
+}
+
 func formatRelativeTime(t time.Time) string {
 	return units.HumanDuration(timeNowFn().Sub(t))
 }
 
+// FormatRelativeTime converts a time field into a human readable age string (hours, minutes, days).
+func FormatRelativeTime(t time.Time) string {
+	return formatRelativeTime(t)
+}
+
 func formatMeta(out *tabwriter.Writer, m api.ObjectMeta) {
 	formatString(out, "Name", m.Name)
+	formatString(out, "Namespace", m.Namespace)
 	if !m.CreationTimestamp.IsZero() {
 		formatTime(out, "Created", m.CreationTimestamp.Time)
 	}
-	formatString(out, "Labels", formatLabels(m.Labels))
+	formatMapStringString(out, "Labels", m.Labels)
 	formatAnnotations(out, m, "")
 }
 
-// webhookURL assembles map with of webhook type as key and webhook url and value
-func webhookURL(c *buildapi.BuildConfig, cli client.BuildConfigsNamespacer) map[string]string {
-	result := map[string]string{}
-	for _, trigger := range c.Spec.Triggers {
-		whTrigger := ""
+// DescribeWebhook holds the URL information about a webhook and for generic
+// webhooks it tells us if we allow env variables.
+type DescribeWebhook struct {
+	URL      string
+	AllowEnv *bool
+}
+
+// webhookDescribe returns a map of webhook trigger types and its corresponding
+// information.
+func webHooksDescribe(triggers []buildapi.BuildTriggerPolicy, name, namespace string, cli client.BuildConfigsNamespacer) map[string][]DescribeWebhook {
+	result := map[string][]DescribeWebhook{}
+
+	for _, trigger := range triggers {
+		var webHookTrigger string
+		var allowEnv *bool
+
 		switch trigger.Type {
 		case buildapi.GitHubWebHookBuildTriggerType:
-			whTrigger = trigger.GitHubWebHook.Secret
+			webHookTrigger = trigger.GitHubWebHook.Secret
+
 		case buildapi.GenericWebHookBuildTriggerType:
-			whTrigger = trigger.GenericWebHook.Secret
-		}
-		if len(whTrigger) == 0 {
+			webHookTrigger = trigger.GenericWebHook.Secret
+			allowEnv = &trigger.GenericWebHook.AllowEnv
+
+		default:
 			continue
 		}
-		out := ""
-		url, err := cli.BuildConfigs(c.Namespace).WebHookURL(c.Name, &trigger)
-		if err != nil {
-			out = fmt.Sprintf("<error: %s>", err.Error())
-		} else {
-			out = url.String()
+		webHookDesc := result[string(trigger.Type)]
+
+		if len(webHookTrigger) == 0 {
+			continue
 		}
-		result[string(trigger.Type)] = out
+
+		var urlStr string
+		url, err := cli.BuildConfigs(namespace).WebHookURL(name, &trigger)
+		if err != nil {
+			urlStr = fmt.Sprintf("<error: %s>", err.Error())
+		} else {
+			urlStr = url.String()
+		}
+
+		webHookDesc = append(webHookDesc,
+			DescribeWebhook{
+				URL:      urlStr,
+				AllowEnv: allowEnv,
+			})
+		result[string(trigger.Type)] = webHookDesc
 	}
+
 	return result
 }
 
+var reLongImageID = regexp.MustCompile(`[a-f0-9]{60,}$`)
+
+// shortenImagePullSpec returns a version of the pull spec intended for
+// display, which may result in the image not being usable via cut-and-paste
+// for users.
+func shortenImagePullSpec(spec string) string {
+	if reLongImageID.MatchString(spec) {
+		return spec[:len(spec)-50] + "..."
+	}
+	return spec
+}
+
 func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) {
-	if len(stream.Status.Tags) == 0 {
+	if len(stream.Status.Tags) == 0 && len(stream.Spec.Tags) == 0 {
 		fmt.Fprintf(out, "Tags:\t<none>\n")
 		return
 	}
@@ -164,10 +222,13 @@ func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) 
 			sortedTags = append(sortedTags, k)
 		}
 	}
-	sort.Strings(sortedTags)
+	hasScheduled, hasInsecure := false, false
+	imageapi.PrioritizeTags(sortedTags)
 	for _, tag := range sortedTags {
 		tagRef, ok := stream.Spec.Tags[tag]
 		specTag := ""
+		scheduled := false
+		insecure := false
 		if ok {
 			if tagRef.From != nil {
 				namePair := ""
@@ -186,34 +247,92 @@ func formatImageStreamTags(out *tabwriter.Writer, stream *imageapi.ImageStream) 
 					specTag = fmt.Sprintf("<unknown %s> %s", tagRef.From.Kind, namePair)
 				}
 			}
+			scheduled, insecure = tagRef.ImportPolicy.Scheduled, tagRef.ImportPolicy.Insecure
+			hasScheduled = hasScheduled || scheduled
+			hasInsecure = hasInsecure || insecure
 		} else {
 			specTag = "<pushed>"
 		}
 		if taglist, ok := stream.Status.Tags[tag]; ok {
-			for _, event := range taglist.Items {
+			if len(taglist.Conditions) > 0 {
+				var lastTime time.Time
+				summary := []string{}
+				for _, condition := range taglist.Conditions {
+					if condition.LastTransitionTime.After(lastTime) {
+						lastTime = condition.LastTransitionTime.Time
+					}
+					switch condition.Type {
+					case imageapi.ImportSuccess:
+						if condition.Status == api.ConditionFalse {
+							summary = append(summary, fmt.Sprintf("import failed: %s", condition.Message))
+						}
+					default:
+						summary = append(summary, string(condition.Type))
+					}
+				}
+				if len(summary) > 0 {
+					description := strings.Join(summary, ", ")
+					if len(description) > 70 {
+						description = strings.TrimSpace(description[:70-3]) + "..."
+					}
+					d := timeNowFn().Sub(lastTime)
+					fmt.Fprintf(out, "%s\t%s\t%s ago\t%s\t%v\n",
+						tag,
+						shortenImagePullSpec(specTag),
+						units.HumanDuration(d),
+						"",
+						description)
+				}
+			}
+			for i, event := range taglist.Items {
 				d := timeNowFn().Sub(event.Created.Time)
 				image := event.Image
 				ref, err := imageapi.ParseDockerImageReference(event.DockerImageReference)
 				if err == nil {
 					if ref.ID == image {
-						image = ""
+						image = "<same>"
+					}
+				}
+				pullSpec := event.DockerImageReference
+				if pullSpec == specTag {
+					pullSpec = "<same>"
+				} else {
+					pullSpec = shortenImagePullSpec(pullSpec)
+				}
+				specTag = shortenImagePullSpec(specTag)
+				if i != 0 {
+					tag, specTag = "", ""
+				} else {
+					extra := ""
+					if scheduled {
+						extra += "*"
+					}
+					if insecure {
+						extra += "!"
+					}
+					if len(extra) > 0 {
+						specTag += " " + extra
 					}
 				}
 				fmt.Fprintf(out, "%s\t%s\t%s ago\t%s\t%v\n",
 					tag,
 					specTag,
 					units.HumanDuration(d),
-					event.DockerImageReference,
+					pullSpec,
 					image)
-				if tag != "" {
-					tag = ""
-				}
-				if specTag != "" {
-					specTag = ""
-				}
 			}
 		} else {
 			fmt.Fprintf(out, "%s\t%s\t\t<not available>\t<not available>\n", tag, specTag)
+		}
+	}
+
+	if hasInsecure || hasScheduled {
+		fmt.Fprintln(out)
+		if hasScheduled {
+			fmt.Fprintf(out, "  * tag is scheduled for periodic import\n")
+		}
+		if hasInsecure {
+			fmt.Fprintf(out, "  ! tag is insecure and can be imported over HTTP or self-signed HTTPS\n")
 		}
 	}
 }

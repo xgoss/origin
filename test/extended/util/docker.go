@@ -7,11 +7,11 @@ import (
 	g "github.com/onsi/ginkgo"
 
 	gson "encoding/json"
+
 	dockerClient "github.com/fsouza/go-dockerclient"
 	tutil "github.com/openshift/origin/test/util"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/credentialprovider"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 )
 
 //TagImage will apply the "tagor" tag string to the image current tagged by "tagee"
@@ -26,6 +26,15 @@ func TagImage(tagee, tagor string) error {
 		Force: true,
 	}
 	return client.TagImage(tagor, opts)
+}
+
+//InspectImage initiates the equivalent of a `docker inspect` for the "name" parameter
+func InspectImage(name string) (*dockerClient.Image, error) {
+	client, err := tutil.NewDockerClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.InspectImage(name)
 }
 
 //PullImage initiates the equivalent of a `docker pull` for the "name" parameter
@@ -54,10 +63,29 @@ func PushImage(name string, authCfg dockerClient.AuthConfiguration) error {
 	return client.PushImage(opts, authCfg)
 }
 
+//ListImages initiates the equivalent of a `docker images`
+func ListImages() ([]string, error) {
+	client, err := tutil.NewDockerClient()
+	if err != nil {
+		return nil, err
+	}
+	imageList, err := client.ListImages(dockerClient.ListImagesOptions{})
+	if err != nil {
+		return nil, err
+	}
+	returnIds := make([]string, 0)
+	for _, image := range imageList {
+		for _, tag := range image.RepoTags {
+			returnIds = append(returnIds, tag)
+		}
+	}
+	return returnIds, nil
+}
+
 //BuildAuthConfiguration constructs a non-standard dockerClient.AuthConfiguration that can be used to communicate with the openshift internal docker registry
 func BuildAuthConfiguration(credKey string, oc *CLI) (*dockerClient.AuthConfiguration, error) {
 	authCfg := &dockerClient.AuthConfiguration{}
-	secretList, err := oc.AdminKubeREST().Secrets(oc.Namespace()).List(labels.Everything(), fields.Everything())
+	secretList, err := oc.AdminKubeREST().Secrets(oc.Namespace()).List(kapi.ListOptions{})
 
 	g.By(fmt.Sprintf("get secret list err %v ", err))
 	if err == nil {
@@ -88,7 +116,8 @@ func BuildAuthConfiguration(credKey string, oc *CLI) (*dockerClient.AuthConfigur
 						authConfs[0].ServerAddress = credKey
 					}
 					g.By(fmt.Sprintf("dockercfg with svrAddr %s user %s pass %s email %s ", authConfs[0].ServerAddress, authConfs[0].Username, authConfs[0].Password, authConfs[0].Email))
-					return &authConfs[0], err
+					c := dockerClient.AuthConfiguration{Username: authConfs[0].Username, ServerAddress: authConfs[0].ServerAddress, Password: authConfs[0].Password}
+					return &c, err
 				}
 			}
 		}

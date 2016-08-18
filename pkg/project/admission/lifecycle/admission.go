@@ -1,20 +1,4 @@
-/*
-Copyright 2014 Google Inc. All rights reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
-package admission
+package lifecycle
 
 import (
 	"fmt"
@@ -29,10 +13,12 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	apierrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/meta"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/util/sets"
 
-	"github.com/openshift/origin/pkg/api/latest"
+	"github.com/openshift/origin/pkg/api"
+	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	"github.com/openshift/origin/pkg/project/cache"
 	projectutil "github.com/openshift/origin/pkg/project/util"
 )
@@ -40,19 +26,22 @@ import (
 // TODO: modify the upstream plug-in so this can be collapsed
 // need ability to specify a RESTMapper on upstream version
 func init() {
-	admission.RegisterPlugin("OriginNamespaceLifecycle", func(client client.Interface, config io.Reader) (admission.Interface, error) {
+	admission.RegisterPlugin("OriginNamespaceLifecycle", func(client clientset.Interface, config io.Reader) (admission.Interface, error) {
 		return NewLifecycle(client, recommendedCreatableResources)
 	})
 }
 
 type lifecycle struct {
-	client client.Interface
+	client clientset.Interface
+	cache  *cache.ProjectCache
 
 	// creatableResources is a set of resources that can be created even if the namespace is terminating
 	creatableResources sets.String
 }
 
 var recommendedCreatableResources = sets.NewString("resourceaccessreviews", "localresourceaccessreviews")
+var _ = oadmission.WantsProjectCache(&lifecycle{})
+var _ = oadmission.Validator(&lifecycle{})
 
 // Admit enforces that a namespace must exist in order to associate content with it.
 // Admit enforces that a namespace that is terminating cannot accept new content being associated with it.
@@ -65,14 +54,15 @@ func (e *lifecycle) Admit(a admission.Attributes) (err error) {
 	if isSubjectAccessReview(a) {
 		return nil
 	}
-	defaultVersion, kind, err := latest.RESTMapper.VersionAndKindForResource(a.GetResource())
+
+	groupMeta, err := registered.Group(a.GetKind().Group)
+	if err != nil {
+		return err
+	}
+	mapping, err := groupMeta.RESTMapper.RESTMapping(a.GetKind().GroupKind())
 	if err != nil {
 		glog.V(4).Infof("Ignoring life-cycle enforcement for resource %v; no associated default version and kind could be found.", a.GetResource())
 		return nil
-	}
-	mapping, err := latest.RESTMapper.RESTMapping(kind, defaultVersion)
-	if err != nil {
-		return admission.NewForbidden(a, err)
 	}
 	if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
 		return nil
@@ -89,12 +79,11 @@ func (e *lifecycle) Admit(a admission.Attributes) (err error) {
 		name, _ = meta.NewAccessor().Name(obj)
 	}
 
-	projects, err := cache.GetProjectCache()
-	if err != nil {
+	if !e.cache.Running() {
 		return admission.NewForbidden(a, err)
 	}
 
-	namespace, err := projects.GetNamespaceObject(a.GetNamespace())
+	namespace, err := e.cache.GetNamespace(a.GetNamespace())
 	if err != nil {
 		return admission.NewForbidden(a, err)
 	}
@@ -103,8 +92,8 @@ func (e *lifecycle) Admit(a admission.Attributes) (err error) {
 		return nil
 	}
 
-	if namespace.Status.Phase == kapi.NamespaceTerminating && !e.creatableResources.Has(strings.ToLower(a.GetResource())) {
-		return apierrors.NewForbidden(kind, name, fmt.Errorf("Namespace %s is terminating", a.GetNamespace()))
+	if namespace.Status.Phase == kapi.NamespaceTerminating && !e.creatableResources.Has(strings.ToLower(a.GetResource().Resource)) {
+		return apierrors.NewForbidden(a.GetResource().GroupResource(), name, fmt.Errorf("Namespace %s is terminating", a.GetNamespace()))
 	}
 
 	// in case of concurrency issues, we will retry this logic
@@ -127,7 +116,7 @@ func (e *lifecycle) Admit(a admission.Attributes) (err error) {
 		time.Sleep(interval)
 
 		// it's possible the namespace actually was deleted, so just forbid if this occurs
-		namespace, err = e.client.Namespaces().Get(a.GetNamespace())
+		namespace, err = e.client.Core().Namespaces().Get(a.GetNamespace())
 		if err != nil {
 			return admission.NewForbidden(a, err)
 		}
@@ -139,11 +128,29 @@ func (e *lifecycle) Handles(operation admission.Operation) bool {
 	return true
 }
 
-func NewLifecycle(client client.Interface, creatableResources sets.String) (admission.Interface, error) {
-	return &lifecycle{client: client, creatableResources: creatableResources}, nil
+func (e *lifecycle) SetProjectCache(c *cache.ProjectCache) {
+	e.cache = c
 }
 
+func (e *lifecycle) Validate() error {
+	if e.cache == nil {
+		return fmt.Errorf("project lifecycle plugin needs a project cache")
+	}
+	return nil
+}
+
+func NewLifecycle(client clientset.Interface, creatableResources sets.String) (admission.Interface, error) {
+	return &lifecycle{
+		client:             client,
+		creatableResources: creatableResources,
+	}, nil
+}
+
+var (
+	sar  = api.Kind("SubjectAccessReview")
+	lsar = api.Kind("LocalSubjectAccessReview")
+)
+
 func isSubjectAccessReview(a admission.Attributes) bool {
-	return a.GetResource() == "subjectaccessreviews" ||
-		a.GetResource() == "localsubjectaccessreviews"
+	return a.GetKind().GroupKind() == sar || a.GetKind().GroupKind() == lsar
 }

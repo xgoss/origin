@@ -1,9 +1,9 @@
 package client
 
 import (
+	kapi "k8s.io/kubernetes/pkg/api"
+
 	userapi "github.com/openshift/origin/pkg/user/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 )
 
 // IdentitiesInterface has methods to work with Identity resources
@@ -13,10 +13,11 @@ type IdentitiesInterface interface {
 
 // IdentityInterface exposes methods on identity resources.
 type IdentityInterface interface {
-	List(label labels.Selector, field fields.Selector) (*userapi.IdentityList, error)
+	List(opts kapi.ListOptions) (*userapi.IdentityList, error)
 	Get(name string) (*userapi.Identity, error)
 	Create(identity *userapi.Identity) (*userapi.Identity, error)
 	Update(identity *userapi.Identity) (*userapi.Identity, error)
+	Delete(name string) error
 }
 
 // identities implements IdentityInterface interface
@@ -32,12 +33,11 @@ func newIdentities(c *Client) *identities {
 }
 
 // List returns a list of identities that match the label and field selectors.
-func (c *identities) List(label labels.Selector, field fields.Selector) (result *userapi.IdentityList, err error) {
+func (c *identities) List(opts kapi.ListOptions) (result *userapi.IdentityList, err error) {
 	result = &userapi.IdentityList{}
 	err = c.r.Get().
 		Resource("identities").
-		LabelsSelectorParam(label).
-		FieldsSelectorParam(field).
+		VersionedParams(&opts, kapi.ParameterCodec).
 		Do().
 		Into(result)
 	return
@@ -62,4 +62,9 @@ func (c *identities) Update(identity *userapi.Identity) (result *userapi.Identit
 	result = &userapi.Identity{}
 	err = c.r.Put().Resource("identities").Name(identity.Name).Body(identity).Do().Into(result)
 	return
+}
+
+// Delete deletes the identity on server. Returns an error if one occurs.
+func (c *identities) Delete(name string) (err error) {
+	return c.r.Delete().Resource("identities").Name(name).Do().Error()
 }

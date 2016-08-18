@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"io/ioutil"
 	"path/filepath"
 
@@ -21,7 +20,6 @@ import (
 type BuildStrategyRefGenerator struct {
 	gitRepository     git.Repository
 	dockerfileFinder  dockerfile.Finder
-	dockerfileParser  dockerfile.Parser
 	sourceDetectors   source.Detectors
 	imageRefGenerator ImageRefGenerator
 }
@@ -31,7 +29,6 @@ func NewBuildStrategyRefGenerator(sourceDetectors source.Detectors) *BuildStrate
 	return &BuildStrategyRefGenerator{
 		gitRepository:     git.NewRepository(),
 		dockerfileFinder:  dockerfile.NewFinder(),
-		dockerfileParser:  dockerfile.NewParser(),
 		sourceDetectors:   sourceDetectors,
 		imageRefGenerator: NewImageRefGenerator(),
 	}
@@ -73,13 +70,6 @@ func (g *BuildStrategyRefGenerator) getSource(srcRef *SourceRef) error {
 	if srcRef.Dir, err = ioutil.TempDir("", "gen"); err != nil {
 		return err
 	}
-	if err = g.gitRepository.Clone(srcRef.Dir, srcRef.URL.String()); err != nil {
-		return fmt.Errorf("unable to clone repository at %s", srcRef.URL.String())
-	}
-	if len(srcRef.Ref) != 0 {
-		if err = g.gitRepository.Checkout(srcRef.Dir, srcRef.Ref); err != nil {
-			return fmt.Errorf("unable to checkout reference %s from repository at %s", srcRef.Ref, srcRef.URL.String())
-		}
-	}
-	return nil
+	_, err = CloneAndCheckoutSources(g.gitRepository, srcRef.URL.String(), srcRef.Ref, srcRef.Dir, "")
+	return err
 }

@@ -3,7 +3,8 @@ package validation
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 )
@@ -15,23 +16,17 @@ func TestFailingKubeletArgs(t *testing.T) {
 
 	// [port: invalid value '[invalid-value]': could not be set: strconv.ParseUint: parsing "invalid-value": invalid syntax flag: invalid value 'missing-key': is not a valid flag]
 
-	errs := ValidateKubeletExtendedArguments(args)
+	errs := ValidateKubeletExtendedArguments(args, nil)
 
 	if len(errs) != 2 {
 		t.Fatalf("expected 2 errors, not %v", errs)
 	}
 
 	var (
-		portErr    *fielderrors.ValidationError
-		missingErr *fielderrors.ValidationError
+		portErr    *field.Error
+		missingErr *field.Error
 	)
-	for _, uncastErr := range errs {
-		err, ok := uncastErr.(*fielderrors.ValidationError)
-		if !ok {
-			t.Errorf("expected validationerror, not %v", err)
-			continue
-		}
-
+	for _, err := range errs {
 		switch err.Field {
 		case "port":
 			portErr = err
@@ -65,5 +60,32 @@ func TestFailingKubeletArgs(t *testing.T) {
 	}
 	if e, a := `is not a valid flag`, missingErr.Detail; e != a {
 		t.Errorf("expected %v, got %v", e, a)
+	}
+}
+
+func TestInvalidProjectEmptyDirQuota(t *testing.T) {
+	negQuota := resource.MustParse("-1000Mi")
+	nodeCfg := configapi.NodeConfig{
+		VolumeConfig: configapi.NodeVolumeConfig{
+			LocalQuota: configapi.LocalQuota{
+				PerFSGroup: &negQuota,
+			},
+		},
+	}
+	errs := ValidateNodeConfig(&nodeCfg, nil)
+	// This will result in several errors, one of them should be related to the
+	// project empty dir quota:
+	var emptyDirQuotaError *field.Error
+	for _, err := range errs.Errors {
+		t.Logf("Found error: %s", err.Field)
+		if err.Field == "volumeConfig.localQuota.perFSGroup" {
+			emptyDirQuotaError = err
+		}
+	}
+	if emptyDirQuotaError == nil {
+		t.Fatalf("expected volumeConfig.localQuota.perFSGroup error but got none")
+	}
+	if emptyDirQuotaError.Type != field.ErrorTypeInvalid {
+		t.Errorf("unexpected error for negative volumeConfig.localQuota.perFSGroup: %s", emptyDirQuotaError.Detail)
 	}
 }

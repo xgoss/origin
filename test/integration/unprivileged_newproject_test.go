@@ -1,5 +1,3 @@
-// +build integration,etcd
-
 package integration
 
 import (
@@ -9,8 +7,7 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kapierrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	"github.com/openshift/origin/pkg/client"
@@ -18,13 +15,14 @@ import (
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
 	projectapi "github.com/openshift/origin/pkg/project/api"
-	projectrequeststorage "github.com/openshift/origin/pkg/project/registry/projectrequest/delegated"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
 func TestUnprivilegedNewProject(t *testing.T) {
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,12 +53,12 @@ func TestUnprivilegedNewProject(t *testing.T) {
 	}
 
 	// confirm that we have access to request the project
-	allowed, err := valerieOpenshiftClient.ProjectRequests().List(labels.Everything(), fields.Everything())
+	allowed, err := valerieOpenshiftClient.ProjectRequests().List(kapi.ListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if allowed.Status != kapi.StatusSuccess {
-		t.Fatalf("expected %v, got %v", kapi.StatusSuccess, allowed.Status)
+	if allowed.Status != unversioned.StatusSuccess {
+		t.Fatalf("expected %v, got %v", unversioned.StatusSuccess, allowed.Status)
 	}
 
 	requestProject := oc.NewProjectOptions{
@@ -78,12 +76,22 @@ func TestUnprivilegedNewProject(t *testing.T) {
 
 	waitForProject(t, valerieOpenshiftClient, "new-project", 5*time.Second, 10)
 
+	actualProject, err := valerieOpenshiftClient.Projects().Get("new-project")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e, a := "valerie", actualProject.Annotations[projectapi.ProjectRequester]; e != a {
+		t.Errorf("incorrect project requester: expected %v, got %v", e, a)
+	}
+
 	if err := requestProject.Run(); !kapierrors.IsAlreadyExists(err) {
 		t.Fatalf("expected an already exists error, but got %v", err)
 	}
 
 }
 func TestUnprivilegedNewProjectFromTemplate(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
 	namespace := "foo"
 	templateName := "bar"
 
@@ -131,11 +139,13 @@ func TestUnprivilegedNewProjectFromTemplate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	template := projectrequeststorage.DefaultTemplate()
+	template, err := testutil.GetTemplateFixture("testdata/project-request-template-with-quota.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	template.Name = templateName
 	template.Namespace = namespace
 
-	template.Objects[0].(*projectapi.Project).Annotations["extra"] = "here"
 	_, err = clusterAdminClient.Templates(namespace).Create(template)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,7 +186,9 @@ func TestUnprivilegedNewProjectFromTemplate(t *testing.T) {
 }
 
 func TestUnprivilegedNewProjectDenied(t *testing.T) {
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, clusterAdminKubeConfig, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -219,12 +231,12 @@ func TestUnprivilegedNewProjectDenied(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := testutil.WaitForClusterPolicyUpdate(valerieOpenshiftClient, "create", "projectrequests", false); err != nil {
+	if err := testutil.WaitForClusterPolicyUpdate(valerieOpenshiftClient, "create", projectapi.Resource("projectrequests"), false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// confirm that we have access to request the project
-	_, err = valerieOpenshiftClient.ProjectRequests().List(labels.Everything(), fields.Everything())
+	_, err = valerieOpenshiftClient.ProjectRequests().List(kapi.ListOptions{})
 	if err == nil {
 		t.Fatalf("expected error: %v", err)
 	}

@@ -23,11 +23,26 @@ func HostForRoute(route *routeapi.Route) string {
 type HostToRouteMap map[string][]*routeapi.Route
 type RouteToHostMap map[string]string
 
+// RejectionRecorder is an object capable of recording why a route was rejected
+type RejectionRecorder interface {
+	RecordRouteRejection(route *routeapi.Route, reason, message string)
+}
+
+var LogRejections = logRecorder{}
+
+type logRecorder struct{}
+
+func (_ logRecorder) RecordRouteRejection(route *routeapi.Route, reason, message string) {
+	glog.V(4).Infof("Rejected route %s: %s: %s", route.Name, reason, message)
+}
+
 // UniqueHost implements the router.Plugin interface to provide
 // a template based, backend-agnostic router.
 type UniqueHost struct {
 	plugin       router.Plugin
 	hostForRoute RouteHostFunc
+
+	recorder RejectionRecorder
 
 	hostToRoute HostToRouteMap
 	routeToHost RouteToHostMap
@@ -36,11 +51,14 @@ type UniqueHost struct {
 }
 
 // NewUniqueHost creates a plugin wrapper that ensures only unique routes are passed into
-// the underlying plugin.
-func NewUniqueHost(plugin router.Plugin, fn RouteHostFunc) *UniqueHost {
+// the underlying plugin. Recorder is an interface for indicating why a route was
+// rejected.
+func NewUniqueHost(plugin router.Plugin, fn RouteHostFunc, recorder RejectionRecorder) *UniqueHost {
 	return &UniqueHost{
 		plugin:       plugin,
 		hostForRoute: fn,
+
+		recorder: recorder,
 
 		hostToRoute: make(HostToRouteMap),
 		routeToHost: make(RouteToHostMap),
@@ -75,12 +93,12 @@ func (p *UniqueHost) HandleRoute(eventType watch.EventType, route *routeapi.Rout
 		return nil
 	}
 
-	key := routeKey(route)
 	routeName := routeNameKey(route)
 
 	host := p.hostForRoute(route)
 	if len(host) == 0 {
 		glog.V(4).Infof("Route %s has no host value", routeName)
+		p.recorder.RecordRouteRejection(route, "NoHostValue", "no host value was defined for the route")
 		return nil
 	}
 	route.Spec.Host = host
@@ -95,37 +113,47 @@ func (p *UniqueHost) HandleRoute(eventType watch.EventType, route *routeapi.Rout
 			added := false
 			for i := range old {
 				if old[i].Spec.Path == route.Spec.Path {
-					if old[i].CreationTimestamp.Before(route.CreationTimestamp) {
+					if routeapi.RouteLessThan(old[i], route) {
 						glog.V(4).Infof("Route %s cannot take %s from %s", routeName, host, routeNameKey(oldest))
-						return fmt.Errorf("route %s holds %s and is older than %s", routeNameKey(oldest), host, key)
+						err := fmt.Errorf("route %s already exposes %s and is older", oldest.Name, host)
+						p.recorder.RecordRouteRejection(route, "HostAlreadyClaimed", err.Error())
+						return err
 					}
-					glog.V(4).Infof("Route %s will replace path %s from %s because it is older", routeName, route.Spec.Path, routeNameKey(old[i]))
+					added = true
+					if old[i].Namespace == route.Namespace && old[i].Name == route.Name {
+						old[i] = route
+						break
+					}
+					glog.V(4).Infof("route %s will replace path %s from %s because it is older", routeName, route.Spec.Path, old[i].Name)
+					p.recorder.RecordRouteRejection(old[i], "HostAlreadyClaimed", fmt.Sprintf("replaced by older route %s", route.Name))
 					p.plugin.HandleRoute(watch.Deleted, old[i])
 					old[i] = route
-					added = true
 				}
 			}
 			if !added {
-				if route.CreationTimestamp.Before(oldest.CreationTimestamp) {
+				if routeapi.RouteLessThan(route, oldest) {
 					p.hostToRoute[host] = append([]*routeapi.Route{route}, old...)
 				} else {
 					p.hostToRoute[host] = append(old, route)
 				}
 			}
 		} else {
-			if oldest.CreationTimestamp.Before(route.CreationTimestamp) {
+			if routeapi.RouteLessThan(oldest, route) {
 				glog.V(4).Infof("Route %s cannot take %s from %s", routeName, host, routeNameKey(oldest))
-				return fmt.Errorf("route %s holds %s and is older than %s", routeNameKey(oldest), host, key)
+				err := fmt.Errorf("a route in another namespace holds %s and is older than %s", host, route.Name)
+				p.recorder.RecordRouteRejection(route, "HostAlreadyClaimed", err.Error())
+				return err
 			}
 
 			glog.V(4).Infof("Route %s is reclaiming %s from namespace %s", routeName, host, oldest.Namespace)
 			for i := range old {
+				p.recorder.RecordRouteRejection(old[i], "HostAlreadyClaimed", fmt.Sprintf("namespace %s owns hostname %s", oldest.Namespace, host))
 				p.plugin.HandleRoute(watch.Deleted, old[i])
 			}
 			p.hostToRoute[host] = []*routeapi.Route{route}
 		}
 	} else {
-		glog.V(4).Infof("Route %s claims %s", key, host)
+		glog.V(4).Infof("Route %s claims %s", routeName, host)
 		p.hostToRoute[host] = []*routeapi.Route{route}
 	}
 
@@ -133,7 +161,7 @@ func (p *UniqueHost) HandleRoute(eventType watch.EventType, route *routeapi.Rout
 	case watch.Added, watch.Modified:
 		if old, ok := p.routeToHost[routeName]; ok {
 			if old != host {
-				glog.V(4).Infof("Route %s changed from serving host %s to host %s", key, old, host)
+				glog.V(4).Infof("Route %s changed from serving host %s to host %s", routeName, old, host)
 				delete(p.hostToRoute, old)
 			}
 		}
@@ -141,7 +169,7 @@ func (p *UniqueHost) HandleRoute(eventType watch.EventType, route *routeapi.Rout
 		return p.plugin.HandleRoute(eventType, route)
 
 	case watch.Deleted:
-		glog.V(4).Infof("Deleting routes for %s", key)
+		glog.V(4).Infof("Deleting routes for %s", routeName)
 		if old, ok := p.hostToRoute[host]; ok {
 			switch len(old) {
 			case 1, 0:
@@ -183,9 +211,18 @@ func (p *UniqueHost) HandleNamespaces(namespaces sets.String) error {
 	return p.plugin.HandleNamespaces(namespaces)
 }
 
-// routeKey returns the internal router key to use for the given Route.
-func routeKey(route *routeapi.Route) string {
-	return fmt.Sprintf("%s/%s", route.Namespace, route.Spec.To.Name)
+func (p *UniqueHost) SetLastSyncProcessed(processed bool) error {
+	return p.plugin.SetLastSyncProcessed(processed)
+}
+
+// routeKeys returns the internal router key to use for the given Route.
+func routeKeys(route *routeapi.Route) []string {
+	keys := make([]string, 1+len(route.Spec.AlternateBackends))
+	keys[0] = fmt.Sprintf("%s/%s", route.Namespace, route.Spec.To.Name)
+	for i, svc := range route.Spec.AlternateBackends {
+		keys[i] = fmt.Sprintf("%s/%s", route.Namespace, svc.Name)
+	}
+	return keys
 }
 
 // routeNameKey returns a unique name for a given route

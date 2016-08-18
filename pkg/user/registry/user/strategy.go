@@ -8,7 +8,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	"github.com/openshift/origin/pkg/user/api"
 	"github.com/openshift/origin/pkg/user/api/validation"
@@ -38,7 +38,7 @@ func (userStrategy) PrepareForCreate(obj runtime.Object) {
 }
 
 // Validate validates a new user
-func (userStrategy) Validate(ctx kapi.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (userStrategy) Validate(ctx kapi.Context, obj runtime.Object) field.ErrorList {
 	return validation.ValidateUser(obj.(*api.User))
 }
 
@@ -51,26 +51,23 @@ func (userStrategy) AllowUnconditionalUpdate() bool {
 	return false
 }
 
+// Canonicalize normalizes the object after validation.
+func (userStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // ValidateUpdate is the default update validation for an end user.
-func (userStrategy) ValidateUpdate(ctx kapi.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (userStrategy) ValidateUpdate(ctx kapi.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateUserUpdate(obj.(*api.User), old.(*api.User))
 }
 
-// MatchUser returns a generic matcher for a given label and field selector.
-func MatchUser(label labels.Selector, field fields.Selector) generic.Matcher {
+// Matcher returns a generic matcher for a given label and field selector.
+func Matcher(label labels.Selector, field fields.Selector) generic.Matcher {
 	return generic.MatcherFunc(func(obj runtime.Object) (bool, error) {
 		userObj, ok := obj.(*api.User)
 		if !ok {
 			return false, fmt.Errorf("not a user")
 		}
-		fields := UserToSelectableFields(userObj)
+		fields := api.UserToSelectableFields(userObj)
 		return label.Matches(labels.Set(userObj.Labels)) && field.Matches(fields), nil
 	})
-}
-
-// UserToSelectableFields returns a label set that represents the object
-func UserToSelectableFields(user *api.User) labels.Set {
-	return labels.Set{
-		"name": user.Name,
-	}
 }

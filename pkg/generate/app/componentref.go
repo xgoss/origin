@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"k8s.io/kubernetes/pkg/util/errors"
 )
 
 // IsComponentReference returns true if the provided string appears to be a reference to a source repository
@@ -67,6 +69,11 @@ func (r ComponentReferences) filter(filterFunc func(ref ComponentReference) bool
 	return refs
 }
 
+// HasSource returns true if there is more than one component that has a repo associated
+func (r ComponentReferences) HasSource() bool {
+	return len(r.filter(func(ref ComponentReference) bool { return ref.Input().Uses != nil })) > 0
+}
+
 // NeedsSource returns all the components that need source code in order to build
 func (r ComponentReferences) NeedsSource() (refs ComponentReferences) {
 	return r.filter(func(ref ComponentReference) bool {
@@ -74,9 +81,19 @@ func (r ComponentReferences) NeedsSource() (refs ComponentReferences) {
 	})
 }
 
+// UseSource returns all the components that use source repositories
+func (r ComponentReferences) UseSource() (refs ComponentReferences) {
+	return r.filter(func(ref ComponentReference) bool {
+		return ref.Input().Uses != nil
+	})
+}
+
 // ImageComponentRefs returns the list of component references to images
 func (r ComponentReferences) ImageComponentRefs() (refs ComponentReferences) {
 	return r.filter(func(ref ComponentReference) bool {
+		if ref.Input().ScratchImage {
+			return true
+		}
 		return ref.Input() != nil && ref.Input().ResolvedMatch != nil && ref.Input().ResolvedMatch.IsImage()
 	})
 }
@@ -88,13 +105,24 @@ func (r ComponentReferences) TemplateComponentRefs() (refs ComponentReferences) 
 	})
 }
 
+// InstallableComponentRefs returns the list of component references to templates
+func (r ComponentReferences) InstallableComponentRefs() (refs ComponentReferences) {
+	return r.filter(func(ref ComponentReference) bool {
+		return ref.Input() != nil && ref.Input().ResolvedMatch != nil && ref.Input().ResolvedMatch.GeneratorInput.Job
+	})
+}
+
 func (r ComponentReferences) String() string {
+	return r.HumanString(",")
+}
+
+func (r ComponentReferences) HumanString(separator string) string {
 	components := []string{}
 	for _, ref := range r {
 		components = append(components, ref.Input().Value)
 	}
 
-	return strings.Join(components, ",")
+	return strings.Join(components, separator)
 }
 
 // GroupedComponentReferences is a set of components that can be grouped
@@ -121,6 +149,38 @@ func (r ComponentReferences) Group() (refs []ComponentReferences) {
 		refs[len(refs)-1] = append(refs[len(refs)-1], ref)
 	}
 	return
+}
+
+// Resolve the references to ensure they are all valid, and identify any images that don't match user input.
+func (components ComponentReferences) Resolve() error {
+	errs := []error{}
+	for _, ref := range components {
+		if err := ref.Resolve(); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+	}
+	return errors.NewAggregate(errs)
+}
+
+// Search searches on all references
+func (components ComponentReferences) Search() error {
+	errs := []error{}
+	for _, ref := range components {
+		if err := ref.Search(); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+	}
+	return errors.NewAggregate(errs)
+}
+
+// GeneratorJobReference is a reference that should be treated as a job execution,
+// not a direct app creation.
+type GeneratorJobReference struct {
+	Ref   ComponentReference
+	Input GeneratorInput
+	Err   error
 }
 
 // ReferenceBuilder is used for building all the necessary object references
@@ -232,11 +292,13 @@ func NewComponentInput(input string) (*ComponentInput, string, error) {
 
 // ComponentInput is the necessary input for creating a component
 type ComponentInput struct {
-	GroupID       int
-	From          string
-	Argument      string
-	Value         string
+	GroupID  int
+	From     string
+	Argument string
+	Value    string
+
 	ExpectToBuild bool
+	ScratchImage  bool
 
 	Uses          *SourceRepository
 	ResolvedMatch *ComponentMatch
@@ -259,7 +321,7 @@ func (i *ComponentInput) NeedsSource() bool {
 // Resolve sets the unique match in input
 func (i *ComponentInput) Resolve() error {
 	if i.Resolver == nil {
-		return ErrNoMatch{value: i.Value, qualifier: "no resolver defined"}
+		return ErrNoMatch{Value: i.Value, Qualifier: "no resolver defined"}
 	}
 	match, err := i.Resolver.Resolve(i.Value)
 	if err != nil {
@@ -274,13 +336,13 @@ func (i *ComponentInput) Resolve() error {
 // Search sets the search matches in input
 func (i *ComponentInput) Search() error {
 	if i.Searcher == nil {
-		return ErrNoMatch{value: i.Value, qualifier: "no searcher defined"}
+		return ErrNoMatch{Value: i.Value, Qualifier: "no searcher defined"}
 	}
-	matches, err := i.Searcher.Search(i.Value)
+	matches, err := i.Searcher.Search(false, i.Value)
 	if matches != nil {
 		i.SearchMatches = matches
 	}
-	return err
+	return errors.NewAggregate(err)
 }
 
 func (i *ComponentInput) String() string {

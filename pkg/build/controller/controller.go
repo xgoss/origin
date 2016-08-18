@@ -7,12 +7,15 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	errors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/client/record"
-	"k8s.io/kubernetes/pkg/util"
+	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	buildclient "github.com/openshift/origin/pkg/build/client"
+	"github.com/openshift/origin/pkg/build/controller/policy"
+	strategy "github.com/openshift/origin/pkg/build/controller/strategy"
 	buildutil "github.com/openshift/origin/pkg/build/util"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 )
@@ -20,10 +23,12 @@ import (
 // BuildController watches build resources and manages their state
 type BuildController struct {
 	BuildUpdater      buildclient.BuildUpdater
+	BuildLister       buildclient.BuildLister
 	PodManager        podManager
 	BuildStrategy     BuildStrategy
 	ImageStreamClient imageStreamClient
 	Recorder          record.EventRecorder
+	RunPolicies       []policy.RunPolicy
 }
 
 // BuildStrategy knows how to create a pod spec for a pod which can execute a build.
@@ -50,7 +55,7 @@ func (bc *BuildController) CancelBuild(build *buildapi.Build) error {
 
 	glog.V(4).Infof("Cancelling build %s/%s.", build.Namespace, build.Name)
 
-	pod, err := bc.PodManager.GetPod(build.Namespace, buildutil.GetBuildPodName(build))
+	pod, err := bc.PodManager.GetPod(build.Namespace, buildapi.GetBuildPodName(build))
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("Failed to get pod for build %s/%s: %v", build.Namespace, build.Name, err)
@@ -63,7 +68,9 @@ func (bc *BuildController) CancelBuild(build *buildapi.Build) error {
 	}
 
 	build.Status.Phase = buildapi.BuildPhaseCancelled
-	now := util.Now()
+	build.Status.Reason = ""
+	build.Status.Message = ""
+	now := unversioned.Now()
 	build.Status.CompletionTimestamp = &now
 	if err := bc.BuildUpdater.Update(build.Namespace, build); err != nil {
 		return fmt.Errorf("Failed to update build %s/%s: %v", build.Namespace, build.Name, err)
@@ -73,21 +80,45 @@ func (bc *BuildController) CancelBuild(build *buildapi.Build) error {
 	return nil
 }
 
-// HandleBuild deletes pods for canceled builds and takes new builds and puts
+// HandleBuild deletes pods for cancelled builds and takes new builds and puts
 // them in the pending state after creating a corresponding pod
 func (bc *BuildController) HandleBuild(build *buildapi.Build) error {
-	glog.V(4).Infof("Handling build %s/%s", build.Namespace, build.Name)
+	// these builds are processed/updated/etc by the jenkins sync plugin
+	if build.Spec.Strategy.JenkinsPipelineStrategy != nil {
+		glog.V(4).Infof("Ignoring build with jenkins pipeline strategy")
+		return nil
+	}
+	glog.V(4).Infof("Handling build %s/%s (%s)", build.Namespace, build.Name, build.Status.Phase)
+
+	runPolicy := policy.ForBuild(build, bc.RunPolicies)
+	if runPolicy == nil {
+		return fmt.Errorf("unable to determine build scheduler for %s/%s", build.Namespace, build.Name)
+	}
+
+	if buildutil.IsBuildComplete(build) {
+		if err := runPolicy.OnComplete(build); err != nil {
+			return err
+		}
+		return nil
+	}
 
 	// A cancelling event was triggered for the build, delete its pod and update build status.
 	if build.Status.Cancelled && build.Status.Phase != buildapi.BuildPhaseCancelled {
+		glog.V(5).Infof("Marking build %s/%s as cancelled", build.Namespace, build.Name)
 		if err := bc.CancelBuild(build); err != nil {
+			build.Status.Reason = buildapi.StatusReasonCancelBuildFailed
 			return fmt.Errorf("Failed to cancel build %s/%s: %v, will retry", build.Namespace, build.Name, err)
 		}
 	}
 
-	// Handle new builds
+	// Handle only new builds from this point
 	if build.Status.Phase != buildapi.BuildPhaseNew {
 		return nil
+	}
+
+	// The runPolicy decides whether to execute this build or not.
+	if run, err := runPolicy.IsRunnable(build); err != nil || !run {
+		return err
 	}
 
 	if err := bc.nextBuildPhase(build); err != nil {
@@ -112,18 +143,24 @@ func (bc *BuildController) nextBuildPhase(build *buildapi.Build) error {
 	if build.Status.Cancelled {
 		glog.V(4).Infof("Cancelling build %s/%s.", build.Namespace, build.Name)
 		build.Status.Phase = buildapi.BuildPhaseCancelled
+		build.Status.Reason = ""
+		build.Status.Message = ""
+		return nil
+	}
+
+	// these builds are processed/updated/etc by the jenkins sync plugin
+	if build.Spec.Strategy.JenkinsPipelineStrategy != nil {
+		glog.V(4).Infof("Ignoring build with jenkins pipeline strategy")
 		return nil
 	}
 
 	// Set the output Docker image reference.
 	ref, err := bc.resolveOutputDockerImageReference(build)
 	if err != nil {
+		build.Status.Reason = buildapi.StatusReasonInvalidOutputReference
 		return err
 	}
 	build.Status.OutputDockerImageReference = ref
-
-	// Set the build phase, which will be persisted if no error occurs.
-	build.Status.Phase = buildapi.BuildPhasePending
 
 	// Make a copy to avoid mutating the build from this point on.
 	copy, err := kapi.Scheme.Copy(build)
@@ -149,21 +186,32 @@ func (bc *BuildController) nextBuildPhase(build *buildapi.Build) error {
 	// Invoke the strategy to get a build pod.
 	podSpec, err := bc.BuildStrategy.CreateBuildPod(buildCopy)
 	if err != nil {
-		return fmt.Errorf("failed to create a build pod spec with strategy %q: %v", build.Spec.Strategy.Type, err)
+		build.Status.Reason = buildapi.StatusReasonCannotCreateBuildPodSpec
+		if strategy.IsFatal(err) {
+			return strategy.FatalError(fmt.Sprintf("failed to create a build pod spec for build %s/%s: %v", build.Namespace, build.Name, err))
+		}
+		return fmt.Errorf("failed to create a build pod spec for build %s/%s: %v", build.Namespace, build.Name, err)
 	}
 	glog.V(4).Infof("Pod %s for build %s/%s is about to be created", podSpec.Name, build.Namespace, build.Name)
 
 	if _, err := bc.PodManager.CreatePod(build.Namespace, podSpec); err != nil {
 		if errors.IsAlreadyExists(err) {
+			bc.Recorder.Eventf(build, kapi.EventTypeWarning, "failedCreate", "Pod already exists: %s/%s", podSpec.Namespace, podSpec.Name)
 			glog.V(4).Infof("Build pod already existed: %#v", podSpec)
 			return nil
 		}
 		// Log an event if the pod is not created (most likely due to quota denial).
-		bc.Recorder.Eventf(build, "failedCreate", "Error creating: %v", err)
+		bc.Recorder.Eventf(build, kapi.EventTypeWarning, "FailedCreate", "Error creating: %v", err)
+		build.Status.Reason = buildapi.StatusReasonCannotCreateBuildPod
 		return fmt.Errorf("failed to create build pod: %v", err)
 	}
-
+	setBuildPodNameAnnotation(build, podSpec.Name)
 	glog.V(4).Infof("Created pod for build: %#v", podSpec)
+
+	// Set the build phase, which will be persisted.
+	build.Status.Phase = buildapi.BuildPhasePending
+	build.Status.Reason = ""
+	build.Status.Message = ""
 	return nil
 }
 
@@ -204,7 +252,7 @@ func (bc *BuildController) resolveOutputDockerImageReference(build *buildapi.Bui
 		}
 		if len(stream.Status.DockerImageRepository) == 0 {
 			e := fmt.Errorf("the image stream %s/%s cannot be used as the output for build %s/%s because the integrated Docker registry is not configured and no external registry was defined", namespace, outputTo.Name, build.Namespace, build.Name)
-			bc.Recorder.Eventf(build, "invalidOutput", "Error starting build: %v", e)
+			bc.Recorder.Eventf(build, kapi.EventTypeWarning, "invalidOutput", "Error starting build: %v", e)
 			return "", e
 		}
 		ref = fmt.Sprintf("%s%s", stream.Status.DockerImageRepository, tag)
@@ -216,6 +264,7 @@ func (bc *BuildController) resolveOutputDockerImageReference(build *buildapi.Bui
 type BuildPodController struct {
 	BuildStore   cache.Store
 	BuildUpdater buildclient.BuildUpdater
+	SecretClient kclient.SecretsNamespacer
 	PodManager   podManager
 }
 
@@ -234,13 +283,26 @@ func (bc *BuildPodController) HandlePod(pod *kapi.Pod) error {
 	build := obj.(*buildapi.Build)
 
 	nextStatus := build.Status.Phase
+	currentReason := build.Status.Reason
+
 	switch pod.Status.Phase {
 	case kapi.PodRunning:
 		// The pod's still running
+		build.Status.Reason = ""
 		nextStatus = buildapi.BuildPhaseRunning
+	case kapi.PodPending:
+		build.Status.Reason = ""
+		nextStatus = buildapi.BuildPhasePending
+		if secret := build.Spec.Output.PushSecret; secret != nil && currentReason != buildapi.StatusReasonMissingPushSecret {
+			if _, err := bc.SecretClient.Secrets(build.Namespace).Get(secret.Name); err != nil && errors.IsNotFound(err) {
+				build.Status.Reason = buildapi.StatusReasonMissingPushSecret
+				glog.V(4).Infof("Setting reason for pending build to %q due to missing secret %s/%s", build.Status.Reason, build.Namespace, secret.Name)
+			}
+		}
 	case kapi.PodSucceeded:
 		// Check the exit codes of all the containers in the pod
 		nextStatus = buildapi.BuildPhaseComplete
+		build.Status.Reason = ""
 		if len(pod.Status.ContainerStatuses) == 0 {
 			// no containers in the pod means something went badly wrong, so the build
 			// should be failed.
@@ -255,18 +317,27 @@ func (bc *BuildPodController) HandlePod(pod *kapi.Pod) error {
 			}
 		}
 	case kapi.PodFailed:
+		build.Status.Reason = ""
 		nextStatus = buildapi.BuildPhaseFailed
 	}
 
-	if build.Status.Phase != nextStatus {
-		glog.V(4).Infof("Updating build %s/%s status %s -> %s", build.Namespace, build.Name, build.Status.Phase, nextStatus)
+	// Update the build object when it progress to a next state or the reason for
+	// the current state changed.
+	if (!hasBuildPodNameAnnotation(build) || build.Status.Phase != nextStatus) && !buildutil.IsBuildComplete(build) {
+		setBuildPodNameAnnotation(build, pod.Name)
+		reason := ""
+		if len(build.Status.Reason) > 0 {
+			reason = " (" + string(build.Status.Reason) + ")"
+		}
+		glog.V(4).Infof("Updating build %s/%s status %s -> %s%s", build.Namespace, build.Name, build.Status.Phase, nextStatus, reason)
 		build.Status.Phase = nextStatus
+		build.Status.Message = ""
 		if buildutil.IsBuildComplete(build) {
-			now := util.Now()
+			now := unversioned.Now()
 			build.Status.CompletionTimestamp = &now
 		}
 		if build.Status.Phase == buildapi.BuildPhaseRunning {
-			now := util.Now()
+			now := unversioned.Now()
 			build.Status.StartTimestamp = &now
 		}
 		if err := bc.BuildUpdater.Update(build.Namespace, build); err != nil {
@@ -302,9 +373,13 @@ func (bc *BuildPodDeleteController) HandleBuildPodDeletion(pod *kapi.Pod) error 
 	}
 	build := obj.(*buildapi.Build)
 
+	if build.Spec.Strategy.JenkinsPipelineStrategy != nil {
+		glog.V(4).Infof("Build %s/%s is a pipeline build, ignoring", build.Namespace, build.Name)
+		return nil
+	}
 	// If build was cancelled, we'll leave HandleBuild to update the build
 	if build.Status.Cancelled {
-		glog.V(4).Infof("Cancelation for build was already triggered, ignoring")
+		glog.V(4).Infof("Cancelation for build %s/%s was already triggered, ignoring", build.Namespace, build.Name)
 		return nil
 	}
 
@@ -317,8 +392,9 @@ func (bc *BuildPodDeleteController) HandleBuildPodDeletion(pod *kapi.Pod) error 
 	if build.Status.Phase != nextStatus {
 		glog.V(4).Infof("Updating build %s/%s status %s -> %s", build.Namespace, build.Name, build.Status.Phase, nextStatus)
 		build.Status.Phase = nextStatus
+		build.Status.Reason = buildapi.StatusReasonBuildPodDeleted
 		build.Status.Message = "The pod for this build was deleted before the build completed."
-		now := util.Now()
+		now := unversioned.Now()
 		build.Status.CompletionTimestamp = &now
 		if err := bc.BuildUpdater.Update(build.Namespace, build); err != nil {
 			return fmt.Errorf("Failed to update build %s/%s: %v", build.Namespace, build.Name, err)
@@ -335,7 +411,11 @@ type BuildDeleteController struct {
 // HandleBuildDeletion deletes a build pod if the corresponding build has been deleted
 func (bc *BuildDeleteController) HandleBuildDeletion(build *buildapi.Build) error {
 	glog.V(4).Infof("Handling deletion of build %s", build.Name)
-	podName := buildutil.GetBuildPodName(build)
+	if build.Spec.Strategy.JenkinsPipelineStrategy != nil {
+		glog.V(4).Infof("Ignoring build with jenkins pipeline strategy")
+		return nil
+	}
+	podName := buildapi.GetBuildPodName(build)
 	pod, err := bc.PodManager.GetPod(build.Namespace, podName)
 	if err != nil && !errors.IsNotFound(err) {
 		glog.V(2).Infof("Failed to find pod with name %s for build %s in namespace %s due to error: %v", podName, build.Name, build.Namespace, err)
@@ -345,7 +425,7 @@ func (bc *BuildDeleteController) HandleBuildDeletion(build *buildapi.Build) erro
 		glog.V(2).Infof("Did not find pod with name %s for build %s in namespace %s", podName, build.Name, build.Namespace)
 		return nil
 	}
-	if buildName, _ := buildutil.GetBuildLabel(pod); buildName != build.Name {
+	if buildName := buildapi.GetBuildName(pod); buildName != build.Name {
 		glog.V(2).Infof("Not deleting pod %s/%s because the build label %s does not match the build name %s", pod.Namespace, podName, buildName, build.Name)
 		return nil
 	}
@@ -366,4 +446,19 @@ func buildKey(pod *kapi.Pod) *buildapi.Build {
 			Namespace: pod.Namespace,
 		},
 	}
+}
+
+func hasBuildPodNameAnnotation(build *buildapi.Build) bool {
+	if build.Annotations == nil {
+		return false
+	}
+	_, hasAnnotation := build.Annotations[buildapi.BuildPodNameAnnotation]
+	return hasAnnotation
+}
+
+func setBuildPodNameAnnotation(build *buildapi.Build, podName string) {
+	if build.Annotations == nil {
+		build.Annotations = map[string]string{}
+	}
+	build.Annotations[buildapi.BuildPodNameAnnotation] = podName
 }

@@ -25,7 +25,7 @@ func (d NodeConfigCheck) Description() string {
 }
 func (d NodeConfigCheck) CanRun() (bool, error) {
 	if len(d.NodeConfigFile) == 0 {
-		return false, errors.New("must have node config file")
+		return false, errors.New("No node config file was detected")
 	}
 
 	return true, nil
@@ -41,8 +41,20 @@ func (d NodeConfigCheck) Check() types.DiagnosticResult {
 
 	r.Info("DH1003", fmt.Sprintf("Found a node config file: %[1]s", d.NodeConfigFile))
 
-	for _, err := range configvalidation.ValidateNodeConfig(nodeConfig) {
-		r.Error("DH1004", err, fmt.Sprintf("Validation of node config file '%s' failed:\n(%T) %[2]v", d.NodeConfigFile, err))
+	results := configvalidation.ValidateNodeConfig(nodeConfig, nil)
+	if len(results.Errors) > 0 {
+		errText := fmt.Sprintf("Validation of node config file '%s' failed:\n", d.NodeConfigFile)
+		for _, err := range results.Errors {
+			errText += fmt.Sprintf("%v\n", err)
+		}
+		r.Error("DH1004", nil, errText)
+	}
+	if len(results.Warnings) > 0 {
+		warnText := fmt.Sprintf("Validation of node config file '%s' warned:\n", d.NodeConfigFile)
+		for _, warn := range results.Warnings {
+			warnText += fmt.Sprintf("%v\n", warn)
+		}
+		r.Warn("DH1005", nil, warnText)
 	}
 	return r
 }

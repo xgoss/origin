@@ -5,15 +5,16 @@ import (
 	"compress/gzip"
 	"encoding/hex"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
+	"text/template"
 
-	"k8s.io/kubernetes/pkg/util"
+	"github.com/openshift/origin/pkg/quota/admission/clusterresourceoverride/api"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 )
 
 var varyHeaderRegexp = regexp.MustCompile("\\s*,\\s*")
@@ -141,29 +142,48 @@ func HTML5ModeHandler(contextRoot string, subcontextMap map[string]string, h htt
 	}), nil
 }
 
+var versionTemplate = template.Must(template.New("webConsoleVersion").Parse(`
+window.OPENSHIFT_VERSION = {
+  openshift: "{{ .OpenShiftVersion | js}}",
+  kubernetes: "{{ .KubernetesVersion | js}}"
+};
+`))
+
+type WebConsoleVersion struct {
+	KubernetesVersion string
+	OpenShiftVersion  string
+}
+
+var extensionPropertiesTemplate = template.Must(template.New("webConsoleExtensionProperties").Parse(`
+window.OPENSHIFT_EXTENSION_PROPERTIES = {
+{{ range $i, $property := .ExtensionProperties }}{{ if $i }},{{ end }}
+  "{{ $property.Key | js }}": "{{ $property.Value | js }}"{{ end }}
+};
+`))
+
+type WebConsoleExtensionProperty struct {
+	Key   string
+	Value string
+}
+
+type WebConsoleExtensionProperties struct {
+	ExtensionProperties []WebConsoleExtensionProperty
+}
+
 var configTemplate = template.Must(template.New("webConsoleConfig").Parse(`
 window.OPENSHIFT_CONFIG = {
+  apis: {
+    hostPort: "{{ .APIGroupAddr | js}}",
+    prefix: "{{ .APIGroupPrefix | js}}"
+  },
   api: {
     openshift: {
       hostPort: "{{ .MasterAddr | js}}",
-      prefixes: {
-        "v1beta3": "{{ .MasterLegacyPrefix | js}}",
-        "*":       "{{ .MasterPrefix | js}}"
-      },
-      resources: {
-{{range $i,$e := .MasterResources}}{{if $i}},
-{{end}}        "{{$e | js}}": true{{end}}
-      }
+      prefix: "{{ .MasterPrefix | js}}"
     },
     k8s: {
       hostPort: "{{ .KubernetesAddr | js}}",
-      prefixes: {
-      	"*": "{{ .KubernetesPrefix | js}}"
-      },
-      resources: {
-{{range $i,$e := .KubernetesResources}}{{if $i}},
-{{end}}        "{{$e | js}}": true{{end}}
-      }
+      prefix: "{{ .KubernetesPrefix | js}}"
     }
   },
   auth: {
@@ -171,17 +191,28 @@ window.OPENSHIFT_CONFIG = {
   	oauth_redirect_base: "{{ .OAuthRedirectBase | js}}",
   	oauth_client_id: "{{ .OAuthClientID | js}}",
   	logout_uri: "{{ .LogoutURI | js}}"
-  }
+  },
+  {{ with .LimitRequestOverrides }}
+  limitRequestOverrides: {
+	limitCPUToMemoryPercent: {{ .LimitCPUToMemoryPercent }},
+	cpuRequestToLimitPercent: {{ .CPURequestToLimitPercent }},
+	memoryRequestToLimitPercent: {{ .MemoryRequestToLimitPercent }}
+  },
+  {{ end }}
+  loggingURL: "{{ .LoggingURL | js}}",
+  metricsURL: "{{ .MetricsURL | js}}"
 };
 `))
 
 type WebConsoleConfig struct {
+	// APIGroupAddr is the host:port the UI should call the API groups on. Scheme is derived from the scheme the UI is served on, so they must be the same.
+	APIGroupAddr string
+	// APIGroupPrefix is the API group context root
+	APIGroupPrefix string
 	// MasterAddr is the host:port the UI should call the master API on. Scheme is derived from the scheme the UI is served on, so they must be the same.
 	MasterAddr string
 	// MasterPrefix is the OpenShift API context root
 	MasterPrefix string
-	// MasterLegacyPrefix is the OpenShift API context root for legacy API versions
-	MasterLegacyPrefix string
 	// MasterResources holds resource names for the OpenShift API
 	MasterResources []string
 	// KubernetesAddr is the host:port the UI should call the kubernetes API on. Scheme is derived from the scheme the UI is served on, so they must be the same.
@@ -199,11 +230,30 @@ type WebConsoleConfig struct {
 	OAuthClientID string
 	// LogoutURI is an optional (absolute) URI to redirect to after completing a logout. If not specified, the built-in logout page is shown.
 	LogoutURI string
+	// LoggingURL is the endpoint for logging (optional)
+	LoggingURL string
+	// MetricsURL is the endpoint for metrics (optional)
+	MetricsURL string
+	// LimitRequestOverrides contains the ratios for overriding request/limit on containers.
+	// Applied in order:
+	//   LimitCPUToMemoryPercent
+	//   CPURequestToLimitPercent
+	//   MemoryRequestToLimitPercent
+	LimitRequestOverrides *api.ClusterResourceOverrideConfig
 }
 
-func GeneratedConfigHandler(config WebConsoleConfig) (http.Handler, error) {
+func GeneratedConfigHandler(config WebConsoleConfig, version WebConsoleVersion, extensionProps WebConsoleExtensionProperties) (http.Handler, error) {
 	var buffer bytes.Buffer
 	if err := configTemplate.Execute(&buffer, config); err != nil {
+		return nil, err
+	}
+	if err := versionTemplate.Execute(&buffer, version); err != nil {
+		return nil, err
+	}
+
+	// We include the extension properties in config.js and not extensions.js because we
+	// want them treated with the same caching behavior as the rest of the values in config.js
+	if err := extensionPropertiesTemplate.Execute(&buffer, extensionProps); err != nil {
 		return nil, err
 	}
 	content := buffer.Bytes()
@@ -211,9 +261,8 @@ func GeneratedConfigHandler(config WebConsoleConfig) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Cache-Control", "no-cache, no-store")
 		w.Header().Add("Content-Type", "application/javascript")
-		_, err := w.Write(content)
-		if err != nil {
-			util.HandleError(fmt.Errorf("Error serving Web Console configuration: %v", err))
+		if _, err := w.Write(content); err != nil {
+			utilruntime.HandleError(fmt.Errorf("Error serving Web Console config and version: %v", err))
 		}
 	}), nil
 }

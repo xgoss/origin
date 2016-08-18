@@ -15,8 +15,12 @@ type Marker struct {
 	Severity Severity
 	// Key is a short string to identify this message
 	Key string
+
 	// Message is a human-readable string that describes what is interesting
 	Message string
+	// Suggestion is a human-readable string that holds advice for resolving this
+	// marker.
+	Suggestion Suggestion
 }
 
 // Severity indicates how important this problem is.
@@ -24,6 +28,7 @@ type Severity string
 
 const (
 	// InfoSeverity is interesting
+	// TODO: Consider what to do with this once we revisit the graph api - currently not used.
 	InfoSeverity Severity = "info"
 	// WarningSeverity is probably wrong, but we aren't certain
 	WarningSeverity Severity = "warning"
@@ -34,7 +39,7 @@ const (
 type Markers []Marker
 
 // MarkerScanner is a function for analyzing a graph and finding interesting things in it
-type MarkerScanner func(g Graph) []Marker
+type MarkerScanner func(g Graph, f Namer) []Marker
 
 func (m Markers) BySeverity(severity Severity) []Marker {
 	ret := []Marker{}
@@ -45,6 +50,30 @@ func (m Markers) BySeverity(severity Severity) []Marker {
 	}
 
 	return ret
+}
+
+// FilterByNamespace returns all the markers that are not associated with missing nodes
+// from other namespaces (other than the provided namespace).
+func (m Markers) FilterByNamespace(namespace string) Markers {
+	filtered := Markers{}
+
+	for i := range m {
+		markerNodes := []graph.Node{}
+		markerNodes = append(markerNodes, m[i].Node)
+		markerNodes = append(markerNodes, m[i].RelatedNodes...)
+		hasCrossNamespaceLink := false
+		for _, node := range markerNodes {
+			if IsFromDifferentNamespace(namespace, node) {
+				hasCrossNamespaceLink = true
+				break
+			}
+		}
+		if !hasCrossNamespaceLink {
+			filtered = append(filtered, m[i])
+		}
+	}
+
+	return filtered
 }
 
 type BySeverity []Marker
@@ -96,4 +125,10 @@ func (m ByKey) Len() int      { return len(m) }
 func (m ByKey) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
 func (m ByKey) Less(i, j int) bool {
 	return m[i].Key < m[j].Key
+}
+
+type Suggestion string
+
+func (s Suggestion) String() string {
+	return string(s)
 }

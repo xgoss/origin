@@ -42,8 +42,8 @@ func (n ImageStreamNode) String() string {
 	return string(ImageStreamNodeName(n.ImageStream))
 }
 
-func (n ImageStreamNode) ResourceString() string {
-	return "is/" + n.Name
+func (n ImageStreamNode) UniqueName() osgraph.UniqueName {
+	return ImageStreamNodeName(n.ImageStream)
 }
 
 func (*ImageStreamNode) Kind() string {
@@ -83,8 +83,8 @@ func (n ImageStreamTagNode) String() string {
 	return string(ImageStreamTagNodeName(n.ImageStreamTag))
 }
 
-func (n ImageStreamTagNode) ResourceString() string {
-	return "imagestreamtag/" + n.Name
+func (n ImageStreamTagNode) UniqueName() osgraph.UniqueName {
+	return ImageStreamTagNodeName(n.ImageStreamTag)
 }
 
 func (*ImageStreamTagNode) Kind() string {
@@ -102,12 +102,29 @@ type ImageStreamImageNode struct {
 	IsFound bool
 }
 
+func (n ImageStreamImageNode) ImageSpec() string {
+	return n.ImageStreamImage.Namespace + "/" + n.ImageStreamImage.Name
+}
+
+func (n ImageStreamImageNode) ImageTag() string {
+	_, id, _ := imageapi.SplitImageStreamImage(n.ImageStreamImage.Name)
+	return id
+}
+
 func (n ImageStreamImageNode) Object() interface{} {
 	return n.ImageStreamImage
 }
 
 func (n ImageStreamImageNode) String() string {
 	return string(ImageStreamImageNodeName(n.ImageStreamImage))
+}
+
+func (n ImageStreamImageNode) ResourceString() string {
+	return "isimage/" + n.Name
+}
+
+func (n ImageStreamImageNode) UniqueName() osgraph.UniqueName {
+	return ImageStreamImageNodeName(n.ImageStreamImage)
 }
 
 func (*ImageStreamImageNode) Kind() string {
@@ -139,6 +156,10 @@ func (*DockerImageRepositoryNode) Kind() string {
 	return DockerRepositoryNodeKind
 }
 
+func (n DockerImageRepositoryNode) UniqueName() osgraph.UniqueName {
+	return DockerImageRepositoryNodeName(n.Ref)
+}
+
 func ImageNodeName(o *imageapi.Image) osgraph.UniqueName {
 	return osgraph.GetUniqueRuntimeObjectNodeName(ImageNodeKind, o)
 }
@@ -156,8 +177,8 @@ func (n ImageNode) String() string {
 	return string(ImageNodeName(n.Image))
 }
 
-func (n ImageNode) ResourceString() string {
-	return "image/" + n.Image.Name
+func (n ImageNode) UniqueName() osgraph.UniqueName {
+	return ImageNodeName(n.Image)
 }
 
 func (*ImageNode) Kind() string {

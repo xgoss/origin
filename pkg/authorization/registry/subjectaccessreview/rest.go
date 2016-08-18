@@ -8,7 +8,6 @@ import (
 	kapierrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/auth/user"
 	"k8s.io/kubernetes/pkg/runtime"
-	kutilerrors "k8s.io/kubernetes/pkg/util/errors"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	authorizationvalidation "github.com/openshift/origin/pkg/authorization/api/validation"
@@ -36,8 +35,8 @@ func (r *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("not a subjectAccessReview: %#v", obj))
 	}
-	if err := kutilerrors.NewAggregate(authorizationvalidation.ValidateSubjectAccessReview(subjectAccessReview)); err != nil {
-		return nil, err
+	if errs := authorizationvalidation.ValidateSubjectAccessReview(subjectAccessReview); len(errs) > 0 {
+		return nil, kapierrors.NewInvalid(authorizationapi.Kind(subjectAccessReview.Kind), "", errs)
 	}
 	// if a namespace is present on the request, then the namespace on the on the SAR is overwritten.
 	// This is to support backwards compatibility.  To have gotten here in this state, it means that
@@ -49,37 +48,64 @@ func (r *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 		// this check is mutually exclusive to the condition above.  localSAR and localRAR both clear the namespace before delegating their calls
 		// We only need to check if the SAR is allowed **again** if the authorizer didn't already approve the request for a legacy call.
 		return nil, err
-
 	}
 
-	var userToCheck user.Info
+	var userToCheck *user.DefaultInfo
 	if (len(subjectAccessReview.User) == 0) && (len(subjectAccessReview.Groups) == 0) {
 		// if no user or group was specified, use the info from the context
 		ctxUser, exists := kapi.UserFrom(ctx)
 		if !exists {
 			return nil, kapierrors.NewBadRequest("user missing from context")
 		}
-		userToCheck = ctxUser
+		// make a copy, we don't want to risk changing the original
+		newExtra := map[string][]string{}
+		for k, v := range ctxUser.GetExtra() {
+			if v == nil {
+				newExtra[k] = nil
+				continue
+			}
+			newSlice := make([]string, len(v), len(v))
+			copy(newSlice, v)
+			newExtra[k] = newSlice
+		}
+
+		userToCheck = &user.DefaultInfo{
+			Name:   ctxUser.GetName(),
+			Groups: ctxUser.GetGroups(),
+			UID:    ctxUser.GetUID(),
+			Extra:  newExtra,
+		}
 
 	} else {
 		userToCheck = &user.DefaultInfo{
 			Name:   subjectAccessReview.User,
 			Groups: subjectAccessReview.Groups.List(),
+			Extra:  map[string][]string{},
 		}
+	}
 
+	switch {
+	case subjectAccessReview.Scopes == nil:
+		// leave the scopes alone.  on a self-sar, this means "use incoming request", on regular-sar it means, "use no scope restrictions"
+	case len(subjectAccessReview.Scopes) == 0:
+		// this always means "use no scope restrictions", so delete them
+		delete(userToCheck.Extra, authorizationapi.ScopesKey)
+
+	case len(subjectAccessReview.Scopes) > 0:
+		// this always means, "use these scope restrictions", so force the value
+		userToCheck.Extra[authorizationapi.ScopesKey] = subjectAccessReview.Scopes
 	}
 
 	requestContext := kapi.WithNamespace(kapi.WithUser(ctx, userToCheck), subjectAccessReview.Action.Namespace)
 	attributes := authorizer.ToDefaultAuthorizationAttributes(subjectAccessReview.Action)
 	allowed, reason, err := r.authorizer.Authorize(requestContext, attributes)
-	if err != nil {
-		return nil, err
-	}
-
 	response := &authorizationapi.SubjectAccessReviewResponse{
 		Namespace: subjectAccessReview.Action.Namespace,
 		Allowed:   allowed,
 		Reason:    reason,
+	}
+	if err != nil {
+		response.EvaluationError = err.Error()
 	}
 
 	return response, nil
@@ -95,10 +121,10 @@ func (r *REST) isAllowed(ctx kapi.Context, sar *authorizationapi.SubjectAccessRe
 	allowed, reason, err := r.authorizer.Authorize(kapi.WithNamespace(ctx, sar.Action.Namespace), localSARAttributes)
 
 	if err != nil {
-		return kapierrors.NewForbidden(localSARAttributes.GetResource(), localSARAttributes.GetResourceName(), err)
+		return kapierrors.NewForbidden(authorizationapi.Resource(localSARAttributes.GetResource()), localSARAttributes.GetResourceName(), err)
 	}
 	if !allowed {
-		forbiddenError, _ := kapierrors.NewForbidden(localSARAttributes.GetResource(), localSARAttributes.GetResourceName(), errors.New("") /*discarded*/).(*kapierrors.StatusError)
+		forbiddenError := kapierrors.NewForbidden(authorizationapi.Resource(localSARAttributes.GetResource()), localSARAttributes.GetResourceName(), errors.New("") /*discarded*/)
 		forbiddenError.ErrStatus.Message = reason
 		return forbiddenError
 	}

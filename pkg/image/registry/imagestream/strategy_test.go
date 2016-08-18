@@ -2,18 +2,27 @@ package imagestream
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
+
+	kapi "k8s.io/kubernetes/pkg/api"
+	kapierrors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/auth/user"
+	kquota "k8s.io/kubernetes/pkg/quota"
+	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util/diff"
+	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
+	"github.com/openshift/origin/pkg/image/admission"
+	"github.com/openshift/origin/pkg/image/admission/testutil"
 	"github.com/openshift/origin/pkg/image/api"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
-	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 type fakeUser struct {
@@ -31,6 +40,12 @@ func (u *fakeUser) GetUID() string {
 
 func (u *fakeUser) GetGroups() []string {
 	return []string{"group1"}
+}
+
+func (u *fakeUser) GetExtra() map[string][]string {
+	return map[string][]string{
+		authorizationapi.ScopesKey: {"a", "b"},
+	}
 }
 
 type fakeDefaultRegistry struct {
@@ -73,6 +88,19 @@ func TestDockerImageRepository(t *testing.T) {
 			},
 			expected: "a/b",
 		},
+		"DockerImageRepository set on stream with default registry": {
+			stream: &api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "foo",
+					Name:      "somerepo",
+				},
+				Spec: api.ImageStreamSpec{
+					DockerImageRepository: "a/b",
+				},
+			},
+			defaultRegistry: "registry:5000",
+			expected:        "registry:5000/foo/somerepo",
+		},
 		"default namespace": {
 			stream: &api.ImageStream{
 				ObjectMeta: kapi.ObjectMeta{
@@ -105,7 +133,7 @@ func TestDockerImageRepository(t *testing.T) {
 	}
 
 	for testName, test := range tests {
-		strategy := NewStrategy(&fakeDefaultRegistry{test.defaultRegistry}, &fakeSubjectAccessReviewRegistry{})
+		strategy := NewStrategy(&fakeDefaultRegistry{test.defaultRegistry}, &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{})
 		value := strategy.dockerImageRepository(test.stream)
 		if e, a := test.expected, value; e != a {
 			t.Errorf("%s: expected %q, got %q", testName, e, a)
@@ -120,7 +148,7 @@ func TestTagVerifier(t *testing.T) {
 		sarError   error
 		sarAllowed bool
 		expectSar  bool
-		expected   fielderrors.ValidationErrorList
+		expected   field.ErrorList
 	}{
 		"old nil, no tags": {},
 		"old nil, all tags are new": {
@@ -189,8 +217,8 @@ func TestTagVerifier(t *testing.T) {
 					},
 				},
 			},
-			expected: fielderrors.ValidationErrorList{
-				fielderrors.NewFieldInvalid("spec.tags[latest].from.name", "a:b:c", "must be of the form <tag>, <repo>:<tag>, <id>, or <repo>@<id>"),
+			expected: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "tags").Key("latest").Child("from", "name"), "a:b:c", "must be of the form <tag>, <repo>:<tag>, <id>, or <repo>@<id>"),
 			},
 		},
 		"sar error": {
@@ -205,8 +233,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 			expectSar: true,
 			sarError:  errors.New("foo"),
-			expected: fielderrors.ValidationErrorList{
-				fielderrors.NewFieldForbidden("spec.tags[latest].from", "otherns/otherstream"),
+			expected: field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "tags").Key("latest").Child("from"), "otherns/otherstream"),
 			},
 		},
 		"sar denied": {
@@ -221,8 +249,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 			expectSar:  true,
 			sarAllowed: false,
-			expected: fielderrors.ValidationErrorList{
-				fielderrors.NewFieldForbidden("spec.tags[latest].from", "otherns/otherstream"),
+			expected: field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "tags").Key("latest").Child("from"), "otherns/otherstream"),
 			},
 		},
 		"ref changed": {
@@ -283,21 +311,224 @@ func TestTagVerifier(t *testing.T) {
 				t.Errorf("%s: sar namespace: expected %v, got %v", name, e, a)
 			}
 			expectedSar := &authorizationapi.SubjectAccessReview{
-				Action: authorizationapi.AuthorizationAttributes{
+				Action: authorizationapi.Action{
 					Verb:         "get",
-					Resource:     "imagestreams",
+					Resource:     "imagestreams/layers",
 					ResourceName: "otherstream",
 				},
 				User:   "user",
 				Groups: sets.NewString("group1"),
+				Scopes: []string{"a", "b"},
 			}
 			if e, a := expectedSar, sar.request; !reflect.DeepEqual(e, a) {
-				t.Errorf("%s: unexpected SAR request: %s", name, util.ObjectDiff(e, a))
+				t.Errorf("%s: unexpected SAR request: %s", name, diff.ObjectDiff(e, a))
 			}
 		}
 
 		if e, a := test.expected, errs; !reflect.DeepEqual(e, a) {
-			t.Errorf("%s: unexpected validation errors: %s", name, util.ObjectDiff(e, a))
+			t.Errorf("%s: unexpected validation errors: %s", name, diff.ObjectDiff(e, a))
+		}
+	}
+}
+
+func TestLimitVerifier(t *testing.T) {
+	makeISForbiddenError := func(isName string, exceeded []kapi.ResourceName) error {
+		if len(exceeded) == 0 {
+			return nil
+		}
+
+		exceededStrings := []string{}
+		for _, r := range exceeded {
+			exceededStrings = append(exceededStrings, string(r))
+		}
+		sort.Strings(exceededStrings)
+
+		err := fmt.Errorf("exceeded %s", strings.Join(exceededStrings, ","))
+
+		return kapierrors.NewForbidden(api.Resource("ImageStream"), isName, err)
+	}
+
+	makeISEvaluator := func(maxImages, maxImageTags int64) func(string, *api.ImageStream) error {
+		return func(ns string, is *api.ImageStream) error {
+			limit := kapi.ResourceList{
+				api.ResourceImageStreamImages: *resource.NewQuantity(maxImages, resource.DecimalSI),
+				api.ResourceImageStreamTags:   *resource.NewQuantity(maxImageTags, resource.DecimalSI),
+			}
+			usage := admission.GetImageStreamUsage(is)
+			if less, exceeded := kquota.LessThanOrEqual(usage, limit); !less {
+				return makeISForbiddenError(is.Name, exceeded)
+			}
+			return nil
+		}
+	}
+
+	tests := []struct {
+		name        string
+		isEvaluator func(string, *api.ImageStream) error
+		is          api.ImageStream
+		expected    field.ErrorList
+	}{
+		{
+			name: "no limit",
+			is: api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "test",
+					Name:      "is",
+				},
+				Status: api.ImageStreamStatus{
+					Tags: map[string]api.TagEventList{
+						"latest": {
+							Items: []api.TagEvent{
+								{
+									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
+									Image:                testutil.BaseImageWith1LayerDigest,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		{
+			name: "below limit",
+			is: api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "test",
+					Name:      "is",
+				},
+				Status: api.ImageStreamStatus{
+					Tags: map[string]api.TagEventList{
+						"latest": {
+							Items: []api.TagEvent{
+								{
+									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
+									Image:                testutil.BaseImageWith1LayerDigest,
+								},
+							},
+						},
+					},
+				},
+			},
+			isEvaluator: makeISEvaluator(1, 0),
+		},
+
+		{
+			name: "exceed images",
+			is: api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "test",
+					Name:      "is",
+				},
+				Status: api.ImageStreamStatus{
+					Tags: map[string]api.TagEventList{
+						"latest": {
+							Items: []api.TagEvent{
+								{
+									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
+									Image:                testutil.BaseImageWith1LayerDigest,
+								},
+							},
+						},
+						"oldest": {
+							Items: []api.TagEvent{
+								{
+									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith2LayersDigest),
+									Image:                testutil.BaseImageWith2LayersDigest,
+								},
+							},
+						},
+					},
+				},
+			},
+			isEvaluator: makeISEvaluator(1, 0),
+			expected: field.ErrorList{
+				field.Forbidden(field.NewPath("imageStream"), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamImages}).Error()),
+			},
+		},
+
+		{
+			name: "exceed tags",
+			is: api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "test",
+					Name:      "is",
+				},
+				Spec: api.ImageStreamSpec{
+					Tags: map[string]api.TagReference{
+						"new": {
+							Name: "new",
+							From: &kapi.ObjectReference{
+								Kind: "DockerImage",
+								Name: testutil.MakeDockerImageReference("test", "is", testutil.ChildImageWith2LayersDigest),
+							},
+						},
+					},
+				},
+			},
+			isEvaluator: makeISEvaluator(0, 0),
+			expected: field.ErrorList{
+				field.Forbidden(field.NewPath("imageStream"), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamTags}).Error()),
+			},
+		},
+
+		{
+			name: "exceed images and tags",
+			is: api.ImageStream{
+				ObjectMeta: kapi.ObjectMeta{
+					Namespace: "test",
+					Name:      "is",
+				},
+				Spec: api.ImageStreamSpec{
+					Tags: map[string]api.TagReference{
+						"new": {
+							Name: "new",
+							From: &kapi.ObjectReference{
+								Kind: "DockerImage",
+								Name: testutil.MakeDockerImageReference("test", "other", testutil.BaseImageWith1LayerDigest),
+							},
+						},
+					},
+				},
+				Status: api.ImageStreamStatus{
+					Tags: map[string]api.TagEventList{
+						"latest": {
+							Items: []api.TagEvent{
+								{
+									DockerImageReference: testutil.MakeDockerImageReference("test", "other", testutil.BaseImageWith1LayerDigest),
+									Image:                testutil.BaseImageWith1LayerDigest,
+								},
+							},
+						},
+					},
+				},
+			},
+			isEvaluator: makeISEvaluator(0, 0),
+			expected: field.ErrorList{
+				field.Forbidden(field.NewPath("imageStream"), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamImages, api.ResourceImageStreamTags}).Error()),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		sar := &fakeSubjectAccessReviewRegistry{
+			allow: true,
+		}
+		tagVerifier := &TagVerifier{sar}
+
+		s := &Strategy{
+			tagVerifier: tagVerifier,
+			limitVerifier: &testutil.FakeImageStreamLimitVerifier{
+				ImageStreamEvaluator: tc.isEvaluator,
+			},
+			defaultRegistry: &fakeDefaultRegistry{},
+		}
+
+		ctx := kapi.WithUser(kapi.NewDefaultContext(), &fakeUser{})
+		errList := s.Validate(ctx, &tc.is)
+
+		if e, a := tc.expected, errList; !reflect.DeepEqual(e, a) {
+			t.Errorf("%s: unexpected validation errors: %s", tc.name, diff.ObjectDiff(e, a))
 		}
 	}
 }
@@ -334,6 +565,7 @@ func TestTagsChanged(t *testing.T) {
 						Kind: "DockerImage",
 						Name: "registry:5000/ns/stream:t1",
 					},
+					Reference: true,
 				},
 			},
 			existingTagHistory: map[string]api.TagEventList{
@@ -386,12 +618,14 @@ func TestTagsChanged(t *testing.T) {
 						Kind: "DockerImage",
 						Name: "registry:5000/ns/stream:t1",
 					},
+					Reference: true,
 				},
 				"t2": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
+					Reference: true,
 				},
 			},
 			existingTagHistory: make(map[string]api.TagEventList),
@@ -490,18 +724,21 @@ func TestTagsChanged(t *testing.T) {
 						Kind: "DockerImage",
 						Name: "registry:5000/ns/stream:v1image1",
 					},
+					Reference: true,
 				},
 				"t2": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "registry:5000/ns/stream:v1image1",
 					},
+					Reference: true,
 				},
 				"t3": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
+					Reference: true,
 				},
 			},
 			existingTagHistory: map[string]api.TagEventList{
@@ -577,8 +814,107 @@ func TestTagsChanged(t *testing.T) {
 				},
 			},
 		},
-		"object reference to image stream image in same stream": {
+		"tag changes and referenced tag should react": {
 			stream: "registry:5000/ns/stream",
+			previous: map[string]api.TagReference{
+				"t1": {
+					From: &kapi.ObjectReference{
+						Kind: "ImageStreamTag",
+						Name: "stream:other",
+					},
+				},
+				"t2": {
+					From: &kapi.ObjectReference{
+						Kind: "ImageStreamTag",
+						Name: "stream:t1",
+					},
+				},
+			},
+			tags: map[string]api.TagReference{
+				"t1": {
+					From: &kapi.ObjectReference{
+						Kind: "ImageStreamImage",
+						Name: "stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					},
+				},
+				"t2": {
+					From: &kapi.ObjectReference{
+						Kind: "ImageStreamTag",
+						Name: "stream:t1",
+					},
+				},
+			},
+			existingTagHistory: map[string]api.TagEventList{
+				"other": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+						},
+					},
+				},
+				"t1": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+					},
+				},
+				"t2": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+					},
+				},
+			},
+			expectedTagHistory: map[string]api.TagEventList{
+				"other": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+						},
+					},
+				},
+				"t1": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+						},
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+					},
+				},
+				"t2": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+						},
+						{
+							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
+						},
+					},
+				},
+			},
+		},
+		"object reference to image stream image in same stream": {
+			stream: "internalregistry:5000/ns/stream",
 			tags: map[string]api.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
@@ -611,6 +947,45 @@ func TestTagsChanged(t *testing.T) {
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+						},
+					},
+				},
+			},
+		},
+		"object reference to image stream image in same stream (bad digest)": {
+			stream: "internalregistry:5000/ns/stream",
+			tags: map[string]api.TagReference{
+				"t1": {
+					From: &kapi.ObjectReference{
+						Kind: "ImageStreamImage",
+						Name: "stream@12345",
+					},
+				},
+			},
+			existingTagHistory: map[string]api.TagEventList{
+				"other": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream:12345",
+							Image:                "12345",
+						},
+					},
+				},
+			},
+			expectedTagHistory: map[string]api.TagEventList{
+				"t1": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream:12345",
+							Image:                "12345",
+						},
+					},
+				},
+				"other": {
+					Items: []api.TagEvent{
+						{
+							DockerImageReference: "registry:5000/ns/stream:12345",
+							Image:                "12345",
 						},
 					},
 				},
@@ -667,6 +1042,12 @@ func TestTagsChanged(t *testing.T) {
 				Tags: test.existingTagHistory,
 			},
 		}
+		// we can't reuse the same map twice, it causes both to be modified during updates
+		var previousTagHistory = test.existingTagHistory
+		if previousTagHistory != nil {
+			obj, _ := kapi.Scheme.DeepCopy(previousTagHistory)
+			previousTagHistory, _ = obj.(map[string]api.TagEventList)
+		}
 		previousStream := &api.ImageStream{
 			ObjectMeta: kapi.ObjectMeta{
 				Name: "stream",
@@ -676,16 +1057,22 @@ func TestTagsChanged(t *testing.T) {
 			},
 			Status: api.ImageStreamStatus{
 				DockerImageRepository: test.stream,
-				Tags: test.existingTagHistory,
+				Tags: previousTagHistory,
 			},
 		}
 		if test.previous == nil {
 			previousStream = nil
 		}
 
-		s := &Strategy{}
+		s := &Strategy{
+			defaultRegistry: &fakeDefaultRegistry{},
+		}
 		s.ImageStreamGetter = &fakeImageStreamGetter{test.otherStream}
-		s.tagsChanged(previousStream, stream)
+		err := s.tagsChanged(previousStream, stream)
+		if len(err) > 0 {
+			t.Errorf("%s: unable to process tags: %v", testName, err)
+			continue
+		}
 
 		if !reflect.DeepEqual(test.tags, stream.Spec.Tags) {
 			t.Errorf("%s: stream.Tags was unexpectedly updated: %#v", testName, stream.Spec.Tags)
@@ -824,7 +1211,7 @@ func TestTagRefChanged(t *testing.T) {
 			},
 			expected: true,
 		},
-		"different name - next namespace implicit": {
+		"different name - new namespace implicit": {
 			old: api.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",

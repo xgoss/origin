@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
 
@@ -13,6 +13,40 @@ import (
 
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 )
+
+func TestClusterAdminUseGroup(t *testing.T) {
+	test := &authorizeTest{
+		context: kapi.WithUser(kapi.WithNamespace(kapi.NewContext(), "mallet"), &user.DefaultInfo{Name: "root", Groups: []string{bootstrappolicy.ClusterAdminGroup}}),
+		attributes: &DefaultAuthorizationAttributes{
+			APIGroup: "extensions",
+			Verb:     "create",
+			Resource: "jobs",
+		},
+		expectedAllowed: true,
+		expectedReason:  "allowed by cluster rule",
+	}
+	test.clusterPolicies = newDefaultClusterPolicies()
+	test.clusterBindings = newDefaultClusterPolicyBindings()
+
+	test.test(t)
+}
+
+func TestClusterReaderUseGroup(t *testing.T) {
+	test := &authorizeTest{
+		context: kapi.WithUser(kapi.WithNamespace(kapi.NewContext(), "mallet"), &user.DefaultInfo{Name: "root", Groups: []string{bootstrappolicy.ClusterReaderGroup}}),
+		attributes: &DefaultAuthorizationAttributes{
+			APIGroup: "extensions",
+			Verb:     "list",
+			Resource: "jobs",
+		},
+		expectedAllowed: true,
+		expectedReason:  "allowed by cluster rule",
+	}
+	test.clusterPolicies = newDefaultClusterPolicies()
+	test.clusterBindings = newDefaultClusterPolicyBindings()
+
+	test.test(t)
+}
 
 func TestInvalidRole(t *testing.T) {
 	test := &authorizeTest{
@@ -505,11 +539,13 @@ func newInvalidExtensionPolicies() []authorizationapi.Policy {
 					},
 					Rules: []authorizationapi.PolicyRule{
 						{
+							APIGroups:             []string{""},
 							Verbs:                 sets.NewString("watch", "list", "get"),
 							Resources:             sets.NewString("buildConfigs"),
-							AttributeRestrictions: runtime.EmbeddedObject{Object: &authorizationapi.Role{}},
+							AttributeRestrictions: &authorizationapi.Role{},
 						},
 						{
+							APIGroups: []string{""},
 							Verbs:     sets.NewString("update"),
 							Resources: sets.NewString("buildConfigs"),
 						},
@@ -546,10 +582,10 @@ func GetBootstrapPolicy() *authorizationapi.ClusterPolicy {
 	policy := &authorizationapi.ClusterPolicy{
 		ObjectMeta: kapi.ObjectMeta{
 			Name:              authorizationapi.PolicyName,
-			CreationTimestamp: util.Now(),
+			CreationTimestamp: unversioned.Now(),
 			UID:               util.NewUUID(),
 		},
-		LastModified: util.Now(),
+		LastModified: unversioned.Now(),
 		Roles:        make(map[string]*authorizationapi.ClusterRole),
 	}
 
@@ -565,10 +601,10 @@ func GetBootstrapPolicyBinding() *authorizationapi.ClusterPolicyBinding {
 	policyBinding := &authorizationapi.ClusterPolicyBinding{
 		ObjectMeta: kapi.ObjectMeta{
 			Name:              ":Default",
-			CreationTimestamp: util.Now(),
+			CreationTimestamp: unversioned.Now(),
 			UID:               util.NewUUID(),
 		},
-		LastModified: util.Now(),
+		LastModified: unversioned.Now(),
 		RoleBindings: make(map[string]*authorizationapi.ClusterRoleBinding),
 	}
 

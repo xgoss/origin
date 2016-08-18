@@ -9,17 +9,22 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/master/ports"
 	"k8s.io/kubernetes/pkg/registry/service/ipallocator"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/yaml"
 
+	"github.com/openshift/origin/pkg/bootstrap"
 	"github.com/openshift/origin/pkg/cmd/flagtypes"
 	"github.com/openshift/origin/pkg/cmd/server/admin"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
+	configapiv1 "github.com/openshift/origin/pkg/cmd/server/api/v1"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	imagepolicyapi "github.com/openshift/origin/pkg/image/admission/imagepolicy/api"
 	"github.com/spf13/cobra"
 )
 
@@ -56,14 +61,12 @@ type MasterArgs struct {
 	EtcdDir   string
 	ConfigDir *util.StringFlag
 
-	// NodeList contains the hostnames of each node. This currently must be specified
-	// up front. Comma delimited list
-	NodeList util.StringList
-
 	// CORSAllowedOrigins is a list of allowed origins for CORS, comma separated.
 	// An allowed origin can be a regular expression to support subdomain matching.
 	// CORS is enabled for localhost, 127.0.0.1, and the asset server by default.
-	CORSAllowedOrigins util.StringList
+	CORSAllowedOrigins []string
+
+	APIServerCAFiles []string
 
 	ListenArg          *ListenArg
 	ImageFormatArgs    *ImageFormatArgs
@@ -86,11 +89,13 @@ func BindMasterArgs(args *MasterArgs, flags *pflag.FlagSet, prefix string) {
 
 	flags.StringVar(&args.EtcdDir, prefix+"etcd-dir", "openshift.local.etcd", "The etcd data directory.")
 
-	flags.Var(&args.NodeList, prefix+"nodes", "The hostnames of each node. This currently must be specified up front. Comma delimited list")
-	flags.Var(&args.CORSAllowedOrigins, prefix+"cors-allowed-origins", "List of allowed origins for CORS, comma separated.  An allowed origin can be a regular expression to support subdomain matching.  CORS is enabled for localhost, 127.0.0.1, and the asset server by default.")
+	flags.StringSliceVar(&args.APIServerCAFiles, prefix+"certificate-authority", args.APIServerCAFiles, "Optional files containing signing authorities to use (in addition to the generated signer) to verify the API server's serving certificate.")
+
+	flags.StringSliceVar(&args.CORSAllowedOrigins, prefix+"cors-allowed-origins", []string{}, "List of allowed origins for CORS, comma separated.  An allowed origin can be a regular expression to support subdomain matching.  CORS is enabled for localhost, 127.0.0.1, and the asset server by default.")
 
 	// autocompletion hints
 	cobra.MarkFlagFilename(flags, prefix+"etcd-dir")
+	cobra.MarkFlagFilename(flags, prefix+"certificate-authority")
 }
 
 // NewDefaultMasterArgs creates MasterArgs with sub-objects created and default values set.
@@ -99,7 +104,7 @@ func NewDefaultMasterArgs() *MasterArgs {
 		MasterAddr:       flagtypes.Addr{Value: "localhost:8443", DefaultScheme: "https", DefaultPort: 8443, AllowPrefix: true}.Default(),
 		EtcdAddr:         flagtypes.Addr{Value: "0.0.0.0:4001", DefaultScheme: "https", DefaultPort: 4001}.Default(),
 		MasterPublicAddr: flagtypes.Addr{Value: "localhost:8443", DefaultScheme: "https", DefaultPort: 8443, AllowPrefix: true}.Default(),
-		DNSBindAddr:      flagtypes.Addr{Value: "0.0.0.0:53", DefaultScheme: "tcp", DefaultPort: 53, AllowPrefix: true}.Default(),
+		DNSBindAddr:      flagtypes.Addr{Value: "0.0.0.0:8053", DefaultScheme: "tcp", DefaultPort: 8053, AllowPrefix: true}.Default(),
 
 		ConfigDir: &util.StringFlag{},
 
@@ -178,6 +183,8 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 
 	etcdClientInfo := admin.DefaultMasterEtcdClientCertInfo(args.ConfigDir.Value())
 
+	serviceServingCertSigner := admin.DefaultServiceSignerCAInfo(args.ConfigDir.Value())
+
 	dnsServingInfo := servingInfoForAddr(&dnsBindAddr)
 
 	config := &configapi.MasterConfig{
@@ -207,6 +214,8 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 		DNSConfig: &configapi.DNSConfig{
 			BindAddress: dnsServingInfo.BindAddress,
 			BindNetwork: dnsServingInfo.BindNetwork,
+
+			AllowRecursiveQueries: true,
 		},
 
 		MasterClients: configapi.MasterClients{
@@ -247,6 +256,16 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 			HostSubnetLength:   args.NetworkArgs.HostSubnetLength,
 			ServiceNetworkCIDR: args.NetworkArgs.ServiceNetworkCIDR,
 		},
+
+		VolumeConfig: configapi.MasterVolumeConfig{
+			DynamicProvisioningEnabled: true,
+		},
+
+		ControllerConfig: configapi.ControllerConfig{
+			ServiceServingCert: configapi.ServiceServingCert{
+				Signer: &serviceServingCertSigner,
+			},
+		},
 	}
 
 	if args.ListenArg.UseTLS() {
@@ -256,7 +275,7 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 		config.AssetConfig.ServingInfo.ServerCert = admin.DefaultAssetServingCertInfo(args.ConfigDir.Value())
 
 		if oauthConfig != nil {
-			s := admin.DefaultRootCAFile(args.ConfigDir.Value())
+			s := admin.DefaultCABundleFile(args.ConfigDir.Value())
 			oauthConfig.MasterCA = &s
 		}
 
@@ -264,7 +283,7 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 		if builtInKubernetes {
 			config.KubeletClientInfo.CA = admin.DefaultRootCAFile(args.ConfigDir.Value())
 			config.KubeletClientInfo.ClientCert = kubeletClientInfo.CertLocation
-			config.ServiceAccountConfig.MasterCA = admin.DefaultRootCAFile(args.ConfigDir.Value())
+			config.ServiceAccountConfig.MasterCA = admin.DefaultCABundleFile(args.ConfigDir.Value())
 		}
 
 		// Only set up ca/cert info for etcd connections if we're self-hosting etcd
@@ -298,12 +317,34 @@ func (args MasterArgs) BuildSerializeableMasterConfig() (*configapi.MasterConfig
 		config.ServiceAccountConfig.PublicKeyFiles = []string{}
 	}
 
-	internal, err := applyDefaults(config, "v1")
+	// embed a default policy for generated config
+	defaultImagePolicy, err := bootstrap.Asset("pkg/image/admission/imagepolicy/api/v1/default-policy.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("unable to find default image admission policy: %v", err)
+	}
+	// TODO: this should not be necessary, runtime.Unknown#MarshalJSON should handle YAML content type correctly
+	defaultImagePolicy, err = yaml.ToJSON(defaultImagePolicy)
 	if err != nil {
 		return nil, err
 	}
+	if config.AdmissionConfig.PluginConfig == nil {
+		config.AdmissionConfig.PluginConfig = make(map[string]configapi.AdmissionPluginConfig)
+	}
+	config.AdmissionConfig.PluginConfig[imagepolicyapi.PluginName] = configapi.AdmissionPluginConfig{
+		Configuration: &runtime.Unknown{Raw: defaultImagePolicy},
+	}
 
-	return internal.(*configapi.MasterConfig), nil
+	internal, err := applyDefaults(config, configapiv1.SchemeGroupVersion)
+	if err != nil {
+		return nil, err
+	}
+	config = internal.(*configapi.MasterConfig)
+
+	// When creating a new config, use Protobuf
+	configapi.SetProtobufClientDefaults(config.MasterClients.OpenShiftLoopbackClientConnectionOverrides)
+	configapi.SetProtobufClientDefaults(config.MasterClients.ExternalKubernetesClientConnectionOverrides)
+
+	return config, nil
 }
 
 func (args MasterArgs) BuildSerializeableOAuthConfig() (*configapi.OAuthConfig, error) {
@@ -347,9 +388,7 @@ func (args MasterArgs) BuildSerializeableOAuthConfig() (*configapi.OAuthConfig, 
 			Name:            "anypassword",
 			UseAsChallenger: true,
 			UseAsLogin:      true,
-			Provider: runtime.EmbeddedObject{
-				Object: &configapi.AllowAllPasswordIdentityProvider{},
-			},
+			Provider:        &configapi.AllowAllPasswordIdentityProvider{},
 		},
 	)
 
@@ -407,14 +446,11 @@ func (args MasterArgs) BuildSerializeableKubeMasterConfig() (*configapi.Kubernet
 		masterIP = ip.String()
 	}
 
-	staticNodeList := sets.NewString(args.NodeList...)
-	staticNodeList.Delete("")
-
 	config := &configapi.KubernetesMasterConfig{
 		MasterIP:            masterIP,
 		ServicesSubnet:      args.NetworkArgs.ServiceNetworkCIDR,
-		StaticNodeNames:     staticNodeList.List(),
 		SchedulerConfigFile: args.SchedulerConfigFile,
+		ProxyClientInfo:     admin.DefaultProxyClientCertInfo(args.ConfigDir.Value()).CertLocation,
 	}
 
 	return config, nil
@@ -537,7 +573,7 @@ func (args MasterArgs) GetDNSBindAddress() (flagtypes.Addr, error) {
 	if args.DNSBindAddr.Provided {
 		return args.DNSBindAddr, nil
 	}
-	dnsAddr := flagtypes.Addr{Value: args.ListenArg.ListenAddr.Host, DefaultPort: 53}.Default()
+	dnsAddr := flagtypes.Addr{Value: args.ListenArg.ListenAddr.Host, DefaultPort: args.DNSBindAddr.DefaultPort}.Default()
 	return dnsAddr, nil
 }
 
@@ -629,12 +665,12 @@ func getPort(theURL url.URL) int {
 }
 
 // applyDefaults roundtrips the config to v1 and back to ensure proper defaults are set.
-func applyDefaults(config runtime.Object, version string) (runtime.Object, error) {
+func applyDefaults(config runtime.Object, version unversioned.GroupVersion) (runtime.Object, error) {
 	ext, err := configapi.Scheme.ConvertToVersion(config, version)
 	if err != nil {
 		return nil, err
 	}
-	return configapi.Scheme.ConvertToVersion(ext, "")
+	return configapi.Scheme.ConvertToVersion(ext, configapi.SchemeGroupVersion)
 }
 
 func servingInfoForAddr(addr *flagtypes.Addr) configapi.ServingInfo {

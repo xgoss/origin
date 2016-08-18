@@ -2,8 +2,8 @@ package proxy
 
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -11,23 +11,28 @@ import (
 	clusterpolicybindingregistry "github.com/openshift/origin/pkg/authorization/registry/clusterpolicybinding"
 	rolebindingregistry "github.com/openshift/origin/pkg/authorization/registry/rolebinding"
 	rolebindingstorage "github.com/openshift/origin/pkg/authorization/registry/rolebinding/policybased"
+	"github.com/openshift/origin/pkg/authorization/rulevalidation"
 )
 
 type ClusterRoleBindingStorage struct {
 	roleBindingStorage rolebindingstorage.VirtualStorage
 }
 
-func NewClusterRoleBindingStorage(clusterPolicyRegistry clusterpolicyregistry.Registry, clusterBindingRegistry clusterpolicybindingregistry.Registry) *ClusterRoleBindingStorage {
-	simulatedPolicyRegistry := clusterpolicyregistry.NewSimulatedRegistry(clusterPolicyRegistry)
-	simulatedPolicyBindingRegistry := clusterpolicybindingregistry.NewSimulatedRegistry(clusterBindingRegistry)
+func NewClusterRoleBindingStorage(clusterPolicyRegistry clusterpolicyregistry.Registry, clusterPolicyBindingRegistry clusterpolicybindingregistry.Registry) *ClusterRoleBindingStorage {
+	simulatedPolicyBindingRegistry := clusterpolicybindingregistry.NewSimulatedRegistry(clusterPolicyBindingRegistry)
+
+	ruleResolver := rulevalidation.NewDefaultRuleResolver(
+		nil,
+		nil,
+		clusterpolicyregistry.ReadOnlyClusterPolicy{Registry: clusterPolicyRegistry},
+		clusterpolicybindingregistry.ReadOnlyClusterPolicyBinding{Registry: clusterPolicyBindingRegistry},
+	)
 
 	return &ClusterRoleBindingStorage{
 		rolebindingstorage.VirtualStorage{
-			PolicyRegistry:               simulatedPolicyRegistry,
-			BindingRegistry:              simulatedPolicyBindingRegistry,
-			ClusterPolicyRegistry:        clusterPolicyRegistry,
-			ClusterPolicyBindingRegistry: clusterBindingRegistry,
+			BindingRegistry: simulatedPolicyBindingRegistry,
 
+			RuleResolver:   ruleResolver,
 			CreateStrategy: rolebindingregistry.ClusterStrategy,
 			UpdateStrategy: rolebindingregistry.ClusterStrategy,
 		},
@@ -41,8 +46,8 @@ func (s *ClusterRoleBindingStorage) NewList() runtime.Object {
 	return &authorizationapi.ClusterRoleBindingList{}
 }
 
-func (s *ClusterRoleBindingStorage) List(ctx kapi.Context, label labels.Selector, field fields.Selector) (runtime.Object, error) {
-	ret, err := s.roleBindingStorage.List(ctx, label, field)
+func (s *ClusterRoleBindingStorage) List(ctx kapi.Context, options *kapi.ListOptions) (runtime.Object, error) {
+	ret, err := s.roleBindingStorage.List(ctx, options)
 	if ret == nil {
 		return nil, err
 	}
@@ -63,7 +68,7 @@ func (s *ClusterRoleBindingStorage) Delete(ctx kapi.Context, name string, option
 		return nil, err
 	}
 
-	return ret.(*kapi.Status), err
+	return ret.(*unversioned.Status), err
 }
 
 func (s *ClusterRoleBindingStorage) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, error) {
@@ -78,11 +83,24 @@ func (s *ClusterRoleBindingStorage) Create(ctx kapi.Context, obj runtime.Object)
 	return authorizationapi.ToClusterRoleBinding(ret.(*authorizationapi.RoleBinding)), err
 }
 
-func (s *ClusterRoleBindingStorage) Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error) {
+type convertingObjectInfo struct {
+	rest.UpdatedObjectInfo
+}
+
+func (i convertingObjectInfo) UpdatedObject(ctx kapi.Context, old runtime.Object) (runtime.Object, error) {
+	oldObj := old.(*authorizationapi.RoleBinding)
+	convertedOldObj := authorizationapi.ToClusterRoleBinding(oldObj)
+	obj, err := i.UpdatedObjectInfo.UpdatedObject(ctx, convertedOldObj)
+	if err != nil {
+		return nil, err
+	}
 	clusterObj := obj.(*authorizationapi.ClusterRoleBinding)
 	convertedObj := authorizationapi.ToRoleBinding(clusterObj)
+	return convertedObj, nil
+}
 
-	ret, created, err := s.roleBindingStorage.Update(ctx, convertedObj)
+func (s *ClusterRoleBindingStorage) Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	ret, created, err := s.roleBindingStorage.Update(ctx, name, convertingObjectInfo{objInfo})
 	if ret == nil {
 		return nil, created, err
 	}

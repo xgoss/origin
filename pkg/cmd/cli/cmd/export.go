@@ -9,12 +9,12 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl"
-	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 
+	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	templateapi "github.com/openshift/origin/pkg/template/api"
 )
@@ -44,15 +44,12 @@ to generate the API structure for a template to which you can add parameters and
   %[1]s export service --as-template=test
 
   # export to JSON
-  %[1]s export service -o json
-
-  # convert a file on disk to the latest API version (in YAML, the default)
-  %[1]s export -f a_v1beta3_service.json --output-version=v1 --exact`
+  %[1]s export service -o json`
 )
 
 func NewCmdExport(fullName string, f *clientcmd.Factory, in io.Reader, out io.Writer) *cobra.Command {
-	exporter := &defaultExporter{}
-	var filenames util.StringList
+	exporter := &DefaultExporter{}
+	var filenames []string
 	cmd := &cobra.Command{
 		Use:     "export RESOURCE/NAME ... [options]",
 		Short:   "Export resources so they can be used elsewhere",
@@ -60,10 +57,10 @@ func NewCmdExport(fullName string, f *clientcmd.Factory, in io.Reader, out io.Wr
 		Example: fmt.Sprintf(exportExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunExport(f, exporter, in, out, cmd, args, filenames)
-			if err == errExit {
+			if err == cmdutil.ErrExit {
 				os.Exit(1)
 			}
-			cmdutil.CheckErr(err)
+			kcmdutil.CheckErr(err)
 		},
 	}
 	cmd.Flags().String("as-template", "", "Output a Template object with specified name instead of a List or single object.")
@@ -71,39 +68,42 @@ func NewCmdExport(fullName string, f *clientcmd.Factory, in io.Reader, out io.Wr
 	cmd.Flags().Bool("raw", false, "If true, do not alter the resources in any way after they are loaded.")
 	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on")
 	cmd.Flags().Bool("all-namespaces", false, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
-	cmd.Flags().VarP(&filenames, "filename", "f", "Filename, directory, or URL to file to use to edit the resource.")
-
-	cmd.Flags().Bool("all", true, "Select all resources in the namespace of the specified resource types")
+	cmd.Flags().StringSliceVarP(&filenames, "filename", "f", filenames, "Filename, directory, or URL to file for the resource to export.")
+	cmd.MarkFlagFilename("filename")
+	cmd.Flags().Bool("all", true, "DEPRECATED: all is ignored, specifying a resource without a name selects all the instances of that resource")
 	cmd.Flags().MarkDeprecated("all", "all is ignored because specifying a resource without a name selects all the instances of that resource")
-	cmdutil.AddPrinterFlags(cmd)
+	kcmdutil.AddPrinterFlags(cmd)
 	return cmd
 }
 
-func RunExport(f *clientcmd.Factory, exporter Exporter, in io.Reader, out io.Writer, cmd *cobra.Command, args []string, filenames util.StringList) error {
-	selector := cmdutil.GetFlagString(cmd, "selector")
-	allNamespaces := cmdutil.GetFlagBool(cmd, "all-namespaces")
-	exact := cmdutil.GetFlagBool(cmd, "exact")
-	asTemplate := cmdutil.GetFlagString(cmd, "as-template")
-	raw := cmdutil.GetFlagBool(cmd, "raw")
+func RunExport(f *clientcmd.Factory, exporter Exporter, in io.Reader, out io.Writer, cmd *cobra.Command, args []string, filenames []string) error {
+	selector := kcmdutil.GetFlagString(cmd, "selector")
+	allNamespaces := kcmdutil.GetFlagBool(cmd, "all-namespaces")
+	exact := kcmdutil.GetFlagBool(cmd, "exact")
+	asTemplate := kcmdutil.GetFlagString(cmd, "as-template")
+	raw := kcmdutil.GetFlagBool(cmd, "raw")
 	if exact && raw {
-		return cmdutil.UsageError(cmd, "--exact and --raw may not both be specified")
+		return kcmdutil.UsageError(cmd, "--exact and --raw may not both be specified")
 	}
 
 	clientConfig, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	outputVersion := cmdutil.OutputVersion(cmd, clientConfig.Version)
+	outputVersion, err := kcmdutil.OutputVersion(cmd, clientConfig.GroupVersion)
+	if err != nil {
+		return err
+	}
 
 	cmdNamespace, explicit, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 
-	mapper, typer := f.Object()
-	b := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	mapper, typer := f.Object(false)
+	b := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), kapi.Codecs.UniversalDecoder()).
 		NamespaceParam(cmdNamespace).DefaultNamespace().AllNamespaces(allNamespaces).
-		FilenameParam(explicit, filenames...).
+		FilenameParam(explicit, false, filenames...).
 		SelectorParam(selector).
 		ResourceTypeOrNameArgs(true, args...).
 		Flatten()
@@ -138,7 +138,7 @@ func RunExport(f *clientcmd.Factory, exporter Exporter, in io.Reader, out io.Wri
 
 	var result runtime.Object
 	if len(asTemplate) > 0 {
-		objects, err := resource.AsVersionedObjects(infos, outputVersion)
+		objects, err := resource.AsVersionedObjects(infos, outputVersion, kapi.Codecs.LegacyCodec(outputVersion))
 		if err != nil {
 			return err
 		}
@@ -151,7 +151,7 @@ func RunExport(f *clientcmd.Factory, exporter Exporter, in io.Reader, out io.Wri
 			return err
 		}
 	} else {
-		object, err := resource.AsVersionedObject(infos, !one, outputVersion)
+		object, err := resource.AsVersionedObject(infos, !one, outputVersion, kapi.Codecs.LegacyCodec(outputVersion))
 		if err != nil {
 			return err
 		}
@@ -159,8 +159,8 @@ func RunExport(f *clientcmd.Factory, exporter Exporter, in io.Reader, out io.Wri
 	}
 
 	// use YAML as the default format
-	outputFormat := cmdutil.GetFlagString(cmd, "output")
-	templateFile := cmdutil.GetFlagString(cmd, "template")
+	outputFormat := kcmdutil.GetFlagString(cmd, "output")
+	templateFile := kcmdutil.GetFlagString(cmd, "template")
 	if len(outputFormat) == 0 && len(templateFile) != 0 {
 		outputFormat = "template"
 	}

@@ -9,7 +9,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("images: mysql: ephemeral template", func() {
+var _ = g.Describe("[images][mysql][Slow] openshift mysql image", func() {
 	defer g.GinkgoRecover()
 	var (
 		templatePath = exutil.FixturePath("..", "..", "examples", "db-templates", "mysql-ephemeral-template.json")
@@ -25,6 +25,11 @@ var _ = g.Describe("images: mysql: ephemeral template", func() {
 
 			g.By(fmt.Sprintf("calling oc create -f %q", configFile))
 			err = oc.Run("create").Args("-f", configFile).Execute()
+			o.Expect(err).NotTo(o.HaveOccurred())
+
+			// oc.KubeFramework().WaitForAnEndpoint currently will wait forever;  for now, prefacing with our WaitForADeploymentToComplete,
+			// which does have a timeout, since in most cases a failure in the service coming up stems from a failed deployment
+			err = exutil.WaitForADeploymentToComplete(oc.KubeREST().ReplicationControllers(oc.Namespace()), "mysql", oc)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("expecting the mysql service get endpoints")

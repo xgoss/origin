@@ -8,7 +8,6 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/runtime"
-	utilerr "k8s.io/kubernetes/pkg/util/errors"
 
 	"github.com/openshift/origin/pkg/template"
 	"github.com/openshift/origin/pkg/template/api"
@@ -41,7 +40,7 @@ func (s *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 		return nil, errors.NewBadRequest("not a template")
 	}
 	if errs := templatevalidation.ValidateProcessedTemplate(tpl); len(errs) > 0 {
-		return nil, errors.NewInvalid("template", tpl.Name, errs)
+		return nil, errors.NewInvalid(api.Kind("Template"), tpl.Name, errs)
 	}
 
 	generators := map[string]generator.Generator{
@@ -49,8 +48,15 @@ func (s *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 	}
 	processor := template.NewProcessor(generators)
 	if errs := processor.Process(tpl); len(errs) > 0 {
-		glog.V(1).Infof(utilerr.NewAggregate(errs).Error())
-		return nil, errors.NewInvalid("template", tpl.Name, errs)
+		glog.V(1).Infof(errs.ToAggregate().Error())
+		return nil, errors.NewInvalid(api.Kind("Template"), tpl.Name, errs)
+	}
+
+	// we know that we get back runtime.Unstructured objects from the Process call.  We need to encode those
+	// objects using the unstructured codec BEFORE the REST layers gets its shot at encoding to avoid a layered
+	// encode being done.
+	for i := range tpl.Objects {
+		tpl.Objects[i] = runtime.NewEncodable(runtime.UnstructuredJSONScheme, tpl.Objects[i])
 	}
 
 	return tpl, nil

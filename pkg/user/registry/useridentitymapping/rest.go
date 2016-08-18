@@ -6,10 +6,11 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrs "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 
 	"github.com/openshift/origin/pkg/user/api"
 	"github.com/openshift/origin/pkg/user/registry/identity"
@@ -54,7 +55,11 @@ func (s *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 // Update associates an identity with a user.
 // Both the identity and user must already exist.
 // If the identity is associated with another user already, it is disassociated.
-func (s *REST) Update(ctx kapi.Context, obj runtime.Object) (runtime.Object, bool, error) {
+func (s *REST) Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	obj, err := objInfo.UpdatedObject(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
 	mapping, ok := obj.(*api.UserIdentityMapping)
 	if !ok {
 		return nil, false, kerrs.NewBadRequest("invalid type")
@@ -80,7 +85,7 @@ func (s *REST) createOrUpdate(ctx kapi.Context, obj runtime.Object, forceCreate 
 
 	// If we expect to be creating, fail if the mapping already existed
 	if forceCreate && oldMappingErr == nil {
-		return nil, false, kerrs.NewAlreadyExists("UserIdentityMapping", oldMapping.Name)
+		return nil, false, kerrs.NewAlreadyExists(api.Resource("useridentitymapping"), oldMapping.Name)
 	}
 
 	// Allow update to create if missing
@@ -93,7 +98,7 @@ func (s *REST) createOrUpdate(ctx kapi.Context, obj runtime.Object, forceCreate 
 
 		// Ensure resource version is not specified
 		if len(mapping.ResourceVersion) > 0 {
-			return nil, false, kerrs.NewNotFound("UserIdentityMapping", mapping.Name)
+			return nil, false, kerrs.NewNotFound(api.Resource("useridentitymapping"), mapping.Name)
 		}
 	} else {
 		// Pre-update checks with access to oldMapping
@@ -103,7 +108,7 @@ func (s *REST) createOrUpdate(ctx kapi.Context, obj runtime.Object, forceCreate 
 
 		// Ensure resource versions match
 		if len(mapping.ResourceVersion) > 0 && mapping.ResourceVersion != oldMapping.ResourceVersion {
-			return nil, false, kerrs.NewConflict("UserIdentityMapping", mapping.Name, fmt.Errorf("the resource was updated to %s", oldMapping.ResourceVersion))
+			return nil, false, kerrs.NewConflict(api.Resource("useridentitymapping"), mapping.Name, fmt.Errorf("the resource was updated to %s", oldMapping.ResourceVersion))
 		}
 
 		// If we're "updating" to the user we're already pointing to, we're already done
@@ -114,19 +119,15 @@ func (s *REST) createOrUpdate(ctx kapi.Context, obj runtime.Object, forceCreate 
 
 	// Validate identity
 	if kerrs.IsNotFound(identityErr) {
-		errs := fielderrors.ValidationErrorList([]error{
-			fielderrors.NewFieldInvalid("identity.name", mapping.Identity.Name, "referenced identity does not exist"),
-		})
-		return nil, false, kerrs.NewInvalid("UserIdentityMapping", mapping.Name, errs)
+		errs := field.ErrorList{field.Invalid(field.NewPath("identity", "name"), mapping.Identity.Name, "referenced identity does not exist")}
+		return nil, false, kerrs.NewInvalid(api.Kind("UserIdentityMapping"), mapping.Name, errs)
 	}
 
 	// Get new user
 	newUser, err := s.userRegistry.GetUser(ctx, mapping.User.Name)
 	if kerrs.IsNotFound(err) {
-		errs := fielderrors.ValidationErrorList([]error{
-			fielderrors.NewFieldInvalid("user.name", mapping.User.Name, "referenced user does not exist"),
-		})
-		return nil, false, kerrs.NewInvalid("UserIdentityMapping", mapping.Name, errs)
+		errs := field.ErrorList{field.Invalid(field.NewPath("user", "name"), mapping.User.Name, "referenced user does not exist")}
+		return nil, false, kerrs.NewInvalid(api.Kind("UserIdentityMapping"), mapping.Name, errs)
 	}
 	if err != nil {
 		return nil, false, err
@@ -155,7 +156,7 @@ func (s *REST) createOrUpdate(ctx kapi.Context, obj runtime.Object, forceCreate 
 	// If this fails, log the error, but continue, because Update is no longer re-entrant
 	if oldUser != nil && removeIdentityFromUser(identity, oldUser) {
 		if _, err := s.userRegistry.UpdateUser(ctx, oldUser); err != nil {
-			util.HandleError(fmt.Errorf("error removing identity reference %s from user %s: %v", identity.Name, oldUser.Name, err))
+			utilruntime.HandleError(fmt.Errorf("error removing identity reference %s from user %s: %v", identity.Name, oldUser.Name, err))
 		}
 	}
 
@@ -184,11 +185,11 @@ func (s *REST) Delete(ctx kapi.Context, name string) (runtime.Object, error) {
 	// At this point, the mapping for the identity no longer exists
 	if unsetIdentityUser(identity) {
 		if _, err := s.identityRegistry.UpdateIdentity(ctx, identity); err != nil {
-			util.HandleError(fmt.Errorf("error removing user reference %s from identity %s: %v", user.Name, identity.Name, err))
+			utilruntime.HandleError(fmt.Errorf("error removing user reference %s from identity %s: %v", user.Name, identity.Name, err))
 		}
 	}
 
-	return &kapi.Status{Status: kapi.StatusSuccess}, nil
+	return &unversioned.Status{Status: unversioned.StatusSuccess}, nil
 }
 
 // getRelatedObjects returns the identity, user, and mapping for the named identity
@@ -199,9 +200,9 @@ func (s *REST) getRelatedObjects(ctx kapi.Context, name string) (
 	mapping *api.UserIdentityMapping, mappingErr error,
 ) {
 	// Initialize errors to NotFound
-	identityErr = kerrs.NewNotFound("Identity", name)
-	userErr = kerrs.NewNotFound("User", "")
-	mappingErr = kerrs.NewNotFound("UserIdentityMapping", name)
+	identityErr = kerrs.NewNotFound(api.Resource("identity"), name)
+	userErr = kerrs.NewNotFound(api.Resource("user"), "")
+	mappingErr = kerrs.NewNotFound(api.Resource("useridentitymapping"), name)
 
 	// Get identity
 	identity, identityErr = s.identityRegistry.GetIdentity(ctx, name)

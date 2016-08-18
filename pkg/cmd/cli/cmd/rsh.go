@@ -3,112 +3,154 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	kubecmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/util/term"
 
-	cmdutil "github.com/openshift/origin/pkg/cmd/util"
+	"github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
 const (
+	RshRecommendedName = "rsh"
+
 	rshLong = `
 Open a remote shell session to a container
 
-This command will attempt to start a shell session in the specified pod. It will default to the
-first container if none is specified, and will attempt to use '/bin/bash' as the default shell.
-You may pass an optional command after the pod name, which will be executed instead of a login
-shell. A TTY will be automatically allocated if standard input is interactive - use -t and -T
-to override.
+This command will attempt to start a shell session in a pod for the specified resource.
+It works with pods, deployment configs, jobs, daemon sets, and replication controllers.
+Any of the aforementioned resources (apart from pods) will be resolved to a ready pod.
+It will default to the first container if none is specified, and will attempt to use
+'/bin/sh' as the default shell. You may pass an optional command after the resource name,
+which will be executed instead of a login shell. A TTY will be automatically allocated
+if standard input is interactive - use -t and -T to override. A TERM variable is sent
+to the environment where the shell (or command) will be executed. By default its value
+is the same as the TERM variable from the local environment; if not set, 'xterm' is used.
 
 Note, some containers may not include a shell - use '%[1]s exec' if you need to run commands
 directly.`
 
 	rshExample = `
   # Open a shell session on the first container in pod 'foo'
-  $ %[1]s rsh foo
+  %[1]s foo
 
   # Run the command 'cat /etc/resolv.conf' inside pod 'foo'
-  $ %[1]s rsh foo cat /etc/resolv.conf`
+  %[1]s foo cat /etc/resolv.conf
+
+  # See the configuration of your internal registry
+  %[1]s dc/docker-registry cat config.yml
+
+  # Open a shell session on the container named 'index' inside a pod of your job
+  # %[1]s -c index job/sheduled`
 )
 
-// NewCmdRsh attempts to open a shell session to the server.
-func NewCmdRsh(fullName string, f *clientcmd.Factory, in io.Reader, out, err io.Writer) *cobra.Command {
-	options := &kubecmd.ExecOptions{
-		In:  in,
-		Out: out,
-		Err: err,
+// RshOptions declare the arguments accepted by the Rsh command
+type RshOptions struct {
+	ForceTTY   bool
+	DisableTTY bool
+	Executable string
+	*kubecmd.ExecOptions
+}
 
-		TTY:   true,
-		Stdin: true,
+// NewCmdRsh returns a command that attempts to open a shell session to the server.
+func NewCmdRsh(name string, parent string, f *clientcmd.Factory, in io.Reader, out, err io.Writer) *cobra.Command {
+	options := &RshOptions{
+		ForceTTY:   false,
+		DisableTTY: false,
+		ExecOptions: &kubecmd.ExecOptions{
+			StreamOptions: kubecmd.StreamOptions{
+				In:  in,
+				Out: out,
+				Err: err,
 
-		Executor: &kubecmd.DefaultRemoteExecutor{},
-	}
-	executable := "/bin/bash"
-	forceTTY, disableTTY := false, false
+				TTY:   true,
+				Stdin: true,
+			},
 
-	cmd := &cobra.Command{
-		Use:     "rsh POD [command]",
-		Short:   "Start a shell session in a pod",
-		Long:    fmt.Sprintf(rshLong, fullName),
-		Example: fmt.Sprintf(rshExample, fullName),
-		Run: func(cmd *cobra.Command, args []string) {
-			switch {
-			case forceTTY && disableTTY:
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, "you may not specify -t and -T together"))
-			case forceTTY:
-				options.TTY = true
-			case disableTTY:
-				options.TTY = false
-			default:
-				options.TTY = cmdutil.IsTerminal(in)
-			}
-			if len(args) < 1 {
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, "rsh requires a single Pod to connect to"))
-			}
-			options.PodName = args[0]
-			args = args[1:]
-			if len(args) > 0 {
-				options.Command = args
-			} else {
-				options.Command = []string{executable}
-			}
-
-			kcmdutil.CheckErr(RunRsh(options, f, cmd, args))
+			Executor: &kubecmd.DefaultRemoteExecutor{},
 		},
 	}
-	cmd.Flags().BoolVarP(&forceTTY, "tty", "t", false, "Force a pseudo-terminal to be allocated")
-	cmd.Flags().BoolVarP(&disableTTY, "no-tty", "T", false, "Disable pseudo-terminal allocation")
-	cmd.Flags().StringVar(&executable, "shell", executable, "Path to shell command")
+
+	cmd := &cobra.Command{
+		Use:     fmt.Sprintf("%s [options] POD [COMMAND]", name),
+		Short:   "Start a shell session in a pod",
+		Long:    fmt.Sprintf(rshLong, parent),
+		Example: fmt.Sprintf(rshExample, parent+" "+name),
+		Run: func(cmd *cobra.Command, args []string) {
+			kcmdutil.CheckErr(options.Complete(f, cmd, args))
+			kcmdutil.CheckErr(options.Validate())
+			kcmdutil.CheckErr(options.Run())
+		},
+	}
+	cmd.Flags().BoolVarP(&options.ForceTTY, "tty", "t", false, "Force a pseudo-terminal to be allocated")
+	cmd.Flags().BoolVarP(&options.DisableTTY, "no-tty", "T", false, "Disable pseudo-terminal allocation")
+	cmd.Flags().StringVar(&options.Executable, "shell", "/bin/sh", "Path to the shell command")
 	cmd.Flags().StringVarP(&options.ContainerName, "container", "c", "", "Container name; defaults to first container")
 	cmd.Flags().SetInterspersed(false)
 	return cmd
 }
 
-// RunRsh starts a remote shell session on the server
-func RunRsh(options *kubecmd.ExecOptions, f *clientcmd.Factory, cmd *cobra.Command, args []string) error {
-	_, client, err := f.Clients()
-	if err != nil {
-		return err
+// Complete applies the command environment to RshOptions
+func (o *RshOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, args []string) error {
+	switch {
+	case o.ForceTTY && o.DisableTTY:
+		return kcmdutil.UsageError(cmd, "you may not specify -t and -T together")
+	case o.ForceTTY:
+		o.TTY = true
+	case o.DisableTTY:
+		o.TTY = false
+	default:
+		o.TTY = term.IsTerminal(o.In)
 	}
-	options.Client = client
+
+	if len(args) < 1 {
+		return kcmdutil.UsageError(cmd, "rsh requires a single Pod to connect to")
+	}
+	resource := args[0]
+	args = args[1:]
+	if len(args) > 0 {
+		o.Command = args
+	} else {
+		o.Command = []string{o.Executable}
+	}
 
 	namespace, _, err := f.DefaultNamespace()
 	if err != nil {
-		return nil
+		return err
 	}
-	options.Namespace = namespace
+	o.Namespace = namespace
 
 	config, err := f.ClientConfig()
 	if err != nil {
 		return err
 	}
-	options.Config = config
+	o.Config = config
 
-	if err := options.Validate(); err != nil {
+	client, err := f.Client()
+	if err != nil {
 		return err
 	}
-	return options.Run()
+	o.Client = client
+
+	// TODO: Consider making the timeout configurable
+	o.PodName, err = f.PodForResource(resource, 10*time.Second)
+	return err
+}
+
+// Validate ensures that RshOptions are valid
+func (o *RshOptions) Validate() error {
+	return o.ExecOptions.Validate()
+}
+
+// Run starts a remote shell session on the server
+func (o *RshOptions) Run() error {
+	// Insert the TERM into the command to be run
+	term := fmt.Sprintf("TERM=%s", util.Env("TERM", "xterm"))
+	o.Command = append([]string{"env", term}, o.Command...)
+
+	return o.ExecOptions.Run()
 }

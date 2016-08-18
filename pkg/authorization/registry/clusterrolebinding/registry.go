@@ -1,10 +1,8 @@
-package rolebinding
+package clusterrolebinding
 
 import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
 )
@@ -12,7 +10,7 @@ import (
 // Registry is an interface for things that know how to store RoleBindings.
 type Registry interface {
 	// ListRoleBindings obtains list of policyRoleBindings that match a selector.
-	ListRoleBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.RoleBindingList, error)
+	ListRoleBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.RoleBindingList, error)
 	// GetRoleBinding retrieves a specific policyRoleBinding.
 	GetRoleBinding(ctx kapi.Context, id string) (*authorizationapi.RoleBinding, error)
 	// CreateRoleBinding creates a new policyRoleBinding.
@@ -47,8 +45,8 @@ func NewRegistry(s Storage) Registry {
 	return &storage{s}
 }
 
-func (s *storage) ListRoleBindings(ctx kapi.Context, label labels.Selector, field fields.Selector) (*authorizationapi.RoleBindingList, error) {
-	obj, err := s.List(ctx, label, field)
+func (s *storage) ListRoleBindings(ctx kapi.Context, options *kapi.ListOptions) (*authorizationapi.RoleBindingList, error) {
+	obj, err := s.List(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -56,16 +54,16 @@ func (s *storage) ListRoleBindings(ctx kapi.Context, label labels.Selector, fiel
 	return obj.(*authorizationapi.RoleBindingList), nil
 }
 
-func (s *storage) CreateRoleBinding(ctx kapi.Context, node *authorizationapi.RoleBinding) (*authorizationapi.RoleBinding, error) {
-	obj, err := s.Create(ctx, node)
+func (s *storage) CreateRoleBinding(ctx kapi.Context, binding *authorizationapi.RoleBinding) (*authorizationapi.RoleBinding, error) {
+	obj, err := s.Create(ctx, binding)
 	if err != nil {
 		return nil, err
 	}
 	return obj.(*authorizationapi.RoleBinding), err
 }
 
-func (s *storage) UpdateRoleBinding(ctx kapi.Context, node *authorizationapi.RoleBinding) (*authorizationapi.RoleBinding, bool, error) {
-	obj, created, err := s.Update(ctx, node)
+func (s *storage) UpdateRoleBinding(ctx kapi.Context, binding *authorizationapi.RoleBinding) (*authorizationapi.RoleBinding, bool, error) {
+	obj, created, err := s.Update(ctx, binding.Name, rest.DefaultUpdatedObjectInfo(binding, kapi.Scheme))
 	if err != nil {
 		return nil, created, err
 	}

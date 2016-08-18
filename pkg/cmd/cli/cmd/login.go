@@ -9,12 +9,13 @@ import (
 	"github.com/spf13/cobra"
 
 	kapierrors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	kclientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/util/term"
 
 	"github.com/openshift/origin/pkg/cmd/cli/config"
 	"github.com/openshift/origin/pkg/cmd/flagtypes"
-	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	osclientcmd "github.com/openshift/origin/pkg/cmd/util/clientcmd"
 )
 
@@ -32,13 +33,13 @@ the server details -- can be provided through flags. If not provided, the comman
 prompt for user input as needed.`
 
 	loginExample = `  # Log in interactively
-  $ %[1]s login
+  %[1]s login
 
   # Log in to the given server with the given certificate authority file
-  $ %[1]s login localhost:8443 --certificate-authority=/path/to/cert.crt
+  %[1]s login localhost:8443 --certificate-authority=/path/to/cert.crt
 
   # Log in to the given server with the given credentials (will not prompt interactively)
-  $ %[1]s login localhost:8443 --username=myuser --password=mypass`
+  %[1]s login localhost:8443 --username=myuser --password=mypass`
 )
 
 // NewCmdLogin implements the OpenShift cli login command
@@ -54,7 +55,7 @@ func NewCmdLogin(fullName string, f *osclientcmd.Factory, reader io.Reader, out 
 		Long:    loginLong,
 		Example: fmt.Sprintf(loginExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := options.Complete(f, cmd, args); err != nil {
+			if err := options.Complete(f, cmd, args, fullName); err != nil {
 				kcmdutil.CheckErr(err)
 			}
 
@@ -90,7 +91,7 @@ func NewCmdLogin(fullName string, f *osclientcmd.Factory, reader io.Reader, out 
 	return cmds
 }
 
-func (o *LoginOptions) Complete(f *osclientcmd.Factory, cmd *cobra.Command, args []string) error {
+func (o *LoginOptions) Complete(f *osclientcmd.Factory, cmd *cobra.Command, args []string, commandName string) error {
 	kubeconfig, err := f.OpenShiftClientConfig.RawConfig()
 	o.StartingKubeConfig = &kubeconfig
 	if err != nil {
@@ -99,6 +100,11 @@ func (o *LoginOptions) Complete(f *osclientcmd.Factory, cmd *cobra.Command, args
 		}
 		// build a valid object to use if we failed on a non-existent file
 		o.StartingKubeConfig = kclientcmdapi.NewConfig()
+	}
+
+	o.CommandName = commandName
+	if o.CommandName == "" {
+		o.CommandName = "oc"
 	}
 
 	addr := flagtypes.Addr{Value: "localhost:8443", DefaultScheme: "https", DefaultPort: 8443, AllowPrefix: true}.Default()
@@ -125,16 +131,21 @@ func (o *LoginOptions) Complete(f *osclientcmd.Factory, cmd *cobra.Command, args
 
 	o.CertFile = kcmdutil.GetFlagString(cmd, "client-certificate")
 	o.KeyFile = kcmdutil.GetFlagString(cmd, "client-key")
-	o.APIVersion = kcmdutil.GetFlagString(cmd, "api-version")
+	apiVersionString := kcmdutil.GetFlagString(cmd, "api-version")
+	o.APIVersion = unversioned.GroupVersion{}
 
 	// if the API version isn't explicitly passed, use the API version from the default context (same rules as the server above)
-	if len(o.APIVersion) == 0 {
+	if len(apiVersionString) == 0 {
 		if defaultContext, defaultContextExists := o.StartingKubeConfig.Contexts[o.StartingKubeConfig.CurrentContext]; defaultContextExists {
 			if cluster, exists := o.StartingKubeConfig.Clusters[defaultContext.Cluster]; exists {
-				o.APIVersion = cluster.APIVersion
+				apiVersionString = cluster.APIVersion
 			}
 		}
+	}
 
+	o.APIVersion, err = unversioned.ParseGroupVersion(apiVersionString)
+	if err != nil {
+		return err
 	}
 
 	o.CAFile = kcmdutil.GetFlagString(cmd, "certificate-authority")
@@ -157,7 +168,7 @@ func (o LoginOptions) Validate(args []string, serverFlag string) error {
 		return errors.New("--server and passing the server URL as an argument are mutually exclusive")
 	}
 
-	if (len(o.Server) == 0) && !cmdutil.IsTerminal(o.Reader) {
+	if (len(o.Server) == 0) && !term.IsTerminal(o.Reader) {
 		return errors.New("A server URL must be specified")
 	}
 
@@ -184,7 +195,7 @@ func RunLogin(cmd *cobra.Command, options *LoginOptions) error {
 	}
 
 	if newFileCreated {
-		fmt.Fprintln(options.Out, "Welcome! See 'oc help' to get started.")
+		fmt.Fprintf(options.Out, "Welcome! See '%s help' to get started.\n", options.CommandName)
 	}
 	return nil
 }

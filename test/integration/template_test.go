@@ -1,11 +1,14 @@
-// +build integration,etcd
-
 package integration
 
 import (
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api/v1beta3"
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/runtime"
 
 	"github.com/openshift/origin/pkg/client"
@@ -14,21 +17,19 @@ import (
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
-func init() {
-	testutil.RequireEtcd()
-}
 func TestTemplate(t *testing.T) {
-	_, path, err := testserver.StartTestMaster()
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, path, err := testserver.StartTestMasterAPI()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, version := range []string{"v1", "v1beta3"} {
+	for _, version := range []unversioned.GroupVersion{v1.SchemeGroupVersion} {
 		config, err := testutil.GetClusterAdminClientConfig(path)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		config.Version = version
-		config.Prefix = ""
+		config.GroupVersion = &version
 		c, err := client.New(config)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -41,19 +42,21 @@ func TestTemplate(t *testing.T) {
 					Value: "test",
 				},
 			},
-			Objects: []runtime.Object{
-				&v1beta3.Service{
-					ObjectMeta: v1beta3.ObjectMeta{
-						Name:      "${NAME}-tester",
-						Namespace: "somevalue",
-					},
-					Spec: v1beta3.ServiceSpec{
-						PortalIP:        "1.2.3.4",
-						SessionAffinity: "some-bad-${VALUE}",
-					},
+		}
+
+		templateObjects := []runtime.Object{
+			&v1.Service{
+				ObjectMeta: v1.ObjectMeta{
+					Name:      "${NAME}-tester",
+					Namespace: "somevalue",
+				},
+				Spec: v1.ServiceSpec{
+					ClusterIP:       "1.2.3.4",
+					SessionAffinity: "some-bad-${VALUE}",
 				},
 			},
 		}
+		templateapi.AddObjectsToTemplate(template, templateObjects, v1.SchemeGroupVersion)
 
 		obj, err := c.TemplateConfigs("default").Create(template)
 		if err != nil {
@@ -69,7 +72,7 @@ func TestTemplate(t *testing.T) {
 		spec := svc["spec"].(map[string]interface{})
 		meta := svc["metadata"].(map[string]interface{})
 		// keep existing values
-		if spec["portalIP"] != "1.2.3.4" {
+		if spec["clusterIP"] != "1.2.3.4" {
 			t.Fatalf("unexpected object: %#v", svc)
 		}
 		// replace a value
@@ -85,4 +88,62 @@ func TestTemplate(t *testing.T) {
 			t.Fatalf("unexpected object: %#v", svc)
 		}
 	}
+}
+
+func walkJSONFiles(inDir string, fn func(name, path string, data []byte)) error {
+	err := filepath.Walk(inDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && path != inDir {
+			return filepath.SkipDir
+		}
+		name := filepath.Base(path)
+		ext := filepath.Ext(name)
+		if ext != "" {
+			name = name[:len(name)-len(ext)]
+		}
+		if !(ext == ".json" || ext == ".yaml") {
+			return nil
+		}
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fn(name, path, data)
+		return nil
+	})
+	return err
+}
+
+func TestTemplateTransformationFromConfig(t *testing.T) {
+	testutil.RequireEtcd(t)
+	defer testutil.DumpEtcdOnFailure(t)
+	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	clusterAdminClient, err := testutil.GetClusterAdminClient(clusterAdminKubeConfig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	walkJSONFiles("../templates/fixtures", func(name, path string, data []byte) {
+		template, err := runtime.Decode(kapi.Codecs.UniversalDecoder(), data)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", path, err)
+			return
+		}
+		config, err := clusterAdminClient.TemplateConfigs("default").Create(template.(*templateapi.Template))
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", path, err)
+			return
+		}
+		if len(config.Objects) == 0 {
+			t.Errorf("%q: no items in config object", path)
+			return
+		}
+		t.Logf("tested %q", path)
+	})
 }

@@ -2,10 +2,10 @@ package client
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/watch"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
@@ -22,13 +22,16 @@ type BuildConfigsNamespacer interface {
 
 // BuildConfigInterface exposes methods on BuildConfig resources
 type BuildConfigInterface interface {
-	List(label labels.Selector, field fields.Selector) (*buildapi.BuildConfigList, error)
+	List(opts kapi.ListOptions) (*buildapi.BuildConfigList, error)
 	Get(name string) (*buildapi.BuildConfig, error)
 	Create(config *buildapi.BuildConfig) (*buildapi.BuildConfig, error)
 	Update(config *buildapi.BuildConfig) (*buildapi.BuildConfig, error)
 	Delete(name string) error
-	Watch(label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error)
+	Watch(opts kapi.ListOptions) (watch.Interface, error)
+
 	Instantiate(request *buildapi.BuildRequest) (result *buildapi.Build, err error)
+	InstantiateBinary(request *buildapi.BinaryBuildRequestOptions, r io.Reader) (result *buildapi.Build, err error)
+
 	WebHookURL(name string, trigger *buildapi.BuildTriggerPolicy) (*url.URL, error)
 }
 
@@ -47,13 +50,12 @@ func newBuildConfigs(c *Client, namespace string) *buildConfigs {
 }
 
 // List returns a list of buildconfigs that match the label and field selectors.
-func (c *buildConfigs) List(label labels.Selector, field fields.Selector) (result *buildapi.BuildConfigList, err error) {
+func (c *buildConfigs) List(opts kapi.ListOptions) (result *buildapi.BuildConfigList, err error) {
 	result = &buildapi.BuildConfigList{}
 	err = c.r.Get().
 		Namespace(c.ns).
 		Resource("buildConfigs").
-		LabelsSelectorParam(label).
-		FieldsSelectorParam(field).
+		VersionedParams(&opts, kapi.ParameterCodec).
 		Do().
 		Into(result)
 	return
@@ -99,14 +101,12 @@ func (c *buildConfigs) Delete(name string) error {
 }
 
 // Watch returns a watch.Interface that watches the requested buildConfigs.
-func (c *buildConfigs) Watch(label labels.Selector, field fields.Selector, resourceVersion string) (watch.Interface, error) {
+func (c *buildConfigs) Watch(opts kapi.ListOptions) (watch.Interface, error) {
 	return c.r.Get().
 		Prefix("watch").
 		Namespace(c.ns).
 		Resource("buildConfigs").
-		Param("resourceVersion", resourceVersion).
-		LabelsSelectorParam(label).
-		FieldsSelectorParam(field).
+		VersionedParams(&opts, kapi.ParameterCodec).
 		Watch()
 }
 
@@ -114,5 +114,19 @@ func (c *buildConfigs) Watch(label labels.Selector, field fields.Selector, resou
 func (c *buildConfigs) Instantiate(request *buildapi.BuildRequest) (result *buildapi.Build, err error) {
 	result = &buildapi.Build{}
 	err = c.r.Post().Namespace(c.ns).Resource("buildConfigs").Name(request.Name).SubResource("instantiate").Body(request).Do().Into(result)
+	return
+}
+
+// InstantiateBinary instantiates a new build from a build config, given a structured request and an input stream,
+// and returns the created build or an error.
+func (c *buildConfigs) InstantiateBinary(request *buildapi.BinaryBuildRequestOptions, r io.Reader) (result *buildapi.Build, err error) {
+	result = &buildapi.Build{}
+	err = c.r.Post().
+		Namespace(c.ns).
+		Resource("buildConfigs").
+		Name(request.Name).
+		SubResource("instantiatebinary").
+		VersionedParams(request, kapi.ParameterCodec).
+		Body(r).Do().Into(result)
 	return
 }
