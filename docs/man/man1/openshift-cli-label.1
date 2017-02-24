@@ -16,11 +16,7 @@ openshift cli label \- Update the labels on a resource
 Update the labels on one or more resources
 
 .PP
-A valid label value is consisted of letters and/or numbers with a max length of 63
-characters. If \-\-overwrite is true, then existing labels can be overwritten, otherwise
-attempting to overwrite a label will result in an error. If \-\-resource\-version is
-specified, then updates will use this resource version, otherwise the existing
-resource\-version will be used.
+A valid label value is consisted of letters and/or numbers with a max length of  63 characters. If \-\-overwrite is true, then existing labels can be overwritten, otherwise attempting to overwrite a label will result in an error. If \-\-resource\-version is specified, then updates will use this resource version, otherwise the existing resource\-version will be used.
 
 
 .SH OPTIONS
@@ -29,26 +25,35 @@ resource\-version will be used.
     select all resources in the namespace of the specified resource types
 
 .PP
+\fB\-\-allow\-missing\-template\-keys\fP=true
+    If true, ignore any errors in templates when a field or map key is missing in the template. Only applies to golang and jsonpath output formats.
+
+.PP
 \fB\-\-dry\-run\fP=false
     If true, only print the object that would be sent, without sending it.
 
 .PP
 \fB\-f\fP, \fB\-\-filename\fP=[]
-    Filename, directory, or URL to a file identifying the resource to update the labels
+    Filename, directory, or URL to files identifying the resource to update the labels
 
 .PP
 \fB\-\-include\-extended\-apis\fP=true
     If true, include definitions of new APIs via calls to the API server. [default true]
 
 .PP
+\fB\-\-local\fP=false
+    If true, label will NOT contact api\-server but run locally.
+
+.PP
 \fB\-\-no\-headers\fP=false
-    When using the default output, don't print headers.
+    When using the default or custom\-column output format, don't print headers.
 
 .PP
 \fB\-o\fP, \fB\-\-output\fP=""
-    Output format. One of: json|yaml|wide|name|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See golang template [
+    Output format. One of: json|yaml|wide|name|custom\-columns=...|custom\-columns\-file=...|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See custom columns [
+\[la]http://kubernetes.io/docs/user-guide/kubectl-overview/#custom-columns\[ra]], golang template [
 \[la]http://golang.org/pkg/text/template/#pkg-overview\[ra]] and jsonpath template [
-\[la]http://releases.k8s.io/release-1.3/docs/user-guide/jsonpath.md\[ra]].
+\[la]http://kubernetes.io/docs/user-guide/jsonpath\[ra]].
 
 .PP
 \fB\-\-output\-version\fP=""
@@ -60,7 +65,7 @@ resource\-version will be used.
 
 .PP
 \fB\-\-record\fP=false
-    Record current kubectl command in the resource annotation.
+    Record current kubectl command in the resource annotation. If set to false, do not record the command. If set to true, record the command. If not set, default to updating the existing annotation value only if one already exists.
 
 .PP
 \fB\-R\fP, \fB\-\-recursive\fP=false
@@ -99,19 +104,23 @@ resource\-version will be used.
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-certificate\-authority\fP=""
-    Path to a cert. file for the certificate authority.
+    Path to a cert. file for the certificate authority
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -131,7 +140,7 @@ resource\-version will be used.
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-log\-flush\-frequency\fP=0
@@ -143,7 +152,11 @@ resource\-version will be used.
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -151,7 +164,7 @@ resource\-version will be used.
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""
@@ -165,16 +178,16 @@ resource\-version will be used.
 .nf
   # Update pod 'foo' with the label 'unhealthy' and the value 'true'.
   openshift cli label pods foo unhealthy=true
-
+  
   # Update pod 'foo' with the label 'status' and the value 'unhealthy', overwriting any existing value.
   openshift cli label \-\-overwrite pods foo status=unhealthy
-
+  
   # Update all pods in the namespace
   openshift cli label pods \-\-all status=unhealthy
-
+  
   # Update pod 'foo' only if the resource is unchanged from version 1.
   openshift cli label pods foo status=unhealthy \-\-resource\-version=1
-
+  
   # Update pod 'foo' by removing a label named 'bar' if it exists.
   # Does not require the \-\-overwrite flag.
   openshift cli label pods foo bar\-

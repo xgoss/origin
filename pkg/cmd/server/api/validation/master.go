@@ -157,12 +157,8 @@ func ValidateMasterConfig(config *api.MasterConfig, fldPath *field.Path) Validat
 			}
 		}
 	}
-	if len(config.NetworkConfig.IngressIPNetworkCIDR) > 0 {
-		cidr := config.NetworkConfig.IngressIPNetworkCIDR
-		if _, ipNet, err := net.ParseCIDR(cidr); err != nil || ipNet.IP.IsUnspecified() {
-			validationResults.AddErrors(field.Invalid(fldPath.Child("networkConfig", "ingressIPNetworkCIDR").Index(0), cidr, "must be a valid CIDR notation IP range (e.g. 172.30.0.0/16)"))
-		}
-	}
+
+	validationResults.AddErrors(ValidateIngressIPNetworkCIDR(config, fldPath.Child("networkConfig", "ingressIPNetworkCIDR").Index(0))...)
 
 	validationResults.AddErrors(ValidateKubeConfig(config.MasterClients.OpenShiftLoopbackKubeConfig, fldPath.Child("masterClients", "openShiftLoopbackKubeConfig"))...)
 
@@ -194,6 +190,28 @@ func ValidateMasterConfig(config *api.MasterConfig, fldPath *field.Path) Validat
 	}
 
 	validationResults.Append(ValidateControllerConfig(config.ControllerConfig, fldPath.Child("controllerConfig")))
+
+	validationResults.Append(ValidateAuditConfig(config.AuditConfig, fldPath.Child("auditConfig")))
+
+	return validationResults
+}
+
+func ValidateAuditConfig(config api.AuditConfig, fldPath *field.Path) ValidationResults {
+	validationResults := ValidationResults{}
+
+	if len(config.AuditFilePath) == 0 {
+		// for backwards compatibility reasons we can't error this out
+		validationResults.AddWarnings(field.Required(fldPath.Child("auditFilePath"), "audit can now be logged to a separate file"))
+	}
+	if config.MaximumFileRetentionDays < 0 {
+		validationResults.AddErrors(field.Invalid(fldPath.Child("maximumFileRetentionDays"), config.MaximumFileRetentionDays, "must be greater than or equal to 0"))
+	}
+	if config.MaximumRetainedFiles < 0 {
+		validationResults.AddErrors(field.Invalid(fldPath.Child("maximumRetainedFiles"), config.MaximumRetainedFiles, "must be greater than or equal to 0"))
+	}
+	if config.MaximumFileSizeMegabytes < 0 {
+		validationResults.AddErrors(field.Invalid(fldPath.Child("maximumFileSizeMegabytes"), config.MaximumFileSizeMegabytes, "must be greater than or equal to 0"))
+	}
 
 	return validationResults
 }
@@ -295,9 +313,7 @@ func ValidateServiceAccountConfig(config api.ServiceAccountConfig, builtInKubern
 		privateKeyFilePath := fldPath.Child("privateKeyFile")
 		if fileErrs := ValidateFile(config.PrivateKeyFile, privateKeyFilePath); len(fileErrs) > 0 {
 			validationResults.AddErrors(fileErrs...)
-		} else if privateKey, err := serviceaccount.ReadPrivateKey(config.PrivateKeyFile); err != nil {
-			validationResults.AddErrors(field.Invalid(privateKeyFilePath, config.PrivateKeyFile, err.Error()))
-		} else if err := privateKey.Validate(); err != nil {
+		} else if _, err := serviceaccount.ReadPrivateKey(config.PrivateKeyFile); err != nil {
 			validationResults.AddErrors(field.Invalid(privateKeyFilePath, config.PrivateKeyFile, err.Error()))
 		}
 	} else if builtInKubernetes {
@@ -311,7 +327,7 @@ func ValidateServiceAccountConfig(config api.ServiceAccountConfig, builtInKubern
 		idxPath := fldPath.Child("publicKeyFiles").Index(i)
 		if fileErrs := ValidateFile(publicKeyFile, idxPath); len(fileErrs) > 0 {
 			validationResults.AddErrors(fileErrs...)
-		} else if _, err := serviceaccount.ReadPublicKey(publicKeyFile); err != nil {
+		} else if _, err := serviceaccount.ReadPublicKeys(publicKeyFile); err != nil {
 			validationResults.AddErrors(field.Invalid(idxPath, publicKeyFile, err.Error()))
 		}
 	}
@@ -597,7 +613,7 @@ func ValidateRoutingConfig(config api.RoutingConfig, fldPath *field.Path) field.
 func ValidateAPIServerExtendedArguments(config api.ExtendedArguments, fldPath *field.Path) ValidationResults {
 	validationResults := ValidationResults{}
 
-	validationResults.AddErrors(ValidateExtendedArguments(config, apiserveroptions.NewAPIServer().AddFlags, fldPath)...)
+	validationResults.AddErrors(ValidateExtendedArguments(config, apiserveroptions.NewServerRunOptions().AddFlags, fldPath)...)
 
 	if len(config["admission-control"]) > 0 {
 		validationResults.AddWarnings(field.Invalid(fldPath.Key("admission-control"), config["admission-control"], "specified admission ordering is being phased out.  Convert to DefaultAdmissionConfig in admissionConfig.pluginConfig."))
@@ -640,4 +656,38 @@ func ValidateAdmissionPluginConfigConflicts(masterConfig *api.MasterConfig) Vali
 	}
 
 	return validationResults
+}
+
+func ValidateIngressIPNetworkCIDR(config *api.MasterConfig, fldPath *field.Path) (errors field.ErrorList) {
+	cidr := config.NetworkConfig.IngressIPNetworkCIDR
+	if len(cidr) == 0 {
+		return
+	}
+
+	addError := func(errMessage string) {
+		errors = append(errors, field.Invalid(fldPath, cidr, errMessage))
+	}
+
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		addError(fmt.Sprintf("must be a valid CIDR notation IP range (e.g. %s)", api.DefaultIngressIPNetworkCIDR))
+		return
+	}
+
+	// TODO Detect cloud provider when not using built-in kubernetes
+	kubeConfig := config.KubernetesMasterConfig
+	noCloudProvider := kubeConfig != nil && (len(kubeConfig.ControllerArguments["cloud-provider"]) == 0 || kubeConfig.ControllerArguments["cloud-provider"][0] == "")
+
+	if noCloudProvider {
+		if api.CIDRsOverlap(cidr, config.NetworkConfig.ClusterNetworkCIDR) {
+			addError("conflicts with cluster network CIDR")
+		}
+		if api.CIDRsOverlap(cidr, config.NetworkConfig.ServiceNetworkCIDR) {
+			addError("conflicts with service network CIDR")
+		}
+	} else if !ipNet.IP.IsUnspecified() {
+		addError("should not be provided when a cloud-provider is enabled")
+	}
+
+	return
 }

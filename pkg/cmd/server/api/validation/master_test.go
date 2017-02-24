@@ -383,7 +383,7 @@ func TestValidateAdmissionPluginConfigConflicts(t *testing.T) {
 	// these fields have warnings in the empty case
 	defaultWarningFields := sets.NewString(
 		"serviceAccountConfig.managedNames", "serviceAccountConfig.publicKeyFiles", "serviceAccountConfig.privateKeyFile", "serviceAccountConfig.masterCA",
-		"projectConfig.securityAllocator", "kubernetesMasterConfig.proxyClientInfo")
+		"projectConfig.securityAllocator", "kubernetesMasterConfig.proxyClientInfo", "auditConfig.auditFilePath")
 
 	for _, tc := range testCases {
 		results := ValidateMasterConfig(&tc.options, nil)
@@ -418,6 +418,73 @@ func TestValidateAdmissionPluginConfigConflicts(t *testing.T) {
 			if !found {
 				t.Errorf("%s: didn't find %q", tc.name, expectedField)
 			}
+		}
+	}
+}
+
+func TestValidateIngressIPNetworkCIDR(t *testing.T) {
+	testCases := []struct {
+		testName      string
+		cidr          string
+		serviceCIDR   string
+		clusterCIDR   string
+		cloudProvider string
+		errorCount    int
+	}{
+		{
+			testName: "No CIDR",
+		},
+		{
+			testName:   "Invalid CIDR",
+			cidr:       "foo",
+			errorCount: 1,
+		},
+		{
+			testName:    "No cloud provider and conflicting CIDRs",
+			cidr:        "172.16.0.0/16",
+			serviceCIDR: "172.16.0.0/16",
+			clusterCIDR: "172.16.0.0/16",
+			errorCount:  2,
+		},
+		{
+			testName: "No cloud provider and unspecified CIDR",
+			cidr:     "0.0.0.0/32",
+		},
+		{
+			testName:    "No cloud provider and non-conflicting CIDR",
+			cidr:        "172.16.0.0/16",
+			serviceCIDR: "172.17.0.0/16",
+			clusterCIDR: "172.18.0.0/16",
+		},
+		{
+			testName:      "Cloud provider and unspecified CIDR",
+			cidr:          "0.0.0.0/32",
+			cloudProvider: "foo",
+		},
+		{
+			testName:      "Cloud provider and CIDR",
+			cidr:          "172.16.0.0/16",
+			cloudProvider: "foo",
+			errorCount:    1,
+		},
+	}
+	for _, test := range testCases {
+		config := &configapi.MasterConfig{
+			KubernetesMasterConfig: &configapi.KubernetesMasterConfig{
+				ControllerArguments: configapi.ExtendedArguments{
+					"cloud-provider": []string{test.cloudProvider},
+				},
+			},
+			NetworkConfig: configapi.MasterNetworkConfig{
+				IngressIPNetworkCIDR: test.cidr,
+				ServiceNetworkCIDR:   test.serviceCIDR,
+				ClusterNetworkCIDR:   test.clusterCIDR,
+			},
+		}
+		errors := ValidateIngressIPNetworkCIDR(config, nil)
+		errorCount := len(errors)
+		if test.errorCount != errorCount {
+			t.Errorf("%s: expected %d errors, got %d", test.testName, test.errorCount, errorCount)
 		}
 	}
 }

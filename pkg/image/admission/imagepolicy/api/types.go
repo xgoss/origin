@@ -13,17 +13,34 @@ const IgnorePolicyRulesAnnotation = "alpha.image.policy.openshift.io/ignore-rule
 type ImagePolicyConfig struct {
 	unversioned.TypeMeta
 
+	// ResolveImages indicates what kind of image resolution should be done.  If a rewriting policy is chosen,
+	// then the image pull specs will be updated.
+	ResolveImages ImageResolutionType
+
 	// ExecutionRules determine whether the use of an image is allowed in an object with a pod spec.
 	// By default, these rules only apply to pods, but may be extended to other resource types.
 	ExecutionRules []ImageExecutionPolicyRule
 }
 
+// ImageResolutionType is an enumerated string that indicates how image pull spec resolution should be handled
+type ImageResolutionType string
+
+var (
+	// require resolution to succeed and rewrite the resource to use it
+	RequiredRewrite ImageResolutionType = "RequiredRewrite"
+	// require resolution to succeed, but don't rewrite the image pull spec
+	Required ImageResolutionType = "Required"
+	// attempt resolution, rewrite if successful
+	AttemptRewrite ImageResolutionType = "AttemptRewrite"
+	// attempt resolution, don't rewrite
+	Attempt ImageResolutionType = "Attempt"
+	// don't attempt resolution
+	DoNotAttempt ImageResolutionType = "DoNotAttempt"
+)
+
 // ImageExecutionPolicyRule determines whether a provided image may be used on the platform.
 type ImageExecutionPolicyRule struct {
 	ImageCondition
-
-	// Resolve indicates that images referenced by this resource must be resolved
-	Resolve bool
 
 	// Reject means this rule, if it matches the condition, will cause an immediate failure. No
 	// other rules will be considered.
@@ -36,7 +53,7 @@ type ImageExecutionPolicyRule struct {
 type ImageCondition struct {
 	// Name is the name of this policy rule for reference. It must be unique across all rules.
 	Name string
-	// IgnoreNamespaceOverride prevents this condition from being overriden when the
+	// IgnoreNamespaceOverride prevents this condition from being overridden when the
 	// `alpha.image.policy.openshift.io/ignore-rules` is set on a namespace and contains this rule name.
 	IgnoreNamespaceOverride bool
 
@@ -53,9 +70,9 @@ type ImageCondition struct {
 	// registries match, this condition is satisfied.
 	MatchRegistries []string
 
-	// AllowResolutionFailure allows the subsequent conditions to be bypassed if the integrated registry does
+	// SkipOnResolutionFailure allows the subsequent conditions to be bypassed if the integrated registry does
 	// not have access to image metadata (no image exists matching the image digest).
-	AllowResolutionFailure bool
+	SkipOnResolutionFailure bool
 
 	// MatchDockerImageLabels checks against the resolved image for the presence of a Docker label. All conditions
 	// must match.

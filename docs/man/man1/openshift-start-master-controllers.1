@@ -22,8 +22,7 @@ This command starts the controllers for the master.  Running
 openshift start master controllers
 
 .PP
-will start the controllers that manage the master state, including the scheduler. The controllers
-will run in the foreground until you terminate the process.
+will start the controllers that manage the master state, including the scheduler. The controllers will run in the foreground until you terminate the process.
 
 
 .SH OPTIONS
@@ -38,6 +37,10 @@ will run in the foreground until you terminate the process.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
+
 .PP
 \fB\-\-google\-json\-key\fP=""
     The Google Cloud Platform Service Account JSON Key to use for authentication.

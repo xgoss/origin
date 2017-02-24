@@ -16,39 +16,50 @@ openshift infra router \- Start a router
 Start a router
 
 .PP
-This command launches a router connected to your cluster master. The router listens for routes and endpoints
-created by users and keeps a local router configuration up to date with those changes.
+This command launches a router connected to your cluster master. The router listens for routes and endpoints created by users and keeps a local router configuration up to date with those changes.
 
 .PP
 You may customize the router by providing your own \-\-template and \-\-reload scripts.
 
 .PP
-You may restrict the set of routes exposed to a single project (with \-\-namespace), projects your client has
-access to with a set of labels (\-\-project\-labels), namespaces matching a label (\-\-namespace\-labels), or all
-namespaces (no argument). You can limit the routes to those matching a \-\-labels or \-\-fields selector. Note
-that you must have a cluster\-wide administrative role to view all namespaces.
+The router must have a default certificate in pem format. You may provide it via \-\-default\-cert otherwise one is automatically created.
+
+.PP
+You may restrict the set of routes exposed to a single project (with \-\-namespace), projects your client has access to with a set of labels (\-\-project\-labels), namespaces matching a label (\-\-namespace\-labels), or all namespaces (no argument). You can limit the routes to those matching a \-\-labels or \-\-fields selector. Note that you must have a cluster\-wide administrative role to view all namespaces.
 
 
 .SH OPTIONS
+.PP
+\fB\-\-allow\-wildcard\-routes\fP=false
+    Allow wildcard host names for routes
+
+.PP
+\fB\-\-allowed\-domains\fP=[]
+    List of comma separated domains to allow in routes. If specified, only the domains in this list will be allowed routes. Note that domains in the denied list take precedence over the ones in the allowed list
+
 .PP
 \fB\-\-api\-version\fP=""
     DEPRECATED: The API version to use when talking to the server
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-bind\-ports\-after\-sync\fP=false
+    Bind ports only after route state has been synchronized
 
 .PP
 \fB\-\-certificate\-authority\fP=""
-    Path to a cert. file for the certificate authority.
+    Path to a cert. file for the certificate authority
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -67,12 +78,28 @@ that you must have a cluster\-wide administrative role to view all namespaces.
     The contents of a default certificate to use for routes that don't expose a TLS server cert; in PEM format
 
 .PP
+\fB\-\-default\-certificate\-dir\fP=""
+    A path to a directory that contains a file named tls.crt. If tls.crt is not a PEM file which also contains a private key, it is first combined with a file named tls.key in the same directory. The PEM\-format contents are then used as the default certificate. Only used if default\-certificate and default\-certificate\-path are not specified.
+
+.PP
 \fB\-\-default\-certificate\-path\fP=""
     A path to default certificate to use for routes that don't expose a TLS server cert; in PEM format
 
 .PP
-\fB\-\-extended\-validation\fP=false
-    If set, then an additional extended validation step is performed on all routes admitted in by this router.
+\fB\-\-denied\-domains\fP=[]
+    List of comma separated domains to deny in routes
+
+.PP
+\fB\-\-disable\-namespace\-ownership\-check\fP=false
+    Disables the namespace ownership checks for a route host with different paths or for overlapping host names in the case of wildcard routes. Please be aware that if namespace ownership checks are disabled, routes in a different namespace can use this mechanism to 'steal' sub\-paths for existing domains. This is only safe if route creation privileges are restricted, or if all the users can be trusted.
+
+.PP
+\fB\-\-enable\-ingress\fP=false
+    Enable configuration via ingress resources
+
+.PP
+\fB\-\-extended\-validation\fP=true
+    If set, then an additional extended validation step is performed on all routes admitted in by this router. Defaults to true and enables the extended validation checks.
 
 .PP
 \fB\-\-fields\fP=""
@@ -88,7 +115,7 @@ that you must have a cluster\-wide administrative role to view all namespaces.
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-interval\fP=0
@@ -109,12 +136,16 @@ that you must have a cluster\-wide administrative role to view all namespaces.
     The address the master can be reached on (host, host:port, or URL).
 
 .PP
+\fB\-\-max\-connections\fP=""
+    Specifies the maximum number of concurrent connections.
+
+.PP
 \fB\-\-name\fP="public"
     The name the router will identify itself with in the route status
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
 
 .PP
 \fB\-\-namespace\-labels\fP=""
@@ -133,8 +164,16 @@ that you must have a cluster\-wide administrative role to view all namespaces.
     The path to the reload script to use
 
 .PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
+
+.PP
 \fB\-\-resync\-interval\fP=0
     The interval at which the route list should be fully refreshed
+
+.PP
+\fB\-\-router\-canonical\-hostname\fP=""
+    CanonicalHostname is the external host name for the router that can be used as a CNAME for the host requested for this route. This value is optional and may not be set in all cases.
 
 .PP
 \fB\-\-server\fP=""
@@ -158,7 +197,7 @@ that you must have a cluster\-wide administrative role to view all namespaces.
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""
@@ -170,6 +209,10 @@ that you must have a cluster\-wide administrative role to view all namespaces.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
+
 .PP
 \fB\-\-google\-json\-key\fP=""
     The Google Cloud Platform Service Account JSON Key to use for authentication.

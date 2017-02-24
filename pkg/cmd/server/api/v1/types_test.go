@@ -31,8 +31,10 @@ authConfig:
   authenticationCacheTTL: ""
   authorizationCacheSize: 0
   authorizationCacheTTL: ""
+dnsBindAddress: ""
 dnsDomain: ""
 dnsIP: ""
+dnsNameservers: null
 dockerConfig:
   execHandlerName: ""
 enableUnidling: false
@@ -45,6 +47,7 @@ masterClientConnectionOverrides: null
 masterKubeConfig: ""
 networkConfig:
   mtu: 0
+  networkPluginName: ""
 nodeIP: ""
 nodeName: ""
 podManifestConfig:
@@ -104,7 +107,11 @@ assetConfig:
     namedCertificates: null
     requestTimeoutSeconds: 0
 auditConfig:
+  auditFilePath: ""
   enabled: false
+  maximumFileRetentionDays: 0
+  maximumFileSizeMegabytes: 0
+  maximumRetainedFiles: 0
 controllerConfig:
   serviceServingCert:
     signer: null
@@ -153,7 +160,7 @@ imagePolicyConfig:
   maxScheduledImageImportsPerMinute: 0
   scheduledImageImportMinimumIntervalSeconds: 0
 jenkinsPipelineConfig:
-  enabled: null
+  autoProvisionEnabled: null
   parameters: null
   serviceName: ""
   templateName: ""
@@ -318,6 +325,7 @@ oauthConfig:
       clientSecret: ""
       kind: GitHubIdentityProvider
       organizations: null
+      teams: null
   - challenge: false
     login: false
     mappingMethod: ""
@@ -332,6 +340,7 @@ oauthConfig:
         value: ""
       kind: GitHubIdentityProvider
       organizations: null
+      teams: null
   - challenge: false
     login: false
     mappingMethod: ""

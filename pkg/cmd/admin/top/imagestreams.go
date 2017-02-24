@@ -12,22 +12,26 @@ import (
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/api/graph"
+	"github.com/openshift/origin/pkg/cmd/templates"
+
 	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 	imagegraph "github.com/openshift/origin/pkg/image/graph/nodes"
 )
 
-const (
-	TopImageStreamsRecommendedName = "imagestreams"
+const TopImageStreamsRecommendedName = "imagestreams"
 
-	topImageStreamsLong = `Show usage statistics for ImageStreams
+var (
+	topImageStreamsLong = templates.LongDesc(`
+		Show usage statistics for ImageStreams
 
-This command analyzes all the ImageStreams managed by the platform and presents current
-usage statistics.`
+		This command analyzes all the ImageStreams managed by the platform and presents current
+		usage statistics.`)
 
-	topImageStreamsExample = `  # Show usage statistics for ImageStreams
-  %[1]s %[2]s`
+	topImageStreamsExample = templates.Examples(`
+		# Show usage statistics for ImageStreams
+  	%[1]s %[2]s`)
 )
 
 // NewCmdTopImageStreams implements the OpenShift cli top imagestreams command.
@@ -144,7 +148,7 @@ func getImageStreamSize(g graph.Graph, node *imagegraph.ImageStreamNode) (int64,
 	storage := int64(0)
 	images := len(imageEdges)
 	layers := 0
-	layerSet := sets.NewString()
+	blobSet := sets.NewString()
 	for _, e := range imageEdges {
 		imageNode, ok := e.To().(*imagegraph.ImageNode)
 		if !ok {
@@ -154,11 +158,15 @@ func getImageStreamSize(g graph.Graph, node *imagegraph.ImageStreamNode) (int64,
 		layers += len(image.DockerImageLayers)
 		// we're counting only unique layers per the entire stream
 		for _, layer := range image.DockerImageLayers {
-			if layerSet.Has(layer.Name) {
+			if blobSet.Has(layer.Name) {
 				continue
 			}
-			layerSet.Insert(layer.Name)
+			blobSet.Insert(layer.Name)
 			storage += layer.LayerSize
+		}
+		if len(image.DockerImageConfig) > 0 && !blobSet.Has(image.DockerImageMetadata.ID) {
+			blobSet.Insert(image.DockerImageMetadata.ID)
+			storage += int64(len(image.DockerImageConfig))
 		}
 	}
 

@@ -12,7 +12,7 @@ import (
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	rcutils "k8s.io/kubernetes/pkg/controller/replication"
 	kctl "k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/labels"
@@ -42,13 +42,13 @@ const (
 // DeploymentConfigDescriber generates information about a DeploymentConfig
 type DeploymentConfigDescriber struct {
 	osClient   client.Interface
-	kubeClient kclient.Interface
+	kubeClient kclientset.Interface
 
 	config *deployapi.DeploymentConfig
 }
 
 // NewDeploymentConfigDescriber returns a new DeploymentConfigDescriber
-func NewDeploymentConfigDescriber(client client.Interface, kclient kclient.Interface, config *deployapi.DeploymentConfig) *DeploymentConfigDescriber {
+func NewDeploymentConfigDescriber(client client.Interface, kclient kclientset.Interface, config *deployapi.DeploymentConfig) *DeploymentConfigDescriber {
 	return &DeploymentConfigDescriber{
 		osClient:   client,
 		kubeClient: kclient,
@@ -73,6 +73,19 @@ func (d *DeploymentConfigDescriber) Describe(namespace, name string, settings kc
 
 	return tabbedString(func(out *tabwriter.Writer) error {
 		formatMeta(out, deploymentConfig.ObjectMeta)
+		var (
+			deploymentsHistory   []*kapi.ReplicationController
+			activeDeploymentName string
+		)
+
+		if d.config == nil {
+			if rcs, err := d.kubeClient.Core().ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: deployutil.ConfigSelector(deploymentConfig.Name)}); err == nil {
+				deploymentsHistory = make([]*kapi.ReplicationController, 0, len(rcs.Items))
+				for i := range rcs.Items {
+					deploymentsHistory = append(deploymentsHistory, &rcs.Items[i])
+				}
+			}
+		}
 
 		if deploymentConfig.Status.LatestVersion == 0 {
 			formatString(out, "Latest Version", "Not deployed")
@@ -83,41 +96,51 @@ func (d *DeploymentConfigDescriber) Describe(namespace, name string, settings kc
 		printDeploymentConfigSpec(d.kubeClient, *deploymentConfig, out)
 		fmt.Fprintln(out)
 
-		deploymentName := deployutil.LatestDeploymentNameForConfig(deploymentConfig)
-		deployment, err := d.kubeClient.ReplicationControllers(namespace).Get(deploymentName)
-		if err != nil {
-			if kerrors.IsNotFound(err) {
-				formatString(out, "Latest Deployment", "<none>")
-			} else {
-				formatString(out, "Latest Deployment", fmt.Sprintf("error: %v", err))
+		latestDeploymentName := deployutil.LatestDeploymentNameForConfig(deploymentConfig)
+		if activeDeployment := deployutil.ActiveDeployment(deploymentsHistory); activeDeployment != nil {
+			activeDeploymentName = activeDeployment.Name
+		}
+
+		var deployment *kapi.ReplicationController
+		isNotDeployed := len(deploymentsHistory) == 0
+		for _, item := range deploymentsHistory {
+			if item.Name == latestDeploymentName {
+				deployment = item
 			}
+		}
+		if deployment == nil {
+			isNotDeployed = true
+		}
+
+		if isNotDeployed {
+			formatString(out, "Latest Deployment", "<none>")
 		} else {
 			header := fmt.Sprintf("Deployment #%d (latest)", deployutil.DeploymentVersionFor(deployment))
-			printDeploymentRc(deployment, d.kubeClient, out, header, true)
+			// Show details if the current deployment is the active one or it is the
+			// initial deployment.
+			printDeploymentRc(deployment, d.kubeClient, out, header, (deployment.Name == activeDeploymentName) || len(deploymentsHistory) == 1)
 		}
+
 		// We don't show the deployment history when running `oc rollback --dry-run`.
-		if d.config == nil {
-			deploymentsHistory, err := d.kubeClient.ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: labels.Everything()})
-			if err == nil {
-				sorted := deploymentsHistory.Items
-				sort.Sort(sort.Reverse(rcutils.OverlappingControllers(sorted)))
-				counter := 1
-				for _, item := range sorted {
-					if item.Name != deploymentName && deploymentConfig.Name == deployutil.DeploymentConfigNameFor(&item) {
-						header := fmt.Sprintf("Deployment #%d", deployutil.DeploymentVersionFor(&item))
-						printDeploymentRc(&item, d.kubeClient, out, header, false)
-						counter++
-					}
-					if counter == maxDisplayDeployments {
-						break
-					}
+		if d.config == nil && !isNotDeployed {
+			sorted := deploymentsHistory
+			sort.Sort(sort.Reverse(rcutils.OverlappingControllers(sorted)))
+			counter := 1
+			for _, item := range sorted {
+				if item.Name != latestDeploymentName && deploymentConfig.Name == deployutil.DeploymentConfigNameFor(item) {
+					header := fmt.Sprintf("Deployment #%d", deployutil.DeploymentVersionFor(item))
+					printDeploymentRc(item, d.kubeClient, out, header, item.Name == activeDeploymentName)
+					counter++
+				}
+				if counter == maxDisplayDeployments {
+					break
 				}
 			}
 		}
 
 		if settings.ShowEvents {
 			// Events
-			if events, err := d.kubeClient.Events(deploymentConfig.Namespace).Search(deploymentConfig); err == nil && events != nil {
+			if events, err := d.kubeClient.Core().Events(deploymentConfig.Namespace).Search(deploymentConfig); err == nil && events != nil {
 				latestDeploymentEvents := &kapi.EventList{Items: []kapi.Event{}}
 				for i := len(events.Items); i != 0 && i > len(events.Items)-maxDisplayDeploymentsEvents; i-- {
 					latestDeploymentEvents.Items = append(latestDeploymentEvents.Items, events.Items[i-1])
@@ -229,7 +252,7 @@ func printTriggers(triggers []deployapi.DeploymentTriggerPolicy, w *tabwriter.Wr
 	formatString(w, "Triggers", desc)
 }
 
-func printDeploymentConfigSpec(kc kclient.Interface, dc deployapi.DeploymentConfig, w *tabwriter.Writer) error {
+func printDeploymentConfigSpec(kc kclientset.Interface, dc deployapi.DeploymentConfig, w *tabwriter.Writer) error {
 	spec := dc.Spec
 	// Selector
 	formatString(w, "Selector", formatLabels(spec.Selector))
@@ -267,7 +290,7 @@ func printDeploymentConfigSpec(kc kclient.Interface, dc deployapi.DeploymentConf
 }
 
 // TODO: Move this upstream
-func printAutoscalingInfo(res unversioned.GroupResource, namespace, name string, kclient kclient.Interface, w *tabwriter.Writer) {
+func printAutoscalingInfo(res unversioned.GroupResource, namespace, name string, kclient kclientset.Interface, w *tabwriter.Writer) {
 	hpaList, err := kclient.Autoscaling().HorizontalPodAutoscalers(namespace).List(kapi.ListOptions{LabelSelector: labels.Everything()})
 	if err != nil {
 		return
@@ -292,7 +315,7 @@ func printAutoscalingInfo(res unversioned.GroupResource, namespace, name string,
 	}
 }
 
-func printDeploymentRc(deployment *kapi.ReplicationController, kubeClient kclient.Interface, w io.Writer, header string, verbose bool) error {
+func printDeploymentRc(deployment *kapi.ReplicationController, kubeClient kclientset.Interface, w io.Writer, header string, verbose bool) error {
 	if len(header) > 0 {
 		fmt.Fprintf(w, "%v:\n", header)
 	}
@@ -318,8 +341,8 @@ func printDeploymentRc(deployment *kapi.ReplicationController, kubeClient kclien
 	return nil
 }
 
-func getPodStatusForDeployment(deployment *kapi.ReplicationController, kubeClient kclient.Interface) (running, waiting, succeeded, failed int, err error) {
-	rcPods, err := kubeClient.Pods(deployment.Namespace).List(kapi.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector).AsSelector()})
+func getPodStatusForDeployment(deployment *kapi.ReplicationController, kubeClient kclientset.Interface) (running, waiting, succeeded, failed int, err error) {
+	rcPods, err := kubeClient.Core().Pods(deployment.Namespace).List(kapi.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector).AsSelector()})
 	if err != nil {
 		return
 	}
@@ -341,11 +364,11 @@ func getPodStatusForDeployment(deployment *kapi.ReplicationController, kubeClien
 type LatestDeploymentsDescriber struct {
 	count      int
 	osClient   client.Interface
-	kubeClient kclient.Interface
+	kubeClient kclientset.Interface
 }
 
 // NewLatestDeploymentsDescriber lists the latest deployments limited to "count". In case count == -1, list back to the last successful.
-func NewLatestDeploymentsDescriber(client client.Interface, kclient kclient.Interface, count int) *LatestDeploymentsDescriber {
+func NewLatestDeploymentsDescriber(client client.Interface, kclient kclientset.Interface, count int) *LatestDeploymentsDescriber {
 	return &LatestDeploymentsDescriber{
 		count:      count,
 		osClient:   client,
@@ -364,14 +387,14 @@ func (d *LatestDeploymentsDescriber) Describe(namespace, name string) (string, e
 
 	var deployments []kapi.ReplicationController
 	if d.count == -1 || d.count > 1 {
-		list, err := d.kubeClient.ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: deployutil.ConfigSelector(name)})
+		list, err := d.kubeClient.Core().ReplicationControllers(namespace).List(kapi.ListOptions{LabelSelector: deployutil.ConfigSelector(name)})
 		if err != nil && !kerrors.IsNotFound(err) {
 			return "", err
 		}
 		deployments = list.Items
 	} else {
 		deploymentName := deployutil.LatestDeploymentNameForConfig(config)
-		deployment, err := d.kubeClient.ReplicationControllers(config.Namespace).Get(deploymentName)
+		deployment, err := d.kubeClient.Core().ReplicationControllers(config.Namespace).Get(deploymentName)
 		if err != nil && !kerrors.IsNotFound(err) {
 			return "", err
 		}

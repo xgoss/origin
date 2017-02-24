@@ -32,19 +32,23 @@ import (
 	_ "github.com/docker/distribution/registry/storage/driver/gcs"
 	_ "github.com/docker/distribution/registry/storage/driver/inmemory"
 	_ "github.com/docker/distribution/registry/storage/driver/middleware/cloudfront"
+	_ "github.com/docker/distribution/registry/storage/driver/oss"
 	_ "github.com/docker/distribution/registry/storage/driver/s3-aws"
 	_ "github.com/docker/distribution/registry/storage/driver/swift"
 
 	"github.com/openshift/origin/pkg/cmd/server/crypto"
 	"github.com/openshift/origin/pkg/dockerregistry/server"
+	"github.com/openshift/origin/pkg/dockerregistry/server/audit"
 )
 
 // Execute runs the Docker registry.
 func Execute(configFile io.Reader) {
 	config, err := configuration.Parse(configFile)
 	if err != nil {
-		log.Fatalf("Error parsing configuration file: %s", err)
+		log.Fatalf("error parsing configuration file: %s", err)
 	}
+	setDefaultMiddleware(config)
+	setDefaultLogParameters(config)
 
 	ctx := context.Background()
 	ctx, err = configureLogging(ctx, config)
@@ -73,7 +77,6 @@ func Execute(configFile io.Reader) {
 
 	// TODO add https scheme
 	adminRouter := app.NewRoute().PathPrefix("/admin/").Subrouter()
-
 	pruneAccessRecords := func(*http.Request) []auth.Access {
 		return []auth.Access{
 			{
@@ -95,6 +98,16 @@ func Execute(configFile io.Reader) {
 		// custom access records
 		pruneAccessRecords,
 	)
+
+	// Registry extensions endpoint provides extra functionality to handle the image
+	// signatures.
+	server.RegisterSignatureHandler(app)
+
+	// Advertise features supported by OpenShift
+	if app.Config.HTTP.Headers == nil {
+		app.Config.HTTP.Headers = http.Header{}
+	}
+	app.Config.HTTP.Headers.Set("X-Registry-Supports-Signatures", "1")
 
 	app.RegisterHealthChecks()
 	handler := alive("/", app)
@@ -241,4 +254,36 @@ func panicHandler(handler http.Handler) http.Handler {
 		}()
 		handler.ServeHTTP(w, r)
 	})
+}
+
+func setDefaultMiddleware(config *configuration.Configuration) {
+	// Default to openshift middleware for relevant types
+	// This allows custom configs based on old default configs to continue to work
+	if config.Middleware == nil {
+		config.Middleware = map[string][]configuration.Middleware{}
+	}
+	for _, middlewareType := range []string{"registry", "repository", "storage"} {
+		found := false
+		for _, middleware := range config.Middleware[middlewareType] {
+			if middleware.Name == "openshift" {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		config.Middleware[middlewareType] = append(config.Middleware[middlewareType], configuration.Middleware{
+			Name: "openshift",
+		})
+		log.Errorf("obsolete configuration detected, please add openshift %s middleware into registry config file", middlewareType)
+	}
+	return
+}
+
+func setDefaultLogParameters(config *configuration.Configuration) {
+	if len(config.Log.Fields) == 0 {
+		config.Log.Fields = make(map[string]interface{})
+	}
+	config.Log.Fields[audit.LogEntryType] = audit.DefaultLoggerType
 }

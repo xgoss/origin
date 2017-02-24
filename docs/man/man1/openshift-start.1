@@ -16,28 +16,22 @@ openshift start \- Launch all\-in\-one server
 Start an all\-in\-one server
 
 .PP
-This command helps you launch an all\-in\-one server, which allows you to run all of the
-components of an enterprise Kubernetes system on a server with Docker. Running:
+This command helps you launch an all\-in\-one server, which allows you to run all of the components of an enterprise Kubernetes system on a server with Docker. Running:
 
 .PP
 openshift start
 
 .PP
-will start listening on all interfaces, launch an etcd server to store persistent
-data, and launch the Kubernetes system components. The server will run in the foreground until
-you terminate the process.  This command delegates to "openshift start master" and
-"openshift start node".
+will start listening on all interfaces, launch an etcd server to store persistent data, and launch the Kubernetes system components. The server will run in the foreground until you terminate the process.  This command delegates to "openshift start master" and "openshift start node".
 
 .PP
-Note: starting OpenShift without passing the \-\-master address will attempt to find the IP
-address that will be visible inside running Docker containers. This is not always successful,
-so if you have problems tell OpenShift what public address it will be via \-\-master=<ip>.
+Note: starting OpenShift without passing the \-\-master address will attempt to find the IP address that will be visible inside running Docker containers. This is not always successful, so if you have problems tell OpenShift what public address it will be via \-\-master= <ip>.
 
 .PP
-You may also pass \-\-etcd=<address> to connect to an external etcd server.
+You may also pass \-\-etcd= <address>to connect to an external etcd server.
 
 .PP
-You may also pass \-\-kubeconfig=<path> to connect to an external Kubernetes cluster.
+You may also pass \-\-kubeconfig= <path>to connect to an external Kubernetes cluster.
 
 
 .SH OPTIONS
@@ -67,6 +61,10 @@ You may also pass \-\-kubeconfig=<path> to connect to an external Kubernetes clu
     The etcd data directory.
 
 .PP
+\fB\-\-expire\-days\fP=730
+    Validity of the certificates in days (defaults to 2 years). WARNING: extending this above default value is highly discouraged.
+
+.PP
 \fB\-\-hostname\fP="<hostname>"
     The hostname to identify this node with the master.
 
@@ -94,7 +92,7 @@ You may also pass \-\-kubeconfig=<path> to connect to an external Kubernetes clu
 
 .PP
 \fB\-\-network\-plugin\fP=""
-    The network plugin to be called for configuring networking for pods. Optional for OpenShift network plugin, node will auto detect network plugin configured by OpenShift master.
+    The network plugin to be called for configuring networking for pods.
 
 .PP
 \fB\-\-node\-config\fP=""
@@ -118,6 +116,10 @@ You may also pass \-\-kubeconfig=<path> to connect to an external Kubernetes clu
     The master address for use by public clients, if different (host, host:port, or URL). Defaults to same as \-\-master.
 
 .PP
+\fB\-\-signer\-expire\-days\fP=1825
+    Validity of the CA certificate in days (defaults to 5 years). WARNING: extending this above default value is highly discouraged.
+
+.PP
 \fB\-\-volume\-dir\fP="openshift.local.volumes"
     The volume storage directory.
 
@@ -127,6 +129,10 @@ You may also pass \-\-kubeconfig=<path> to connect to an external Kubernetes clu
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
+
 .PP
 \fB\-\-google\-json\-key\fP=""
     The Google Cloud Platform Service Account JSON Key to use for authentication.

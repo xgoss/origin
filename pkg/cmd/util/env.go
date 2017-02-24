@@ -39,12 +39,15 @@ func GetEnv(key string) (string, bool) {
 	return val, true
 }
 
-type Environment map[string]string
-
-var argumentEnvironment = regexp.MustCompile("(?ms)^([\\w\\-_]+)\\=(.*)$")
+var argumentEnvironment = regexp.MustCompile("(?ms)^(.+)\\=(.*)$")
+var validArgumentEnvironment = regexp.MustCompile("(?ms)^(\\w+)\\=(.*)$")
 
 func IsEnvironmentArgument(s string) bool {
 	return argumentEnvironment.MatchString(s)
+}
+
+func IsValidEnvironmentArgument(s string) bool {
+	return validArgumentEnvironment.MatchString(s)
 }
 
 func SplitEnvironmentFromResources(args []string) (resources, envArgs []string, ok bool) {
@@ -67,25 +70,6 @@ func SplitEnvironmentFromResources(args []string) (resources, envArgs []string, 
 	return resources, envArgs, true
 }
 
-func ParseEnvironmentArguments(s []string) (Environment, []string, []error) {
-	errs := []error{}
-	duplicates := []string{}
-	env := make(Environment)
-	for _, s := range s {
-		switch matches := argumentEnvironment.FindStringSubmatch(s); len(matches) {
-		case 3:
-			k, v := matches[1], matches[2]
-			if exist, ok := env[k]; ok {
-				duplicates = append(duplicates, fmt.Sprintf("%s=%s", k, exist))
-			}
-			env[k] = v
-		default:
-			errs = append(errs, fmt.Errorf("environment variables must be of the form key=value: %s", s))
-		}
-	}
-	return env, duplicates, errs
-}
-
 // ParseEnv parses the list of environment variables into kubernetes EnvVar
 func ParseEnv(spec []string, defaultReader io.Reader) ([]kapi.EnvVar, []string, error) {
 	env := []kapi.EnvVar{}
@@ -93,6 +77,8 @@ func ParseEnv(spec []string, defaultReader io.Reader) ([]kapi.EnvVar, []string, 
 	var remove []string
 	for _, envSpec := range spec {
 		switch {
+		case !IsValidEnvironmentArgument(envSpec) && !strings.HasSuffix(envSpec, "-"):
+			return nil, nil, fmt.Errorf("environment variables must be of the form key=value and can only contain letters, numbers, and underscores")
 		case envSpec == "-":
 			if defaultReader == nil {
 				return nil, nil, fmt.Errorf("when '-' is used, STDIN must be open")

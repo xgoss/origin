@@ -11,10 +11,12 @@ import (
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	"k8s.io/kubernetes/pkg/client/retry"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 	"k8s.io/kubernetes/pkg/runtime"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
 
 	"github.com/openshift/origin/pkg/api/latest"
@@ -32,14 +34,14 @@ type REST struct {
 	templateName      string
 
 	openshiftClient *client.Client
-	kubeClient      *kclient.Client
+	kubeClient      *kclientset.Clientset
 
 	// policyBindings is an auth cache that is shared with the authorizer for the API server.
 	// we use this cache to detect when the authorizer has observed the change for the auth rules
 	policyBindings client.PolicyBindingsListerNamespacer
 }
 
-func NewREST(message, templateNamespace, templateName string, openshiftClient *client.Client, kubeClient *kclient.Client, policyBindingCache client.PolicyBindingsListerNamespacer) *REST {
+func NewREST(message, templateNamespace, templateName string, openshiftClient *client.Client, kubeClient *kclientset.Clientset, policyBindingCache client.PolicyBindingsListerNamespacer) *REST {
 	return &REST{
 		message:           message,
 		templateNamespace: templateNamespace,
@@ -131,9 +133,19 @@ func (r *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 	}
 
 	// we split out project creation separately so that in a case of racers for the same project, only one will win and create the rest of their template objects
-	if _, err := r.openshiftClient.Projects().Create(projectFromTemplate); err != nil {
+	createdProject, err := r.openshiftClient.Projects().Create(projectFromTemplate)
+	if err != nil {
+		// log errors other than AlreadyExists and Forbidden
+		if !kapierror.IsAlreadyExists(err) && !kapierror.IsForbidden(err) {
+			utilruntime.HandleError(fmt.Errorf("error creating requested project %#v: %v", projectFromTemplate, err))
+		}
 		return nil, err
 	}
+
+	// Stop on the first error, since we have to delete the whole project if any item in the template fails
+	stopOnErr := configcmd.AfterFunc(func(_ *resource.Info, err error) bool {
+		return err != nil
+	})
 
 	bulk := configcmd.Bulk{
 		Mapper: &resource.Mapper{
@@ -143,12 +155,18 @@ func (r *REST) Create(ctx kapi.Context, obj runtime.Object) (runtime.Object, err
 				if latest.OriginKind(mapping.GroupVersionKind) {
 					return r.openshiftClient, nil
 				}
-				return r.kubeClient, nil
+				return r.kubeClient.CoreClient.RESTClient(), nil
 			}),
 		},
-		Op: configcmd.Create,
+		After: stopOnErr,
+		Op:    configcmd.Create,
 	}
 	if err := utilerrors.NewAggregate(bulk.Run(objectsToCreate, projectName)); err != nil {
+		utilruntime.HandleError(fmt.Errorf("error creating items in requested project %q: %v", createdProject.Name, err))
+		// We have to clean up the project if any part of the project request template fails
+		if deleteErr := r.openshiftClient.Projects().Delete(createdProject.Name); deleteErr != nil {
+			utilruntime.HandleError(fmt.Errorf("error cleaning up requested project %q: %v", createdProject.Name, deleteErr))
+		}
 		return nil, kapierror.NewInternalError(err)
 	}
 
@@ -164,7 +182,7 @@ func (r *REST) waitForRoleBinding(namespace, name string) {
 	// we have a rolebinding, the we check the cache we have to see if its been updated with this rolebinding
 	// if you share a cache with our authorizer (you should), then this will let you know when the authorizer is ready.
 	// doesn't matter if this failed.  When the call returns, return.  If we have access great.  If not, oh well.
-	backoff := kclient.DefaultBackoff
+	backoff := retry.DefaultBackoff
 	backoff.Steps = 6 // this effectively waits for 6-ish seconds
 	err := wait.ExponentialBackoff(backoff, func() (bool, error) {
 		policyBindingList, _ := r.policyBindings.PolicyBindings(namespace).List(kapi.ListOptions{})

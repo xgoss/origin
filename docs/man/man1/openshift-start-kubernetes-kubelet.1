@@ -30,12 +30,36 @@ starting from a configuration file.
     If true, allow containers to request privileged mode. [default=false]
 
 .PP
+\fB\-\-anonymous\-auth\fP=true
+    Enables anonymous requests to the Kubelet server. Requests that are not rejected by another authentication method are treated as anonymous requests. Anonymous requests have a username of system:anonymous, and a group name of system:unauthenticated.
+
+.PP
 \fB\-\-api\-servers\fP=[]
     List of Kubernetes API servers for publishing events, and reading pods and services. (ip:port), comma separated.
 
 .PP
-\fB\-\-auth\-path\fP="/var/lib/kubelet/kubernetes\_auth"
+\fB\-\-auth\-path\fP=""
     Path to .kubernetes\_auth file, specifying how to authenticate to API server.
+
+.PP
+\fB\-\-authentication\-token\-webhook\fP=false
+    Use the TokenReview API to determine authentication for bearer tokens.
+
+.PP
+\fB\-\-authentication\-token\-webhook\-cache\-ttl\fP=0
+    The duration to cache responses from the webhook token authenticator.
+
+.PP
+\fB\-\-authorization\-mode\fP="AlwaysAllow"
+    Authorization mode for Kubelet server. Valid options are AlwaysAllow or Webhook. Webhook mode uses the SubjectAccessReview API to determine authorization.
+
+.PP
+\fB\-\-authorization\-webhook\-cache\-authorized\-ttl\fP=0
+    The duration to cache 'authorized' responses from the webhook authorizer.
+
+.PP
+\fB\-\-authorization\-webhook\-cache\-unauthorized\-ttl\fP=0
+    The duration to cache 'unauthorized' responses from the webhook authorizer.
 
 .PP
 \fB\-\-babysit\-daemons\fP=false
@@ -50,12 +74,20 @@ starting from a configuration file.
     The directory where the TLS certs are located (by default /var/run/kubernetes). If \-\-tls\-cert\-file and \-\-tls\-private\-key\-file are provided, this flag will be ignored.
 
 .PP
+\fB\-\-cgroup\-driver\fP="cgroupfs"
+    Driver that the kubelet uses to manipulate cgroups on the host.  Possible values: 'cgroupfs', 'systemd'
+
+.PP
 \fB\-\-cgroup\-root\fP=""
     Optional root cgroup to use for pods. This is handled by the container runtime on a best effort basis. Default: '', which means use the container runtime default.
 
 .PP
 \fB\-\-chaos\-chance\fP=0
     If > 0.0, introduce random client errors and latency. Intended for testing. [default=0.0]
+
+.PP
+\fB\-\-client\-ca\-file\fP=""
+    If set, any request presenting a client certificate signed by one of the authorities in the client\-ca\-file is authenticated with an identity corresponding to the CommonName of the client certificate.
 
 .PP
 \fB\-\-cloud\-config\fP=""
@@ -74,16 +106,24 @@ starting from a configuration file.
     Domain for this cluster.  If set, kubelet will configure all containers to search this domain in addition to the host's search domains
 
 .PP
-\fB\-\-config\fP=""
-    Path to the config file or directory of files
+\fB\-\-cni\-bin\-dir\fP=""
+    <Warning: Alpha feature> The full path of the directory in which to search for CNI plugin binaries. Default: /opt/cni/bin
 
 .PP
-\fB\-\-configure\-cbr0\fP=false
-    If true, kubelet will configure cbr0 based on Node.Spec.PodCIDR.
+\fB\-\-cni\-conf\-dir\fP=""
+    <Warning: Alpha feature> The full path of the directory in which to search for CNI config files. Default: /etc/cni/net.d
+
+.PP
+\fB\-\-config\fP=""
+    Path to to the directory containing pod manifest files to run, or the path to a single pod manifest file.
 
 .PP
 \fB\-\-container\-runtime\fP="docker"
     The container runtime to use. Possible values: 'docker', 'rkt'. Default: 'docker'.
+
+.PP
+\fB\-\-container\-runtime\-endpoint\fP=""
+    [Experimental] The unix socket endpoint of remote runtime service. The endpoint is used only when CRI integration is enabled (\-\-experimental\-cri)
 
 .PP
 \fB\-\-containerized\fP=false
@@ -94,8 +134,8 @@ starting from a configuration file.
     Enable CPU CFS quota enforcement for containers that specify CPU limits
 
 .PP
-\fB\-\-docker\-endpoint\fP=""
-    If non\-empty, use this for the docker endpoint to communicate with
+\fB\-\-docker\-endpoint\fP="unix:///var/run/docker.sock"
+    Use this for the docker endpoint to communicate with
 
 .PP
 \fB\-\-docker\-exec\-handler\fP="native"
@@ -126,12 +166,16 @@ starting from a configuration file.
     If > 0, limit event creations per second to this value. If 0, unlimited.
 
 .PP
-\fB\-\-eviction\-hard\fP=""
+\fB\-\-eviction\-hard\fP="memory.available<100Mi"
     A set of eviction thresholds (e.g. memory.available<1Gi) that if met would trigger a pod eviction.
 
 .PP
 \fB\-\-eviction\-max\-pod\-grace\-period\fP=0
     Maximum allowed grace period (in seconds) to use when terminating pods in response to a soft eviction threshold being met.  If negative, defer to pod specified value.
+
+.PP
+\fB\-\-eviction\-minimum\-reclaim\fP=""
+    A set of minimum reclaims (e.g. imagefs.available=2Gi) that describes the minimum amount of resource the kubelet will reclaim when performing a pod eviction if that resource is under pressure.
 
 .PP
 \fB\-\-eviction\-pressure\-transition\-period\fP=0
@@ -150,12 +194,51 @@ starting from a configuration file.
     Whether kubelet should exit upon lock\-file contention.
 
 .PP
-\fB\-\-experimental\-flannel\-overlay\fP=false
-    Experimental support for starting the kubelet with the default overlay network (flannel). Assumes flanneld is already running in client mode. [default=false]
+\fB\-\-experimental\-allowed\-unsafe\-sysctls\fP=[]
+    Comma\-separated whitelist of unsafe sysctls or unsafe sysctl patterns (ending in *). Use these at your own risk.
+
+.PP
+\fB\-\-experimental\-bootstrap\-kubeconfig\fP=""
+    <Warning: Experimental feature> Path to a kubeconfig file that will be used to get client certificate for kubelet. If the file specified by \-\-kubeconfig does not exist, the bootstrap kubeconfig is used to request a client certificate from the API server. On success, a kubeconfig file referencing the generated key and obtained certificate is written to the path specified by \-\-kubeconfig. The certificate and key file will be stored in the directory pointed by \-\-cert\-dir.
+
+.PP
+\fB\-\-experimental\-cgroups\-per\-qos\fP=false
+    Enable creation of QoS cgroup hierarchy, if true top level QoS and pod cgroups are created.
+
+.PP
+\fB\-\-experimental\-check\-node\-capabilities\-before\-mount\fP=false
+    [Experimental] if set true, the kubelet will check the underlying node for required componenets (binaries, etc.) before performing the mount
+
+.PP
+\fB\-\-experimental\-cri\fP=false
+    [Experimental] Enable the Container Runtime Interface (CRI) integration. If \-\-container\-runtime is set to "remote", Kubelet will communicate with the runtime/image CRI server listening on the endpoint specified by \-\-remote\-runtime\-endpoint/\-\-remote\-image\-endpoint. If \-\-container\-runtime is set to "docker", Kubelet will launch a in\-process CRI server on behalf of docker, and communicate over a default endpoint.
+
+.PP
+\fB\-\-experimental\-fail\-swap\-on\fP=false
+    Makes the Kubelet fail to start if swap is enabled on the node. This is a temporary opton to maintain legacy behavior, failing due to swap enabled will happen by default in v1.6.
+
+.PP
+\fB\-\-experimental\-kernel\-memcg\-notification\fP=false
+    If enabled, the kubelet will integrate with the kernel memcg notification to determine if memory eviction thresholds are crossed rather than polling.
+
+.PP
+\fB\-\-experimental\-mounter\-path\fP=""
+    [Experimental] Path of mounter binary. Leave empty to use the default mount.
 
 .PP
 \fB\-\-experimental\-nvidia\-gpus\fP=0
     Number of NVIDIA GPU devices on this node. Only 0 (default) and 1 are currently supported.
+
+.PP
+\fB\-\-feature\-gates\fP=""
+    A set of key=value pairs that describe feature gates for alpha/experimental features. Options are:
+AllAlpha=true|false (ALPHA \- default=false)
+AllowExtTrafficLocalEndpoints=true|false (BETA \- default=true)
+AppArmor=true|false (BETA \- default=true)
+DynamicKubeletConfig=true|false (ALPHA \- default=false)
+DynamicVolumeProvisioning=true|false (ALPHA \- default=true)
+ExperimentalHostUserNamespaceDefaulting=true|false (ALPHA \- default=false)
+StreamingProxyRedirects=true|false (ALPHA \- default=false)
 
 .PP
 \fB\-\-file\-check\-frequency\fP=0
@@ -174,15 +257,15 @@ starting from a configuration file.
     The port of the localhost healthz endpoint
 
 .PP
-\fB\-\-host\-ipc\-sources\fP="\fI"
+\fB\-\-host\-ipc\-sources\fP=[\fI]
     Comma\-separated list of sources from which the Kubelet allows pods to use the host ipc namespace. [default="\fP"]
 
 .PP
-\fB\-\-host\-network\-sources\fP="\fI"
+\fB\-\-host\-network\-sources\fP=[\fI]
     Comma\-separated list of sources from which the Kubelet allows pods to use of host network. [default="\fP"]
 
 .PP
-\fB\-\-host\-pid\-sources\fP="\fI"
+\fB\-\-host\-pid\-sources\fP=[\fI]
     Comma\-separated list of sources from which the Kubelet allows pods to use the host pid namespace. [default="\fP"]
 
 .PP
@@ -194,12 +277,28 @@ starting from a configuration file.
     Duration between checking http for new data
 
 .PP
-\fB\-\-image\-gc\-high\-threshold\fP=90
-    The percent of disk usage after which image garbage collection is always run. Default: 90%
+\fB\-\-image\-gc\-high\-threshold\fP=85
+    The percent of disk usage after which image garbage collection is always run. Default: 85%
 
 .PP
 \fB\-\-image\-gc\-low\-threshold\fP=80
     The percent of disk usage before which image garbage collection is never run. Lowest disk usage to garbage collect to. Default: 80%
+
+.PP
+\fB\-\-image\-service\-endpoint\fP=""
+    [Experimental] The unix socket endpoint of remote image service. If not specified, it will be the same with container\-runtime\-endpoint by default. The endpoint is used only when CRI integration is enabled (\-\-experimental\-cri)
+
+.PP
+\fB\-\-iptables\-drop\-bit\fP=15
+    The bit of the fwmark space to mark packets for dropping. Must be within the range [0, 31].
+
+.PP
+\fB\-\-iptables\-masquerade\-bit\fP=14
+    The bit of the fwmark space to mark packets for SNAT. Must be within the range [0, 31]. Please match this parameter with corresponding parameter in kube\-proxy.
+
+.PP
+\fB\-\-keep\-terminated\-pod\-volumes\fP=false
+    Keep terminated pod volumes mounted to the node after the pod terminates.  Can be useful for debugging volume related issues.
 
 .PP
 \fB\-\-kube\-api\-burst\fP=10
@@ -216,11 +315,11 @@ starting from a configuration file.
 .PP
 \fB\-\-kube\-reserved\fP=
     A set of ResourceName=ResourceQuantity (e.g. cpu=200m,memory=150G) pairs that describe resources reserved for kubernetes system components. Currently only cpu and memory are supported. See 
-\[la]http://releases.k8s.io/HEAD/docs/user-guide/compute-resources.md\[ra] for more detail. [default=none]
+\[la]http://kubernetes.io/docs/user-guide/compute-resources\[ra] for more detail. [default=none]
 
 .PP
 \fB\-\-kubeconfig\fP="/var/lib/kubelet/kubeconfig"
-    Path to a kubeconfig file, specifying how to authenticate to API server (the master location is set by the api\-servers flag).
+    Path to a kubeconfig file, specifying how to connect to the API server. \-\-api\-servers will be used for the location unless \-\-require\-kubeconfig is set.
 
 .PP
 \fB\-\-kubelet\-cgroups\fP=""
@@ -233,6 +332,10 @@ starting from a configuration file.
 .PP
 \fB\-\-low\-diskspace\-threshold\-mb\fP=256
     The absolute free disk space, in MB, to maintain. When disk space falls below this threshold, new pods would be rejected. Default: 256
+
+.PP
+\fB\-\-make\-iptables\-util\-chains\fP=true
+    If true, kubelet will ensure iptables utility rules are present on host.
 
 .PP
 \fB\-\-manifest\-url\fP=""
@@ -255,12 +358,12 @@ starting from a configuration file.
     Number of Pods that can run on this Kubelet.
 
 .PP
-\fB\-\-maximum\-dead\-containers\fP=240
-    Maximum number of old instances of containers to retain globally.  Each container takes up some disk space.  Default: 100.
+\fB\-\-maximum\-dead\-containers\fP=\-1
+    Maximum number of old instances of containers to retain globally.  Each container takes up some disk space. To disable, set to a negative number.  Default: \-1.
 
 .PP
-\fB\-\-maximum\-dead\-containers\-per\-container\fP=2
-    Maximum number of old instances to retain per container.  Each container takes up some disk space.  Default: 2.
+\fB\-\-maximum\-dead\-containers\-per\-container\fP=1
+    Maximum number of old instances to retain per container.  Each container takes up some disk space.  Default: 1.
 
 .PP
 \fB\-\-minimum\-container\-ttl\-duration\fP=0
@@ -268,15 +371,19 @@ starting from a configuration file.
 
 .PP
 \fB\-\-minimum\-image\-ttl\-duration\fP=0
-    Minimum age for a unused image before it is garbage collected.  Examples: '300ms', '10s' or '2h45m'. Default: '2m'
+    Minimum age for an unused image before it is garbage collected.  Examples: '300ms', '10s' or '2h45m'. Default: '2m'
 
 .PP
 \fB\-\-network\-plugin\fP=""
     <Warning: Alpha feature> The name of the network plugin to be invoked for various events in kubelet/pod lifecycle
 
 .PP
-\fB\-\-network\-plugin\-dir\fP="/usr/libexec/kubernetes/kubelet\-plugins/net/exec/"
-    <Warning: Alpha feature> The full path of the directory in which to search for network plugins
+\fB\-\-network\-plugin\-dir\fP=""
+    <Warning: Alpha feature> The full path of the directory in which to search for network plugins or CNI config
+
+.PP
+\fB\-\-network\-plugin\-mtu\fP=0
+    <Warning: Alpha feature> The MTU to be passed to the network plugin, to override the default. Set to 0 to use the default 1460 MTU.
 
 .PP
 \fB\-\-node\-ip\fP=""
@@ -311,12 +418,20 @@ starting from a configuration file.
     The image whose network/ipc namespaces containers in each pod will use.
 
 .PP
+\fB\-\-pod\-manifest\-path\fP=""
+    Path to to the directory containing pod manifest files to run, or the path to a single pod manifest file.
+
+.PP
 \fB\-\-pods\-per\-core\fP=0
     Number of Pods per core that can run on this Kubelet. The total number of Pods on this Kubelet cannot exceed max\-pods, so max\-pods will be used if this calculation results in a larger number of Pods allowed on the Kubelet. A value of 0 disables this limit.
 
 .PP
 \fB\-\-port\fP=10250
     The port for the Kubelet to serve on.
+
+.PP
+\fB\-\-protect\-kernel\-defaults\fP=false
+    Default kubelet behaviour for kernel tuning. If set, kubelet errors if any of kernel tunables is different than kubelet defaults.
 
 .PP
 \fB\-\-read\-only\-port\fP=10255
@@ -328,7 +443,7 @@ starting from a configuration file.
 
 .PP
 \fB\-\-reconcile\-cidr\fP=true
-    Reconcile node CIDR with the CIDR specified by the API server. No\-op if register\-node or configure\-cbr0 is false. [default=true]
+    Reconcile node CIDR with the CIDR specified by the API server. This flag has no function anymore.
 
 .PP
 \fB\-\-register\-node\fP=true
@@ -336,7 +451,7 @@ starting from a configuration file.
 
 .PP
 \fB\-\-register\-schedulable\fP=true
-    Register the node as schedulable. No\-op if register\-node is false. [default=true]
+    Register the node as schedulable. Won't have any effect if register\-node is false. [default=true]
 
 .PP
 \fB\-\-registry\-burst\fP=10
@@ -345,6 +460,10 @@ starting from a configuration file.
 .PP
 \fB\-\-registry\-qps\fP=5
     If > 0, limit registry pull QPS to this value.  If 0, unlimited. [default=5.0]
+
+.PP
+\fB\-\-require\-kubeconfig\fP=false
+    If true the Kubelet will exit if there are configuration errors, and will ignore the value of \-\-api\-servers in favor of the server defined in the kubeconfig file.
 
 .PP
 \fB\-\-resolv\-conf\fP="/etc/resolv.conf"
@@ -409,7 +528,7 @@ starting from a configuration file.
 .PP
 \fB\-\-system\-reserved\fP=
     A set of ResourceName=ResourceQuantity (e.g. cpu=200m,memory=150G) pairs that describe resources reserved for non\-kubernetes components. Currently only cpu and memory are supported. See 
-\[la]http://releases.k8s.io/HEAD/docs/user-guide/compute-resources.md\[ra] for more detail. [default=none]
+\[la]http://kubernetes.io/docs/user-guide/compute-resources\[ra] for more detail. [default=none]
 
 .PP
 \fB\-\-tls\-cert\-file\fP=""
@@ -429,6 +548,10 @@ starting from a configuration file.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
+
 .PP
 \fB\-\-google\-json\-key\fP=""
     The Google Cloud Platform Service Account JSON Key to use for authentication.

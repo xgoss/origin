@@ -34,6 +34,7 @@ func rollingConfig(interval, updatePeriod, timeout int) api.DeploymentConfig {
 					TimeoutSeconds:      mkint64p(timeout),
 					MaxSurge:            intstr.FromInt(1),
 				},
+				ActiveDeadlineSeconds: mkint64p(3600),
 			},
 			Template: test.OkPodTemplate(),
 			Selector: test.OkSelector(),
@@ -55,6 +56,7 @@ func rollingConfigMax(maxSurge, maxUnavailable intstr.IntOrString) api.Deploymen
 					MaxSurge:            maxSurge,
 					MaxUnavailable:      maxUnavailable,
 				},
+				ActiveDeadlineSeconds: mkint64p(3600),
 			},
 			Template: test.OkPodTemplate(),
 			Selector: test.OkSelector(),
@@ -254,7 +256,8 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 					Triggers: manualTrigger(),
 					Selector: test.OkSelector(),
 					Strategy: api.DeploymentStrategy{
-						CustomParams: test.OkCustomParams(),
+						CustomParams:          test.OkCustomParams(),
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 				},
@@ -271,6 +274,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 					Selector: test.OkSelector(),
 					Strategy: api.DeploymentStrategy{
 						Type: api.DeploymentStrategyTypeCustom,
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 				},
@@ -292,6 +296,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								{Name: "A=B"},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 				},
@@ -314,6 +319,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -334,6 +340,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								FailurePolicy: api.LifecycleHookFailurePolicyRetry,
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -357,6 +364,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -380,6 +388,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -405,6 +414,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -425,6 +435,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								FailurePolicy: api.LifecycleHookFailurePolicyRetry,
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -445,6 +456,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								FailurePolicy: api.LifecycleHookFailurePolicyRetry,
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -471,6 +483,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -497,6 +510,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -523,6 +537,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -545,6 +560,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								TagImages:     []api.TagImageHook{{}},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -587,6 +603,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 								},
 							},
 						},
+						ActiveDeadlineSeconds: mkint64p(3600),
 					},
 					Template: test.OkPodTemplate(),
 					Selector: test.OkSelector(),
@@ -638,6 +655,7 @@ func TestValidateDeploymentConfigMissingFields(t *testing.T) {
 	}
 
 	for testName, v := range errorCases {
+		t.Logf("running scenario %q", testName)
 		errs := ValidateDeploymentConfig(&v.DeploymentConfig)
 		if len(v.ErrorType) == 0 {
 			if len(errs) > 0 {
@@ -890,4 +908,56 @@ func mkint64p(i int) *int64 {
 
 func mkintp(i int) *int {
 	return &i
+}
+
+func TestValidateSelectorMatchesPodTemplateLabels(t *testing.T) {
+	tests := map[string]struct {
+		spec        api.DeploymentConfigSpec
+		expectedErr bool
+		errorType   field.ErrorType
+		field       string
+	}{
+		"valid template labels": {
+			spec: api.DeploymentConfigSpec{
+				Selector: test.OkSelector(),
+				Strategy: test.OkStrategy(),
+				Template: test.OkPodTemplate(),
+			},
+		},
+		"invalid template labels": {
+			spec: api.DeploymentConfigSpec{
+				Selector: test.OkSelector(),
+				Strategy: test.OkStrategy(),
+				Template: test.OkPodTemplate(),
+			},
+			expectedErr: true,
+			errorType:   field.ErrorTypeInvalid,
+			field:       "spec.template.metadata.labels",
+		},
+	}
+
+	for name, test := range tests {
+		if test.expectedErr {
+			test.spec.Template.Labels["a"] = "c"
+		}
+		errs := ValidateDeploymentConfigSpec(test.spec)
+		if len(errs) == 0 && test.expectedErr {
+			t.Errorf("%s: expected failure", name)
+			continue
+		}
+		if !test.expectedErr {
+			continue
+		}
+		if len(errs) != 1 {
+			t.Errorf("%s: expected one error, got %d", name, len(errs))
+			continue
+		}
+		err := errs[0]
+		if err.Type != test.errorType {
+			t.Errorf("%s: expected error to have type %q, got %q", name, test.errorType, err.Type)
+		}
+		if err.Field != test.field {
+			t.Errorf("%s: expected error to have field %q, got %q", name, test.field, err.Field)
+		}
+	}
 }

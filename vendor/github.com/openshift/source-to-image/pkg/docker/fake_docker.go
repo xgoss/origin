@@ -3,9 +3,12 @@ package docker
 import (
 	"errors"
 	"io"
-	"path/filepath"
+	"io/ioutil"
 
-	dockerclient "github.com/fsouza/go-dockerclient"
+	dockertypes "github.com/docker/engine-api/types"
+	"github.com/openshift/source-to-image/pkg/api"
+	"github.com/openshift/source-to-image/pkg/tar"
+	"github.com/openshift/source-to-image/pkg/util"
 )
 
 // FakeDocker provides a fake docker interface
@@ -63,9 +66,9 @@ func (f *FakeDocker) IsImageOnBuild(imageName string) bool {
 	return f.IsOnBuildResult
 }
 
-// Ping tells id the Docker deamon is reachable
-func (f *FakeDocker) Ping() error {
-	return nil
+// Version returns information of the docker client and server host
+func (f *FakeDocker) Version() (dockertypes.Version, error) {
+	return dockertypes.Version{}, nil
 }
 
 // GetImageWorkdir returns the workdir
@@ -102,8 +105,20 @@ func (f *FakeDocker) RunContainer(opts RunContainerOptions) error {
 	if f.RunContainerErrorBeforeStart {
 		return f.RunContainerError
 	}
+	if opts.Stdout != nil {
+		opts.Stdout.Close()
+	}
+	if opts.Stderr != nil {
+		opts.Stderr.Close()
+	}
 	if opts.OnStart != nil {
 		if err := opts.OnStart(""); err != nil {
+			return err
+		}
+	}
+	if opts.Stdin != nil {
+		_, err := io.Copy(ioutil.Discard, opts.Stdin)
+		if err != nil {
 			return err
 		}
 	}
@@ -113,12 +128,13 @@ func (f *FakeDocker) RunContainer(opts RunContainerOptions) error {
 	return f.RunContainerError
 }
 
-func (f *FakeDocker) UploadToContainer(srcPath, destPath, container string) error {
+// UploadToContainer uploads artifacts to the container.
+func (f *FakeDocker) UploadToContainer(fs util.FileSystem, srcPath, destPath, container string) error {
 	return nil
 }
 
-// UploadToContainerWithCallback uploads artifacts to the container.
-func (f *FakeDocker) UploadToContainerWithCallback(srcPath, destPath, container string, walkFn filepath.WalkFunc, modifyInplace bool) error {
+// UploadToContainerWithTarWriter uploads artifacts to the container.
+func (f *FakeDocker) UploadToContainerWithTarWriter(fs util.FileSystem, srcPath, destPath, container string, makeTarWriter func(io.Writer) tar.Writer) error {
 	return errors.New("not implemented")
 }
 
@@ -157,22 +173,22 @@ func (f *FakeDocker) RemoveImage(name string) error {
 }
 
 // CheckImage checks image in local registry
-func (f *FakeDocker) CheckImage(name string) (*dockerclient.Image, error) {
+func (f *FakeDocker) CheckImage(name string) (*api.Image, error) {
 	return nil, nil
 }
 
 // PullImage pulls a fake docker image
-func (f *FakeDocker) PullImage(imageName string) (*dockerclient.Image, error) {
+func (f *FakeDocker) PullImage(imageName string) (*api.Image, error) {
 	if f.PullResult {
-		return &dockerclient.Image{}, nil
+		return &api.Image{}, nil
 	}
 	return nil, f.PullError
 }
 
 // CheckAndPullImage pulls a fake docker image
-func (f *FakeDocker) CheckAndPullImage(name string) (*dockerclient.Image, error) {
+func (f *FakeDocker) CheckAndPullImage(name string) (*api.Image, error) {
 	if f.PullResult {
-		return &dockerclient.Image{}, nil
+		return &api.Image{}, nil
 	}
 	return nil, f.PullError
 }
@@ -180,9 +196,16 @@ func (f *FakeDocker) CheckAndPullImage(name string) (*dockerclient.Image, error)
 // BuildImage builds image
 func (f *FakeDocker) BuildImage(opts BuildImageOptions) error {
 	f.BuildImageOpts = opts
+	if opts.Stdin != nil {
+		_, err := io.Copy(ioutil.Discard, opts.Stdin)
+		if err != nil {
+			return err
+		}
+	}
 	return f.BuildImageError
 }
 
+// GetLabels returns the labels of the image
 func (f *FakeDocker) GetLabels(name string) (map[string]string, error) {
 	return f.Labels, f.LabelsError
 }

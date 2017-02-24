@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -125,11 +125,10 @@ func (kvh *kubeletVolumeHost) GetHostIP() (net.IP, error) {
 	return kvh.kubelet.GetHostIP()
 }
 
-func (kvh *kubeletVolumeHost) GetRootContext() string {
-	rootContext, err := kvh.kubelet.getRootDirContext()
+func (kvh *kubeletVolumeHost) GetNodeAllocatable() (api.ResourceList, error) {
+	node, err := kvh.kubelet.getNodeAnyWay()
 	if err != nil {
-		return ""
+		return nil, fmt.Errorf("error retrieving node: %v", err)
 	}
-
-	return rootContext
+	return node.Status.Allocatable, nil
 }

@@ -38,26 +38,31 @@ func TestAdmission(t *testing.T) {
 		{
 			name:            "not a jenkins build",
 			attributes:      admission.NewAttributesRecord(&buildapi.Build{Spec: buildapi.BuildSpec{CommonSpec: buildapi.CommonSpec{Strategy: buildapi.BuildStrategy{}}}}, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled:  boolptr(true),
 			validateClients: noAction,
 		},
 		{
 			name:            "not a build kind",
 			attributes:      admission.NewAttributesRecord(&kapi.Service{}, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled:  boolptr(true),
 			validateClients: noAction,
 		},
 		{
 			name:            "not a build resource",
 			attributes:      admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("notbuilds"), "", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled:  boolptr(true),
 			validateClients: noAction,
 		},
 		{
 			name:            "subresource",
 			attributes:      admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "subresource", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled:  boolptr(true),
 			validateClients: noAction,
 		},
 		{
-			name:       "service present",
-			attributes: admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
+			name:           "service present",
+			attributes:     admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled: boolptr(true),
 			objects: []runtime.Object{
 				&kapi.Service{ObjectMeta: kapi.ObjectMeta{Namespace: "namespace", Name: "jenkins"}},
 			},
@@ -83,9 +88,23 @@ func TestAdmission(t *testing.T) {
 			},
 		},
 		{
-			name:       "service missing",
+			name:       "enabled default",
 			attributes: admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
-			objects:    []runtime.Object{},
+			objects: []runtime.Object{
+				&kapi.Service{ObjectMeta: kapi.ObjectMeta{Namespace: "namespace", Name: "jenkins"}},
+			},
+			validateClients: func(kubeClient *fake.Clientset, originClient *testclient.Fake) string {
+				if len(kubeClient.Actions()) == 1 && kubeClient.Actions()[0].Matches("get", "services") {
+					return ""
+				}
+				return fmt.Sprintf("missing get service in: %v", kubeClient.Actions())
+			},
+		},
+		{
+			name:           "service missing",
+			attributes:     admission.NewAttributesRecord(enableBuild, nil, unversioned.GroupVersionKind{}, "namespace", "name", buildapi.SchemeGroupVersion.WithResource("builds"), "", admission.Create, &user.DefaultInfo{}),
+			jenkinsEnabled: boolptr(true),
+			objects:        []runtime.Object{},
 			validateClients: func(kubeClient *fake.Clientset, originClient *testclient.Fake) string {
 				if len(kubeClient.Actions()) == 0 {
 					return fmt.Sprintf("missing get service in: %v", kubeClient.Actions())
@@ -101,7 +120,7 @@ func TestAdmission(t *testing.T) {
 				}
 				return ""
 			},
-			expectedErr: "Jenkins pipeline template / not found",
+			expectedErr: "Jenkins pipeline template namespace/ not found",
 		},
 	}
 
@@ -109,11 +128,12 @@ func TestAdmission(t *testing.T) {
 		kubeClient := fake.NewSimpleClientset(tc.objects...)
 		originClient := testclient.NewSimpleFake(tc.objects...)
 
-		admission := NewJenkingsBootstrapper(kubeClient.Core()).(*jenkingsBootstrapper)
+		admission := NewJenkinsBootstrapper(kubeClient.Core()).(*jenkinsBootstrapper)
 		admission.openshiftClient = originClient
 		admission.jenkinsConfig = configapi.JenkinsPipelineConfig{
-			Enabled:     tc.jenkinsEnabled,
-			ServiceName: "jenkins",
+			AutoProvisionEnabled: tc.jenkinsEnabled,
+			ServiceName:          "jenkins",
+			TemplateNamespace:    "namespace",
 		}
 
 		err := admission.Admit(tc.attributes)

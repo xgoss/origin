@@ -10,7 +10,9 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	"k8s.io/kubernetes/pkg/client/testing/core"
+	"k8s.io/kubernetes/pkg/controller/informers"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/watch"
@@ -21,9 +23,11 @@ import (
 )
 
 var (
-	keys           = []string{"different", "used", "important", "every", "large"}
-	values         = []string{"time", "person"}
-	namespaceNames = []string{
+	keys             = []string{"different", "used", "important", "every", "large"}
+	values           = []string{"time", "person"}
+	annotationKeys   = []string{"different", "used", "important", "every", "large", "foo.bar.baz/key", "whitespace key"}
+	annotationValues = []string{"Person", "time and place", "Thing", "me@example.com", "system:admin"}
+	namespaceNames   = []string{
 		"tokillamockingbird", "harrypotter", "1984", "prideandprejudice", "thediaryofayounggirl", "animalfarm", "thehobbit",
 		"thelittleprince", "thegreatgatsby", "thecatcherintherye", "lordoftherings", "janeeyre", "romeoandjuliet", "thechroniclesofnarnia",
 		"lordoftheflies", "thegivingtree", "charlottesweb", "greeneggsandham", "alicesadventuresinwonderland", "littlewomen",
@@ -48,20 +52,22 @@ func runFuzzer(t *testing.T) {
 	defer close(stopCh)
 
 	startingNamespaces := CreateStartingNamespaces()
-	kubeclient := ktestclient.NewSimpleFake(startingNamespaces...)
+	kubeclient := fake.NewSimpleClientset(startingNamespaces...)
 	nsWatch := watch.NewFake()
-	kubeclient.PrependWatchReactor("namespaces", ktestclient.DefaultWatchReactor(nsWatch, nil))
+	kubeclient.PrependWatchReactor("namespaces", core.DefaultWatchReactor(nsWatch, nil))
 
 	startingQuotas := CreateStartingQuotas()
 	originclient := testclient.NewSimpleFake(startingQuotas...)
 	quotaWatch := watch.NewFake()
-	originclient.AddWatchReactor("clusterresourcequotas", ktestclient.DefaultWatchReactor(quotaWatch, nil))
+	originclient.PrependWatchReactor("clusterresourcequotas", core.DefaultWatchReactor(quotaWatch, nil))
 
-	informerFactory := shared.NewInformerFactory(kubeclient, originclient, shared.DefaultListerWatcherOverrides{}, 10*time.Minute)
-	controller := NewClusterQuotaMappingController(informerFactory.Namespaces(), informerFactory.ClusterResourceQuotas())
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeclient, 10*time.Minute)
+	informerFactory := shared.NewInformerFactory(kubeInformerFactory, kubeclient, originclient, shared.DefaultListerWatcherOverrides{}, 10*time.Minute)
+	controller := NewClusterQuotaMappingController(kubeInformerFactory.Namespaces(), informerFactory.ClusterResourceQuotas())
 	go controller.Run(5, stopCh)
 	informerFactory.Start(stopCh)
 	informerFactory.StartCore(stopCh)
+	kubeInformerFactory.Start(stopCh)
 
 	finalNamespaces := map[string]*kapi.Namespace{}
 	finalQuotas := map[string]*quotaapi.ClusterResourceQuota{}
@@ -279,6 +285,14 @@ func NewQuota(name string) *quotaapi.ClusterResourceQuota {
 		ret.Spec.Selector.LabelSelector.MatchLabels[key] = value
 	}
 
+	ret.Spec.Selector.AnnotationSelector = map[string]string{}
+	for i := 0; i < numSelectorKeys; i++ {
+		key := annotationKeys[rand.Intn(len(annotationKeys))]
+		value := annotationValues[rand.Intn(len(annotationValues))]
+
+		ret.Spec.Selector.AnnotationSelector[key] = value
+	}
+
 	return ret
 }
 
@@ -297,6 +311,14 @@ func NewNamespace(name string) *kapi.Namespace {
 		value := values[rand.Intn(len(values))]
 
 		ret.Labels[key] = value
+	}
+
+	ret.Annotations = map[string]string{}
+	for i := 0; i < numLabels; i++ {
+		key := annotationKeys[rand.Intn(len(annotationKeys))]
+		value := annotationValues[rand.Intn(len(annotationValues))]
+
+		ret.Annotations[key] = value
 	}
 
 	return ret

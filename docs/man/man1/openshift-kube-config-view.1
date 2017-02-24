@@ -3,7 +3,7 @@
 
 .SH NAME
 .PP
-openshift kube config view \- Displays merged kubeconfig settings or a specified kubeconfig file.
+openshift kube config view \- Display merged kubeconfig settings or a specified kubeconfig file
 
 
 .SH SYNOPSIS
@@ -13,7 +13,7 @@ openshift kube config view \- Displays merged kubeconfig settings or a specified
 
 .SH DESCRIPTION
 .PP
-Displays merged kubeconfig settings or a specified kubeconfig file.
+Display merged kubeconfig settings or a specified kubeconfig file.
 
 .PP
 You can use \-\-output jsonpath={...} to extract specific values using a jsonpath expression.
@@ -21,12 +21,16 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .SH OPTIONS
 .PP
+\fB\-\-allow\-missing\-template\-keys\fP=true
+    If true, ignore any errors in templates when a field or map key is missing in the template. Only applies to golang and jsonpath output formats.
+
+.PP
 \fB\-\-flatten\fP=false
-    flatten the resulting kubeconfig file into self contained output (useful for creating portable kubeconfig files)
+    flatten the resulting kubeconfig file into self\-contained output (useful for creating portable kubeconfig files)
 
 .PP
 \fB\-\-merge\fP=true
-    merge together the full hierarchy of kubeconfig files
+    merge the full hierarchy of kubeconfig files
 
 .PP
 \fB\-\-minify\fP=false
@@ -34,13 +38,14 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-no\-headers\fP=false
-    When using the default output, don't print headers.
+    When using the default or custom\-column output format, don't print headers.
 
 .PP
 \fB\-o\fP, \fB\-\-output\fP=""
-    Output format. One of: json|yaml|wide|name|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See golang template [
+    Output format. One of: json|yaml|wide|name|custom\-columns=...|custom\-columns\-file=...|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See custom columns [
+\[la]http://kubernetes.io/docs/user-guide/kubectl-overview/#custom-columns\[ra]], golang template [
 \[la]http://golang.org/pkg/text/template/#pkg-overview\[ra]] and jsonpath template [
-\[la]http://releases.k8s.io/release-1.3/docs/user-guide/jsonpath.md\[ra]].
+\[la]http://kubernetes.io/docs/user-guide/jsonpath\[ra]].
 
 .PP
 \fB\-\-output\-version\fP=""
@@ -70,6 +75,10 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
+\fB\-\-allow\-verification\-with\-non\-compliant\-keys\fP=false
+    Allow a SignatureVerifier to use keys which are technically non\-compliant with RFC6962.
+
+.PP
 \fB\-\-alsologtostderr\fP=false
     log to standard error as well as files
 
@@ -83,7 +92,11 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-boot\-id\-file\fP="/proc/sys/kernel/random/boot\_id"
@@ -91,15 +104,15 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-certificate\-authority\fP=""
-    Path to a cert. file for the certificate authority.
+    Path to a cert. file for the certificate authority
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -163,7 +176,7 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-ir\-data\-source\fP="influxdb"
@@ -171,7 +184,7 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-ir\-dbname\fP="k8s"
-    InfluxDB database name which contains metrics requred by InitialResources
+    InfluxDB database name which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-hawkular\fP=""
@@ -179,7 +192,7 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-ir\-influxdb\-host\fP="localhost:8080/api/v1/proxy/namespaces/kube\-system/services/monitoring\-influxdb:api"
-    Address of InfluxDB which contains metrics requred by InitialResources
+    Address of InfluxDB which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-namespace\-only\fP=false
@@ -231,7 +244,11 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -271,7 +288,7 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""
@@ -291,11 +308,11 @@ You can use \-\-output jsonpath={...} to extract specific values using a jsonpat
 .RS
 
 .nf
-# Show Merged kubeconfig settings.
-kubectl config view
-
-# Get the password for the e2e user
-kubectl config view \-o jsonpath='{.users[?(@.name == "e2e")].user.password}'
+  # Show Merged kubeconfig settings.
+  kubectl config view
+  
+  # Get the password for the e2e user
+  kubectl config view \-o jsonpath='{.users[?(@.name == "e2e")].user.password}'
 
 .fi
 .RE

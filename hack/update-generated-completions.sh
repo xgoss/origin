@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# This script sets up a go workspace locally and builds all go components.
+# This script sets up a go workspace locally and generates shell auto-completion scripts.
+
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
 # ensure we have the latest compiled binaries
@@ -8,7 +9,7 @@ source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
 platform="$(os::build::host_platform)"
 if [[ "${platform}" != "linux/amd64" ]]; then
-  echo "WARNING: Generating completions on ${platform} may not be identical to running on linux/amd64 due to conditional compilation."
+  os::log::warn "Generating completions on ${platform} may not be identical to running on linux/amd64 due to conditional compilation."
 fi
 
 OUTPUT_REL_DIR=${1:-""}

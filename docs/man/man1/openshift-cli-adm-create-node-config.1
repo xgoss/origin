@@ -34,12 +34,20 @@ Create a configuration bundle for a node
     The client key file for the node to contact the API.
 
 .PP
+\fB\-\-dns\-bind\-address\fP=""
+    An address to bind DNS to.
+
+.PP
 \fB\-\-dns\-domain\fP="cluster.local"
     DNS domain for the cluster.
 
 .PP
 \fB\-\-dns\-ip\fP=""
     DNS server IP for the cluster.
+
+.PP
+\fB\-\-expire\-days\fP=730
+    Validity of the certificates in days (defaults to 2 years). WARNING: extending this above default value is highly discouraged.
 
 .PP
 \fB\-\-hostnames\fP=[]
@@ -65,7 +73,7 @@ Create a configuration bundle for a node
 
 .PP
 \fB\-\-network\-plugin\fP=""
-    Name of the network plugin to hook to for pod networking. Optional for OpenShift network plugin, node will auto detect network plugin configured by OpenShift master.
+    Name of the network plugin to hook to for pod networking.
 
 .PP
 \fB\-\-node\fP=""
@@ -111,7 +119,11 @@ Create a configuration bundle for a node
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-cluster\fP=""
@@ -131,7 +143,7 @@ Create a configuration bundle for a node
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-log\-flush\-frequency\fP=0
@@ -143,7 +155,11 @@ Create a configuration bundle for a node
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -151,7 +167,7 @@ Create a configuration bundle for a node
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""

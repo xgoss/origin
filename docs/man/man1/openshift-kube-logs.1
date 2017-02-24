@@ -3,7 +3,7 @@
 
 .SH NAME
 .PP
-openshift kube logs \- Print the logs for a container in a pod.
+openshift kube logs \- Print the logs for a container in a pod
 
 
 .SH SYNOPSIS
@@ -60,6 +60,10 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
+\fB\-\-allow\-verification\-with\-non\-compliant\-keys\fP=false
+    Allow a SignatureVerifier to use keys which are technically non\-compliant with RFC6962.
+
+.PP
 \fB\-\-alsologtostderr\fP=false
     log to standard error as well as files
 
@@ -73,7 +77,11 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-boot\-id\-file\fP="/proc/sys/kernel/random/boot\_id"
@@ -81,15 +89,15 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-certificate\-authority\fP=""
-    Path to a cert. file for the certificate authority.
+    Path to a cert. file for the certificate authority
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -153,7 +161,7 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-ir\-data\-source\fP="influxdb"
@@ -161,7 +169,7 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-ir\-dbname\fP="k8s"
-    InfluxDB database name which contains metrics requred by InitialResources
+    InfluxDB database name which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-hawkular\fP=""
@@ -169,7 +177,7 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-ir\-influxdb\-host\fP="localhost:8080/api/v1/proxy/namespaces/kube\-system/services/monitoring\-influxdb:api"
-    Address of InfluxDB which contains metrics requred by InitialResources
+    Address of InfluxDB which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-namespace\-only\fP=false
@@ -221,7 +229,11 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -261,7 +273,7 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""
@@ -281,20 +293,20 @@ Print the logs for a container in a pod. If the pod has only one container, the 
 .RS
 
 .nf
-# Return snapshot logs from pod nginx with only one container
-kubectl logs nginx
-
-# Return snapshot of previous terminated ruby container logs from pod web\-1
-kubectl logs \-p \-c ruby web\-1
-
-# Begin streaming the logs of the ruby container in pod web\-1
-kubectl logs \-f \-c ruby web\-1
-
-# Display only the most recent 20 lines of output in pod nginx
-kubectl logs \-\-tail=20 nginx
-
-# Show all logs from pod nginx written in the last hour
-kubectl logs \-\-since=1h nginx
+  # Return snapshot logs from pod nginx with only one container
+  kubectl logs nginx
+  
+  # Return snapshot of previous terminated ruby container logs from pod web\-1
+  kubectl logs \-p \-c ruby web\-1
+  
+  # Begin streaming the logs of the ruby container in pod web\-1
+  kubectl logs \-f \-c ruby web\-1
+  
+  # Display only the most recent 20 lines of output in pod nginx
+  kubectl logs \-\-tail=20 nginx
+  
+  # Show all logs from pod nginx written in the last hour
+  kubectl logs \-\-since=1h nginx
 
 .fi
 .RE

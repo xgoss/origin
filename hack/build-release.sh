@@ -7,6 +7,9 @@
 STARTTIME=$(date +%s)
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
+export OS_BUILD_ENV_FROM_ARCHIVE=y
+export OS_BUILD_ENV_PRESERVE=_output/local
+
 context="${OS_ROOT}/_output/buildenv-context"
 
 # Clean existing output.
@@ -25,8 +28,6 @@ trap "os::build::environment::cleanup ${container}" EXIT
   echo "++ Building release ${OS_GIT_VERSION}"
 )
 os::build::environment::withsource "${container}" "${OS_GIT_COMMIT:-HEAD}"
-# Get the command output
-docker cp "${container}:/go/src/github.com/openshift/origin/_output/local/releases" "${OS_OUTPUT}"
 echo "${OS_GIT_COMMIT}" > "${OS_LOCAL_RELEASEPATH}/.commit"
 
 ret=$?; ENDTIME=$(date +%s); echo "$0 took $(($ENDTIME - $STARTTIME)) seconds"; exit "$ret"

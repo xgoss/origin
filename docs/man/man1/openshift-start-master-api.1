@@ -22,8 +22,7 @@ This command starts the master API.  Running
 openshift start master api
 
 .PP
-will start the server listening for incoming API requests. The server
-will run in the foreground until you terminate the process.
+will start the server listening for incoming API requests. The server will run in the foreground until you terminate the process.
 
 
 .SH OPTIONS
@@ -43,6 +42,10 @@ will run in the foreground until you terminate the process.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
+
 .PP
 \fB\-\-google\-json\-key\fP=""
     The Google Cloud Platform Service Account JSON Key to use for authentication.

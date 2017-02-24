@@ -1,12 +1,12 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
 
-	docker "github.com/fsouza/go-dockerclient"
 	utilglog "github.com/openshift/source-to-image/pkg/util/glog"
 
 	"github.com/openshift/source-to-image/pkg/util/user"
@@ -22,7 +22,7 @@ const (
 
 // invalidFilenameCharacters contains a list of character we consider malicious
 // when injecting the directories into containers.
-const invalidFilenameCharacters = `\:;*?"<>|%#$!+{}&[],"'` + "`"
+const invalidFilenameCharacters = `;*?"<>|%#$!+{}&[],"'` + "`"
 
 const (
 	// PullAlways means that we always attempt to pull the latest image.
@@ -74,7 +74,7 @@ type Config struct {
 
 	// RuntimeAuthentication holds the authentication information for pulling the
 	// runtime Docker images from private repositories.
-	RuntimeAuthentication docker.AuthConfiguration
+	RuntimeAuthentication AuthConfig
 
 	// RuntimeArtifacts specifies a list of source/destination pairs that will
 	// be copied from builder to a runtime image. Source can be a file or
@@ -94,11 +94,11 @@ type Config struct {
 
 	// PullAuthentication holds the authentication information for pulling the
 	// Docker images from private repositories
-	PullAuthentication docker.AuthConfiguration
+	PullAuthentication AuthConfig
 
 	// IncrementalAuthentication holds the authentication information for pulling the
 	// previous image from private repositories
-	IncrementalAuthentication docker.AuthConfiguration
+	IncrementalAuthentication AuthConfig
 
 	// DockerNetworkMode is used to set the docker network setting to --net=container:<id>
 	// when the builder is invoked from a container.
@@ -233,6 +233,15 @@ type Config struct {
 	// BuildVolumes specifies a list of volumes to mount to container running the
 	// build.
 	BuildVolumes VolumeList
+
+	// Labels specify labels and their values to be applied to the resulting image. Label keys
+	// must have non-zero length. The labels defined here override generated labels in case
+	// they have the same name.
+	Labels map[string]string
+
+	// SourceInfo provides the info about the source to be built rather than relying
+	// on the Downloader to retrieve it.
+	SourceInfo *SourceInfo
 }
 
 // EnvironmentSpec specifies a single environment variable.
@@ -281,6 +290,36 @@ type DockerConfig struct {
 
 	// CAFile is the certificate authority file path for a TLS connection
 	CAFile string
+
+	// UseTLS indicates if TLS must be used
+	UseTLS bool
+
+	// TLSVerify indicates if TLS peer must be verified
+	TLSVerify bool
+}
+
+// AuthConfig is our abstraction of the Registry authorization information for whatever
+// docker client we happen to be based on
+type AuthConfig struct {
+	Username      string
+	Password      string
+	Email         string
+	ServerAddress string
+}
+
+// ContainerConfig is the abstraction of the docker client provider (formerly go-dockerclient, now either
+// engine-api or kube docker client) container.Config type that is leveraged by s2i or origin
+type ContainerConfig struct {
+	Labels map[string]string
+	Env    []string
+}
+
+// Image is the abstraction of the docker client provider (formerly go-dockerclient, now either
+// engine-api or kube docker client) Image type that is leveraged by s2i or origin
+type Image struct {
+	ID string
+	*ContainerConfig
+	Config *ContainerConfig
 }
 
 // Result structure contains information from build process.
@@ -297,6 +336,31 @@ type Result struct {
 
 	// ImageID describes resulting image ID.
 	ImageID string
+
+	// BuildInfo holds information about the result of a build.
+	BuildInfo BuildInfo
+}
+
+// BuildInfo holds information about a particular step in the build process.
+type BuildInfo struct {
+	// FailureReason is a camel case reason that is used by the machine to reply
+	// back to the OpenShift builder with information why any of the steps in the
+	// build, failed.
+	FailureReason FailureReason
+}
+
+// StepFailureReason holds the type of failure that occurred during the build
+// process.
+type StepFailureReason string
+
+// StepFailureMessage holds the detailed message of a failure.
+type StepFailureMessage string
+
+// FailureReason holds the type of failure that occurred during the build
+// process.
+type FailureReason struct {
+	Reason  StepFailureReason
+	Message StepFailureMessage
 }
 
 // InstallResult structure describes the result of install operation
@@ -438,20 +502,18 @@ func IsInvalidFilename(name string) bool {
 // working directory in container.
 func (l *VolumeList) Set(value string) error {
 	if len(value) == 0 {
-		return fmt.Errorf("invalid format, must be source:destination")
+		return errors.New("invalid format, must be source:destination")
 	}
-	mount := strings.Split(value, ":")
-	switch len(mount) {
-	case 1:
-		mount = append(mount, "")
-		fallthrough
-	case 2:
-		mount[0] = strings.Trim(mount[0], `"'`)
-		mount[1] = strings.Trim(mount[1], `"'`)
-	default:
-		return fmt.Errorf("invalid source:path definition")
+	var mount []string
+	pos := strings.LastIndex(value, ":")
+	if pos == -1 {
+		mount = []string{value, ""}
+	} else {
+		mount = []string{value[:pos], value[pos+1:]}
 	}
-	s := VolumeSpec{Source: filepath.Clean(mount[0]), Destination: filepath.Clean(mount[1])}
+	mount[0] = strings.Trim(mount[0], `"'`)
+	mount[1] = strings.Trim(mount[1], `"'`)
+	s := VolumeSpec{Source: filepath.Clean(mount[0]), Destination: filepath.ToSlash(filepath.Clean(mount[1]))}
 	if IsInvalidFilename(s.Source) || IsInvalidFilename(s.Destination) {
 		return fmt.Errorf("invalid characters in filename: %q", value)
 	}

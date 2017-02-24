@@ -16,9 +16,7 @@ openshift admin create\-api\-client\-config \- Create a config file for connecti
 Create a client configuration for connecting to the server
 
 .PP
-This command creates a folder containing a client certificate, a client key,
-a server certificate authority, and a .kubeconfig file for connecting to the
-master as the provided user.
+This command creates a folder containing a client certificate, a client key, a server certificate authority, and a .kubeconfig file for connecting to the master as the provided user.
 
 
 .SH OPTIONS
@@ -33,6 +31,10 @@ master as the provided user.
 .PP
 \fB\-\-client\-dir\fP=""
     The client data directory.
+
+.PP
+\fB\-\-expire\-days\fP=730
+    Validity of the certificates in days (defaults to 2 years). WARNING: extending this above default value is highly discouraged.
 
 .PP
 \fB\-\-groups\fP=[]
@@ -71,15 +73,19 @@ master as the provided user.
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -99,7 +105,7 @@ master as the provided user.
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-log\-flush\-frequency\fP=0
@@ -111,7 +117,11 @@ master as the provided user.
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -119,7 +129,7 @@ master as the provided user.
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 
 .SH SEE ALSO

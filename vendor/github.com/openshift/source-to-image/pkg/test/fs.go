@@ -5,24 +5,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
-
-// FakeFile represents a fake file and implements the os.FileInfo interface
-type FakeFile struct {
-	FileName string
-	Dir      bool
-	FMode    os.FileMode
-}
-
-func (f *FakeFile) Name() string       { return f.FileName }
-func (f *FakeFile) Size() int64        { return 0 }
-func (f *FakeFile) Mode() os.FileMode  { return f.FMode }
-func (f *FakeFile) ModTime() time.Time { return time.Now() }
-func (f *FakeFile) IsDir() bool        { return f.Dir }
-func (f *FakeFile) Sys() interface{}   { return nil }
 
 // FakeFileSystem provides a fake filesystem structure for testing
 type FakeFileSystem struct {
@@ -90,11 +76,11 @@ func (f *FakeFileSystem) ReadDir(p string) ([]os.FileInfo, error) {
 // Stat provides stats about a single file
 func (f *FakeFileSystem) Stat(p string) (os.FileInfo, error) {
 	for _, f := range f.Files {
-		if strings.HasSuffix(p, "/"+f.Name()) {
+		if strings.HasSuffix(p, string(filepath.Separator)+f.Name()) {
 			return f, nil
 		}
 	}
-	return nil, &os.PathError{Path: p, Err: errors.New("file does not exists")}
+	return nil, &os.PathError{Path: p, Err: errors.New("file does not exist")}
 }
 
 // Chmod manipulates permissions on the fake filesystem
@@ -174,4 +160,10 @@ func (f *FakeFileSystem) WriteFile(file string, data []byte) error {
 	f.WriteFileName = file
 	f.WriteFileContent = string(data)
 	return f.WriteFileError
+}
+
+// Walk walks the file tree rooted at root, calling walkFn for each file or
+// directory in the tree, including root.
+func (f *FakeFileSystem) Walk(root string, walkFn filepath.WalkFunc) error {
+	return filepath.Walk(root, walkFn)
 }

@@ -3,7 +3,7 @@
 
 .SH NAME
 .PP
-openshift kube rolling\-update \- Perform a rolling update of the given ReplicationController.
+openshift kube rolling\-update \- Perform a rolling update of the given ReplicationController
 
 
 .SH SYNOPSIS
@@ -16,12 +16,18 @@ openshift kube rolling\-update \- Perform a rolling update of the given Replicat
 Perform a rolling update of the given ReplicationController.
 
 .PP
-Replaces the specified replication controller with a new replication controller by updating one pod at a time to use the
-new PodTemplate. The new\-controller.json must specify the same namespace as the
-existing replication controller and overwrite at least one (common) label in its replicaSelector.
+Replaces the specified replication controller with a new replication controller by updating one pod at a time to use the new PodTemplate. The new\-controller.json must specify the same namespace as the existing replication controller and overwrite at least one (common) label in its replicaSelector.
+
+.PP
+! 
+\[la]http://kubernetes.io/images/docs/kubectl_rollingupdate.svg\[ra]
 
 
 .SH OPTIONS
+.PP
+\fB\-\-allow\-missing\-template\-keys\fP=true
+    If true, ignore any errors in templates when a field or map key is missing in the template. Only applies to golang and jsonpath output formats.
+
 .PP
 \fB\-\-container\fP=""
     Container name which will have its image upgraded. Only relevant when \-\-image is specified, ignored otherwise. Required when using \-\-image on a multi\-container pod
@@ -52,13 +58,14 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-no\-headers\fP=false
-    When using the default output, don't print headers.
+    When using the default or custom\-column output format, don't print headers.
 
 .PP
 \fB\-o\fP, \fB\-\-output\fP=""
-    Output format. One of: json|yaml|wide|name|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See golang template [
+    Output format. One of: json|yaml|wide|name|custom\-columns=...|custom\-columns\-file=...|go\-template=...|go\-template\-file=...|jsonpath=...|jsonpath\-file=... See custom columns [
+\[la]http://kubernetes.io/docs/user-guide/kubectl-overview/#custom-columns\[ra]], golang template [
 \[la]http://golang.org/pkg/text/template/#pkg-overview\[ra]] and jsonpath template [
-\[la]http://releases.k8s.io/release-1.3/docs/user-guide/jsonpath.md\[ra]].
+\[la]http://kubernetes.io/docs/user-guide/jsonpath\[ra]].
 
 .PP
 \fB\-\-output\-version\fP=""
@@ -108,6 +115,10 @@ existing replication controller and overwrite at least one (common) label in its
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
+\fB\-\-allow\-verification\-with\-non\-compliant\-keys\fP=false
+    Allow a SignatureVerifier to use keys which are technically non\-compliant with RFC6962.
+
+.PP
 \fB\-\-alsologtostderr\fP=false
     log to standard error as well as files
 
@@ -121,7 +132,11 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-as\fP=""
-    Username to impersonate for the operation.
+    Username to impersonate for the operation
+
+.PP
+\fB\-\-azure\-container\-registry\-config\fP=""
+    Path to the file container Azure container registry configuration information.
 
 .PP
 \fB\-\-boot\-id\-file\fP="/proc/sys/kernel/random/boot\_id"
@@ -129,15 +144,15 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-certificate\-authority\fP=""
-    Path to a cert. file for the certificate authority.
+    Path to a cert. file for the certificate authority
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client certificate file for TLS.
+    Path to a client certificate file for TLS
 
 .PP
 \fB\-\-client\-key\fP=""
-    Path to a client key file for TLS.
+    Path to a client key file for TLS
 
 .PP
 \fB\-\-cluster\fP=""
@@ -201,7 +216,7 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-insecure\-skip\-tls\-verify\fP=false
-    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+    If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
 
 .PP
 \fB\-\-ir\-data\-source\fP="influxdb"
@@ -209,7 +224,7 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-ir\-dbname\fP="k8s"
-    InfluxDB database name which contains metrics requred by InitialResources
+    InfluxDB database name which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-hawkular\fP=""
@@ -217,7 +232,7 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-ir\-influxdb\-host\fP="localhost:8080/api/v1/proxy/namespaces/kube\-system/services/monitoring\-influxdb:api"
-    Address of InfluxDB which contains metrics requred by InitialResources
+    Address of InfluxDB which contains metrics required by InitialResources
 
 .PP
 \fB\-\-ir\-namespace\-only\fP=false
@@ -269,7 +284,11 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-n\fP, \fB\-\-namespace\fP=""
-    If present, the namespace scope for this CLI request.
+    If present, the namespace scope for this CLI request
+
+.PP
+\fB\-\-request\-timeout\fP="0"
+    The length of time to wait before giving up on a single server request. Non\-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). A value of zero means don't timeout requests.
 
 .PP
 \fB\-\-server\fP=""
@@ -309,7 +328,7 @@ existing replication controller and overwrite at least one (common) label in its
 
 .PP
 \fB\-\-token\fP=""
-    Bearer token for authentication to the API server.
+    Bearer token for authentication to the API server
 
 .PP
 \fB\-\-user\fP=""
@@ -329,22 +348,21 @@ existing replication controller and overwrite at least one (common) label in its
 .RS
 
 .nf
-# Update pods of frontend\-v1 using new replication controller data in frontend\-v2.json.
-kubectl rolling\-update frontend\-v1 \-f frontend\-v2.json
-
-# Update pods of frontend\-v1 using JSON data passed into stdin.
-cat frontend\-v2.json | kubectl rolling\-update frontend\-v1 \-f \-
-
-# Update the pods of frontend\-v1 to frontend\-v2 by just changing the image, and switching the
-# name of the replication controller.
-kubectl rolling\-update frontend\-v1 frontend\-v2 \-\-image=image:v2
-
-# Update the pods of frontend by just changing the image, and keeping the old name.
-kubectl rolling\-update frontend \-\-image=image:v2
-
-# Abort and reverse an existing rollout in progress (from frontend\-v1 to frontend\-v2).
-kubectl rolling\-update frontend\-v1 frontend\-v2 \-\-rollback
-
+  # Update pods of frontend\-v1 using new replication controller data in frontend\-v2.json.
+  kubectl rolling\-update frontend\-v1 \-f frontend\-v2.json
+  
+  # Update pods of frontend\-v1 using JSON data passed into stdin.
+  cat frontend\-v2.json | kubectl rolling\-update frontend\-v1 \-f \-
+  
+  # Update the pods of frontend\-v1 to frontend\-v2 by just changing the image, and switching the
+  # name of the replication controller.
+  kubectl rolling\-update frontend\-v1 frontend\-v2 \-\-image=image:v2
+  
+  # Update the pods of frontend by just changing the image, and keeping the old name.
+  kubectl rolling\-update frontend \-\-image=image:v2
+  
+  # Abort and reverse an existing rollout in progress (from frontend\-v1 to frontend\-v2).
+  kubectl rolling\-update frontend\-v1 frontend\-v2 \-\-rollback
 
 .fi
 .RE
