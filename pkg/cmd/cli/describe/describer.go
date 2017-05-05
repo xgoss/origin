@@ -12,14 +12,17 @@ import (
 
 	units "github.com/docker/go-units"
 
+	kerrs "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kerrs "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	kctl "k8s.io/kubernetes/pkg/kubectl"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/sets"
+	kprinters "k8s.io/kubernetes/pkg/printers"
+	kinternalprinters "k8s.io/kubernetes/pkg/printers/internalversion"
 
 	oapi "github.com/openshift/origin/pkg/api"
 	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
@@ -36,8 +39,8 @@ import (
 	userapi "github.com/openshift/origin/pkg/user/api"
 )
 
-func describerMap(c *client.Client, kclient kclientset.Interface, host string) map[unversioned.GroupKind]kctl.Describer {
-	m := map[unversioned.GroupKind]kctl.Describer{
+func describerMap(c *client.Client, kclient kclientset.Interface, host string, withCoreGroup bool) map[schema.GroupKind]kprinters.Describer {
+	m := map[schema.GroupKind]kprinters.Describer{
 		buildapi.Kind("Build"):                          &BuildDescriber{c, kclient},
 		buildapi.Kind("BuildConfig"):                    &BuildConfigDescriber{c, kclient, host},
 		deployapi.Kind("DeploymentConfig"):              &DeploymentConfigDescriber{c, kclient, nil},
@@ -69,15 +72,27 @@ func describerMap(c *client.Client, kclient kclientset.Interface, host string) m
 		sdnapi.Kind("EgressNetworkPolicy"):              &EgressNetworkPolicyDescriber{c},
 		authorizationapi.Kind("RoleBindingRestriction"): &RoleBindingRestrictionDescriber{c},
 	}
+
+	// Register the legacy ("core") API group for all kinds as well.
+	if withCoreGroup {
+		for _, t := range kapi.Scheme.KnownTypes(oapi.SchemeGroupVersion) {
+			coreKind := oapi.SchemeGroupVersion.WithKind(t.Name())
+			for g, d := range m {
+				if g.Kind == coreKind.Kind {
+					m[oapi.Kind(g.Kind)] = d
+				}
+			}
+		}
+	}
 	return m
 }
 
 // DescribableResources lists all of the resource types we can describe
 func DescribableResources() []string {
 	// Include describable resources in kubernetes
-	keys := kctl.DescribableResources()
+	keys := kinternalprinters.DescribableResources()
 
-	for k := range describerMap(nil, nil, "") {
+	for k := range describerMap(nil, nil, "", false) {
 		resource := strings.ToLower(k.Kind)
 		keys = append(keys, resource)
 	}
@@ -85,8 +100,8 @@ func DescribableResources() []string {
 }
 
 // DescriberFor returns a describer for a given kind of resource
-func DescriberFor(kind unversioned.GroupKind, c *client.Client, kclient kclientset.Interface, host string) (kctl.Describer, bool) {
-	f, ok := describerMap(c, kclient, host)[kind]
+func DescriberFor(kind schema.GroupKind, c *client.Client, kclient kclientset.Interface, host string) (kprinters.Describer, bool) {
+	f, ok := describerMap(c, kclient, host, true)[kind]
 	if ok {
 		return f, true
 	}
@@ -100,19 +115,19 @@ type BuildDescriber struct {
 }
 
 // Describe returns the description of a build
-func (d *BuildDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *BuildDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.osClient.Builds(namespace)
-	build, err := c.Get(name)
+	build, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
-	events, _ := d.kubeClient.Core().Events(namespace).Search(build)
+	events, _ := d.kubeClient.Core().Events(namespace).Search(kapi.Scheme, build)
 	if events == nil {
 		events = &kapi.EventList{}
 	}
 	// get also pod events and merge it all into one list for describe
-	if pod, err := d.kubeClient.Core().Pods(namespace).Get(buildapi.GetBuildPodName(build)); err == nil {
-		if podEvents, _ := d.kubeClient.Core().Events(namespace).Search(pod); podEvents != nil {
+	if pod, err := d.kubeClient.Core().Pods(namespace).Get(buildapi.GetBuildPodName(build), metav1.GetOptions{}); err == nil {
+		if podEvents, _ := d.kubeClient.Core().Events(namespace).Search(kapi.Scheme, pod); podEvents != nil {
 			events.Items = append(events.Items, podEvents.Items...)
 		}
 	}
@@ -135,6 +150,13 @@ func (d *BuildDescriber) Describe(namespace, name string, settings kctl.Describe
 		// output like "duration: 1.2724395728934s"
 		formatString(out, "Duration", describeBuildDuration(build))
 
+		for _, stage := range build.Status.Stages {
+			duration := stage.StartTime.Time.Add(time.Duration(stage.DurationMilliseconds * int64(time.Millisecond))).Round(time.Second).Sub(stage.StartTime.Time.Round(time.Second))
+			formatString(out, fmt.Sprintf("  %v", stage.Name), fmt.Sprintf("  %v", duration))
+		}
+
+		fmt.Fprintln(out, "")
+
 		if build.Status.Config != nil {
 			formatString(out, "Build Config", build.Status.Config.Name)
 		}
@@ -148,7 +170,7 @@ func (d *BuildDescriber) Describe(namespace, name string, settings kctl.Describe
 		describeBuildTriggerCauses(build.Spec.TriggeredBy, out)
 
 		if settings.ShowEvents {
-			kctl.DescribeEvents(events, out)
+			kinternalprinters.DescribeEvents(events, kinternalprinters.NewPrefixWriter(out))
 		}
 
 		return nil
@@ -156,7 +178,7 @@ func (d *BuildDescriber) Describe(namespace, name string, settings kctl.Describe
 }
 
 func describeBuildDuration(build *buildapi.Build) string {
-	t := unversioned.Now().Rfc3339Copy()
+	t := metav1.Now().Rfc3339Copy()
 	if build.Status.StartTimestamp == nil &&
 		build.Status.CompletionTimestamp != nil &&
 		(build.Status.Phase == buildapi.BuildPhaseCancelled ||
@@ -169,7 +191,7 @@ func describeBuildDuration(build *buildapi.Build) string {
 		return fmt.Sprintf("waiting for %v", t.Sub(build.CreationTimestamp.Rfc3339Copy().Time))
 	} else if build.Status.StartTimestamp != nil && build.Status.CompletionTimestamp == nil {
 		// time a still running build has been running in a pod
-		duration := unversioned.Now().Rfc3339Copy().Time.Sub(build.Status.StartTimestamp.Rfc3339Copy().Time)
+		duration := metav1.Now().Rfc3339Copy().Time.Sub(build.Status.StartTimestamp.Rfc3339Copy().Time)
 		return fmt.Sprintf("running for %v", duration)
 	}
 	duration := build.Status.CompletionTimestamp.Rfc3339Copy().Time.Sub(build.Status.StartTimestamp.Rfc3339Copy().Time)
@@ -393,7 +415,7 @@ func describeBuildTriggers(triggers []buildapi.BuildTriggerPolicy, name, namespa
 
 	for _, t := range triggers {
 		switch t.Type {
-		case buildapi.GitHubWebHookBuildTriggerType, buildapi.GenericWebHookBuildTriggerType:
+		case buildapi.GitHubWebHookBuildTriggerType, buildapi.GenericWebHookBuildTriggerType, buildapi.GitLabWebHookBuildTriggerType, buildapi.BitbucketWebHookBuildTriggerType:
 			continue
 		case buildapi.ConfigChangeBuildTriggerType:
 			labels = append(labels, "Config")
@@ -426,13 +448,13 @@ func describeBuildTriggers(triggers []buildapi.BuildTriggerPolicy, name, namespa
 }
 
 // Describe returns the description of a buildConfig
-func (d *BuildConfigDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *BuildConfigDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.BuildConfigs(namespace)
-	buildConfig, err := c.Get(name)
+	buildConfig, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
-	buildList, err := d.Builds(namespace).List(kapi.ListOptions{})
+	buildList, err := d.Builds(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -469,10 +491,10 @@ func (d *BuildConfigDescriber) Describe(namespace, name string, settings kctl.De
 		}
 
 		if settings.ShowEvents {
-			events, _ := d.kubeClient.Core().Events(namespace).Search(buildConfig)
+			events, _ := d.kubeClient.Core().Events(namespace).Search(kapi.Scheme, buildConfig)
 			if events != nil {
 				fmt.Fprint(out, "\n")
-				kctl.DescribeEvents(events, out)
+				kinternalprinters.DescribeEvents(events, kinternalprinters.NewPrefixWriter(out))
 			}
 		}
 		return nil
@@ -484,9 +506,9 @@ type OAuthAccessTokenDescriber struct {
 	client.Interface
 }
 
-func (d *OAuthAccessTokenDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *OAuthAccessTokenDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.OAuthAccessTokens()
-	oAuthAccessToken, err := c.Get(name)
+	oAuthAccessToken, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -512,14 +534,32 @@ type ImageDescriber struct {
 }
 
 // Describe returns the description of an image
-func (d *ImageDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ImageDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.Images()
-	image, err := c.Get(name)
+	image, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
 	return describeImage(image, "")
+}
+
+func describeImageSignature(s imageapi.ImageSignature, out *tabwriter.Writer) error {
+	formatString(out, "\tName", s.Name)
+	formatString(out, "\tType", s.Type)
+	if s.IssuedBy == nil {
+		// FIXME: Make this constant
+		formatString(out, "\tStatus", "Unverified")
+	} else {
+		formatString(out, "\tStatus", "Verified")
+		formatString(out, "\tIssued By", s.IssuedBy.CommonName)
+		if len(s.Conditions) > 0 {
+			for _, c := range s.Conditions {
+				formatString(out, "\t", fmt.Sprintf("Signature is %s (%s on %s)", string(c.Type), c.Message, fmt.Sprintf("%s", c.LastProbeTime)))
+			}
+		}
+	}
+	return nil
 }
 
 func describeImage(image *imageapi.Image, imageName string) (string, error) {
@@ -551,6 +591,14 @@ func describeImage(image *imageapi.Image, imageName string) (string, error) {
 				formatString(out, "Image Size", fmt.Sprintf("%s (%s)", units.HumanSize(float64(image.DockerImageMetadata.Size)), strings.Join(info, ", ")))
 			} else {
 				formatString(out, "Image Size", units.HumanSize(float64(image.DockerImageMetadata.Size)))
+			}
+		}
+		if len(image.Signatures) > 0 {
+			for _, s := range image.Signatures {
+				formatString(out, "Image Signatures", " ")
+				if err := describeImageSignature(s, out); err != nil {
+					return err
+				}
 			}
 		}
 		//formatString(out, "Parent Image", image.DockerImageMetadata.Parent)
@@ -612,7 +660,7 @@ type ImageStreamTagDescriber struct {
 }
 
 // Describe returns the description of an imageStreamTag
-func (d *ImageStreamTagDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ImageStreamTagDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ImageStreamTags(namespace)
 	repo, tag, err := imageapi.ParseImageStreamTagName(name)
 	if err != nil {
@@ -636,7 +684,7 @@ type ImageStreamImageDescriber struct {
 }
 
 // Describe returns the description of an imageStreamImage
-func (d *ImageStreamImageDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ImageStreamImageDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ImageStreamImages(namespace)
 	repo, id, err := imageapi.ParseImageStreamImageName(name)
 	if err != nil {
@@ -656,9 +704,9 @@ type ImageStreamDescriber struct {
 }
 
 // Describe returns the description of an imageStream
-func (d *ImageStreamDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ImageStreamDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ImageStreams(namespace)
-	imageStream, err := c.Get(name)
+	imageStream, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -683,9 +731,9 @@ type routeEndpointInfo struct {
 }
 
 // Describe returns the description of a route
-func (d *RouteDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *RouteDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.Routes(namespace)
-	route, err := c.Get(name)
+	route, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -697,7 +745,7 @@ func (d *RouteDescriber) Describe(namespace, name string, settings kctl.Describe
 		if backend.Weight != nil {
 			totalWeight += *backend.Weight
 		}
-		ep, endpointsErr := d.kubeClient.Core().Endpoints(namespace).Get(backend.Name)
+		ep, endpointsErr := d.kubeClient.Core().Endpoints(namespace).Get(backend.Name, metav1.GetOptions{})
 		endpoints[backend.Name] = routeEndpointInfo{ep, endpointsErr}
 	}
 
@@ -817,19 +865,19 @@ type ProjectDescriber struct {
 }
 
 // Describe returns the description of a project
-func (d *ProjectDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ProjectDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	projectsClient := d.osClient.Projects()
-	project, err := projectsClient.Get(name)
+	project, err := projectsClient.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 	resourceQuotasClient := d.kubeClient.Core().ResourceQuotas(name)
-	resourceQuotaList, err := resourceQuotasClient.List(kapi.ListOptions{})
+	resourceQuotaList, err := resourceQuotasClient.List(metav1.ListOptions{})
 	if err != nil {
 		return "", err
 	}
 	limitRangesClient := d.kubeClient.Core().LimitRanges(name)
-	limitRangeList, err := limitRangesClient.List(kapi.ListOptions{})
+	limitRangeList, err := limitRangesClient.List(metav1.ListOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -861,7 +909,7 @@ func (d *ProjectDescriber) Describe(namespace, name string, settings kctl.Descri
 				for resource := range resourceQuota.Status.Hard {
 					resources = append(resources, resource)
 				}
-				sort.Sort(kctl.SortableResourceNames(resources))
+				sort.Sort(kinternalprinters.SortableResourceNames(resources))
 
 				msg := "\t%v\t%v\t%v\n"
 				for i := range resources {
@@ -934,7 +982,7 @@ type TemplateDescriber struct {
 	client.Interface
 	meta.MetadataAccessor
 	runtime.ObjectTyper
-	kctl.ObjectDescriber
+	kprinters.ObjectDescriber
 }
 
 // DescribeMessage prints the message that will be parameter substituted and displayed to the
@@ -991,7 +1039,7 @@ func (d *TemplateDescriber) describeObjects(objects []runtime.Object, out *tabwr
 			continue
 		}
 
-		meta := kapi.ObjectMeta{}
+		meta := metav1.ObjectMeta{}
 		meta.Name, _ = d.MetadataAccessor.Name(obj)
 		gvk, _, err := d.ObjectTyper.ObjectKinds(obj)
 		if err != nil {
@@ -1009,9 +1057,9 @@ func (d *TemplateDescriber) describeObjects(objects []runtime.Object, out *tabwr
 }
 
 // Describe returns the description of a template
-func (d *TemplateDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *TemplateDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.Templates(namespace)
-	template, err := c.Get(name)
+	template, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1020,7 +1068,7 @@ func (d *TemplateDescriber) Describe(namespace, name string, settings kctl.Descr
 
 func (d *TemplateDescriber) DescribeTemplate(template *templateapi.Template) (string, error) {
 	// TODO: write error?
-	_ = runtime.DecodeList(template.Objects, kapi.Codecs.UniversalDecoder(), runtime.UnstructuredJSONScheme)
+	_ = runtime.DecodeList(template.Objects, kapi.Codecs.UniversalDecoder(), unstructured.UnstructuredJSONScheme)
 
 	return tabbedString(func(out *tabwriter.Writer) error {
 		formatMeta(out, template.ObjectMeta)
@@ -1044,11 +1092,11 @@ type IdentityDescriber struct {
 }
 
 // Describe returns the description of an identity
-func (d *IdentityDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *IdentityDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	userClient := d.Users()
 	identityClient := d.Identities()
 
-	identity, err := identityClient.Get(name)
+	identity, err := identityClient.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1060,7 +1108,7 @@ func (d *IdentityDescriber) Describe(namespace, name string, settings kctl.Descr
 			formatString(out, "User Name", identity.User.Name)
 			formatString(out, "User UID", identity.User.UID)
 		} else {
-			resolvedUser, err := userClient.Get(identity.User.Name)
+			resolvedUser, err := userClient.Get(identity.User.Name, metav1.GetOptions{})
 
 			nameValue := identity.User.Name
 			uidValue := string(identity.User.UID)
@@ -1092,10 +1140,10 @@ type UserIdentityMappingDescriber struct {
 }
 
 // Describe returns the description of a userIdentity
-func (d *UserIdentityMappingDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *UserIdentityMappingDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.UserIdentityMappings()
 
-	mapping, err := c.Get(name)
+	mapping, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1115,11 +1163,11 @@ type UserDescriber struct {
 }
 
 // Describe returns the description of a user
-func (d *UserDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *UserDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	userClient := d.Users()
 	identityClient := d.Identities()
 
-	user, err := userClient.Get(name)
+	user, err := userClient.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1134,7 +1182,7 @@ func (d *UserDescriber) Describe(namespace, name string, settings kctl.Describer
 			formatString(out, "Identities", "<none>")
 		} else {
 			for i, identity := range user.Identities {
-				resolvedIdentity, err := identityClient.Get(identity)
+				resolvedIdentity, err := identityClient.Get(identity, metav1.GetOptions{})
 
 				value := identity
 				if kerrs.IsNotFound(err) {
@@ -1164,8 +1212,8 @@ type GroupDescriber struct {
 }
 
 // Describe returns the description of a group
-func (d *GroupDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	group, err := d.c.Get(name)
+func (d *GroupDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	group, err := d.c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1197,9 +1245,9 @@ type PolicyDescriber struct {
 
 // Describe returns the description of a policy
 // TODO make something a lot prettier
-func (d *PolicyDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *PolicyDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.Policies(namespace)
-	policy, err := c.Get(name)
+	policy, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1234,7 +1282,8 @@ func DescribePolicyRule(out *tabwriter.Writer, rule authorizationapi.PolicyRule,
 
 		buffer := new(bytes.Buffer)
 
-		printer := NewHumanReadablePrinter(kctl.PrintOptions{NoHeaders: true})
+		// TODO(rebase-1.6): we probably need a non-nil encoder and decoder
+		printer := NewHumanReadablePrinter(nil, nil, kprinters.PrintOptions{NoHeaders: true})
 		if err := printer.PrintObj(rule.AttributeRestrictions, buffer); err == nil {
 			extensionString = strings.TrimSpace(buffer.String())
 		}
@@ -1256,9 +1305,9 @@ type RoleDescriber struct {
 }
 
 // Describe returns the description of a role
-func (d *RoleDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *RoleDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.Roles(namespace)
-	role, err := c.Get(name)
+	role, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1286,9 +1335,9 @@ type PolicyBindingDescriber struct {
 }
 
 // Describe returns the description of a policyBinding
-func (d *PolicyBindingDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *PolicyBindingDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.PolicyBindings(namespace)
-	policyBinding, err := c.Get(name)
+	policyBinding, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1326,9 +1375,9 @@ type RoleBindingDescriber struct {
 }
 
 // Describe returns the description of a roleBinding
-func (d *RoleBindingDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *RoleBindingDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.RoleBindings(namespace)
-	roleBinding, err := c.Get(name)
+	roleBinding, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1336,10 +1385,10 @@ func (d *RoleBindingDescriber) Describe(namespace, name string, settings kctl.De
 	var role *authorizationapi.Role
 	if len(roleBinding.RoleRef.Namespace) == 0 {
 		var clusterRole *authorizationapi.ClusterRole
-		clusterRole, err = d.ClusterRoles().Get(roleBinding.RoleRef.Name)
+		clusterRole, err = d.ClusterRoles().Get(roleBinding.RoleRef.Name, metav1.GetOptions{})
 		role = authorizationapi.ToRole(clusterRole)
 	} else {
-		role, err = d.Roles(roleBinding.RoleRef.Namespace).Get(roleBinding.RoleRef.Name)
+		role, err = d.Roles(roleBinding.RoleRef.Namespace).Get(roleBinding.RoleRef.Name, metav1.GetOptions{})
 	}
 
 	return DescribeRoleBinding(roleBinding, role, err)
@@ -1383,9 +1432,9 @@ type ClusterPolicyDescriber struct {
 
 // Describe returns the description of a policy
 // TODO make something a lot prettier
-func (d *ClusterPolicyDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ClusterPolicyDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ClusterPolicies()
-	policy, err := c.Get(name)
+	policy, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1398,9 +1447,9 @@ type ClusterRoleDescriber struct {
 }
 
 // Describe returns the description of a role
-func (d *ClusterRoleDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ClusterRoleDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ClusterRoles()
-	role, err := c.Get(name)
+	role, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1414,9 +1463,9 @@ type ClusterPolicyBindingDescriber struct {
 }
 
 // Describe returns the description of a policyBinding
-func (d *ClusterPolicyBindingDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ClusterPolicyBindingDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ClusterPolicyBindings()
-	policyBinding, err := c.Get(name)
+	policyBinding, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1430,14 +1479,14 @@ type ClusterRoleBindingDescriber struct {
 }
 
 // Describe returns the description of a roleBinding
-func (d *ClusterRoleBindingDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *ClusterRoleBindingDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.ClusterRoleBindings()
-	roleBinding, err := c.Get(name)
+	roleBinding, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
-	role, err := d.ClusterRoles().Get(roleBinding.RoleRef.Name)
+	role, err := d.ClusterRoles().Get(roleBinding.RoleRef.Name, metav1.GetOptions{})
 	return DescribeRoleBinding(authorizationapi.ToRoleBinding(roleBinding), authorizationapi.ToRole(role), err)
 }
 
@@ -1453,6 +1502,14 @@ func describeBuildTriggerCauses(causes []buildapi.BuildTriggerCause, out *tabwri
 		case cause.GitHubWebHook != nil:
 			squashGitInfo(cause.GitHubWebHook.Revision, out)
 			formatString(out, "Secret", cause.GitHubWebHook.Secret)
+
+		case cause.GitLabWebHook != nil:
+			squashGitInfo(cause.GitLabWebHook.Revision, out)
+			formatString(out, "Secret", cause.GitLabWebHook.Secret)
+
+		case cause.BitbucketWebHook != nil:
+			squashGitInfo(cause.BitbucketWebHook.Revision, out)
+			formatString(out, "Secret", cause.BitbucketWebHook.Secret)
 
 		case cause.GenericWebHook != nil:
 			squashGitInfo(cause.GenericWebHook.Revision, out)
@@ -1496,8 +1553,8 @@ type ClusterQuotaDescriber struct {
 	client.Interface
 }
 
-func (d *ClusterQuotaDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	quota, err := d.ClusterResourceQuotas().Get(name)
+func (d *ClusterQuotaDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	quota, err := d.ClusterResourceQuotas().Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1505,7 +1562,7 @@ func (d *ClusterQuotaDescriber) Describe(namespace, name string, settings kctl.D
 }
 
 func DescribeClusterQuota(quota *quotaapi.ClusterResourceQuota) (string, error) {
-	labelSelector, err := unversioned.LabelSelectorAsSelector(quota.Spec.Selector.LabelSelector)
+	labelSelector, err := metav1.LabelSelectorAsSelector(quota.Spec.Selector.LabelSelector)
 	if err != nil {
 		return "", err
 	}
@@ -1537,7 +1594,7 @@ func DescribeClusterQuota(quota *quotaapi.ClusterResourceQuota) (string, error) 
 		for resource := range quota.Status.Total.Hard {
 			resources = append(resources, resource)
 		}
-		sort.Sort(kctl.SortableResourceNames(resources))
+		sort.Sort(kinternalprinters.SortableResourceNames(resources))
 
 		msg := "%v\t%v\t%v\n"
 		for i := range resources {
@@ -1554,8 +1611,8 @@ type AppliedClusterQuotaDescriber struct {
 	client.Interface
 }
 
-func (d *AppliedClusterQuotaDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	quota, err := d.AppliedClusterResourceQuotas(namespace).Get(name)
+func (d *AppliedClusterQuotaDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	quota, err := d.AppliedClusterResourceQuotas(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1567,8 +1624,8 @@ type ClusterNetworkDescriber struct {
 }
 
 // Describe returns the description of a ClusterNetwork
-func (d *ClusterNetworkDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	cn, err := d.ClusterNetwork().Get(name)
+func (d *ClusterNetworkDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	cn, err := d.ClusterNetwork().Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1587,8 +1644,8 @@ type HostSubnetDescriber struct {
 }
 
 // Describe returns the description of a HostSubnet
-func (d *HostSubnetDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	hs, err := d.HostSubnets().Get(name)
+func (d *HostSubnetDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	hs, err := d.HostSubnets().Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1606,8 +1663,8 @@ type NetNamespaceDescriber struct {
 }
 
 // Describe returns the description of a NetNamespace
-func (d *NetNamespaceDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	netns, err := d.NetNamespaces().Get(name)
+func (d *NetNamespaceDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	netns, err := d.NetNamespaces().Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1624,16 +1681,20 @@ type EgressNetworkPolicyDescriber struct {
 }
 
 // Describe returns the description of an EgressNetworkPolicy
-func (d *EgressNetworkPolicyDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
+func (d *EgressNetworkPolicyDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
 	c := d.osClient.EgressNetworkPolicies(namespace)
-	policy, err := c.Get(name)
+	policy, err := c.Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 	return tabbedString(func(out *tabwriter.Writer) error {
 		formatMeta(out, policy.ObjectMeta)
 		for _, rule := range policy.Spec.Egress {
-			fmt.Fprintf(out, "Rule:\t%s to %s\n", rule.Type, rule.To.CIDRSelector)
+			if len(rule.To.CIDRSelector) > 0 {
+				fmt.Fprintf(out, "Rule:\t%s to %s\n", rule.Type, rule.To.CIDRSelector)
+			} else {
+				fmt.Fprintf(out, "Rule:\t%s to %s\n", rule.Type, rule.To.DNSName)
+			}
 		}
 		return nil
 	})
@@ -1644,8 +1705,8 @@ type RoleBindingRestrictionDescriber struct {
 }
 
 // Describe returns the description of a RoleBindingRestriction.
-func (d *RoleBindingRestrictionDescriber) Describe(namespace, name string, settings kctl.DescriberSettings) (string, error) {
-	rbr, err := d.RoleBindingRestrictions(namespace).Get(name)
+func (d *RoleBindingRestrictionDescriber) Describe(namespace, name string, settings kprinters.DescriberSettings) (string, error) {
+	rbr, err := d.RoleBindingRestrictions(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -1658,7 +1719,7 @@ func (d *RoleBindingRestrictionDescriber) Describe(namespace, name string, setti
 		}
 		formatString(out, "Subject type", subjectType)
 
-		var labelSelectors []unversioned.LabelSelector
+		var labelSelectors []metav1.LabelSelector
 
 		switch {
 		case rbr.Spec.UserRestriction != nil:
@@ -1687,7 +1748,7 @@ func (d *RoleBindingRestrictionDescriber) Describe(namespace, name string, setti
 			} else {
 				fmt.Fprintf(out, "Label selectors:\n")
 				for _, labelSelector := range labelSelectors {
-					selector, err := unversioned.LabelSelectorAsSelector(&labelSelector)
+					selector, err := metav1.LabelSelectorAsSelector(&labelSelector)
 					if err != nil {
 						return err
 					}

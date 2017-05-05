@@ -3,32 +3,30 @@ package controller
 import (
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/flowcontrol"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/cache"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/flowcontrol"
-	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/watch"
 
-	osclient "github.com/openshift/origin/pkg/client"
 	controller "github.com/openshift/origin/pkg/controller"
 )
 
 type NamespaceControllerFactory struct {
-	// Client is an OpenShift client.
-	Client osclient.Interface
 	// KubeClient is a Kubernetes client.
-	KubeClient *kclientset.Clientset
+	KubeClient kclientset.Interface
 }
 
 // Create creates a NamespaceController.
 func (factory *NamespaceControllerFactory) Create() controller.RunnableController {
 	namespaceLW := &cache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			return factory.KubeClient.Core().Namespaces().List(options)
 		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 			return factory.KubeClient.Core().Namespaces().Watch(options)
 		},
 	}
@@ -36,7 +34,6 @@ func (factory *NamespaceControllerFactory) Create() controller.RunnableControlle
 	cache.NewReflector(namespaceLW, &kapi.Namespace{}, queue, 1*time.Minute).Run()
 
 	namespaceController := &NamespaceController{
-		Client:     factory.Client,
 		KubeClient: factory.KubeClient,
 	}
 
@@ -47,9 +44,6 @@ func (factory *NamespaceControllerFactory) Create() controller.RunnableControlle
 			cache.MetaNamespaceKeyFunc,
 			func(obj interface{}, err error, retries controller.Retry) bool {
 				utilruntime.HandleError(err)
-				if _, isFatal := err.(fatalError); isFatal {
-					return false
-				}
 				if retries.Count > 0 {
 					return false
 				}

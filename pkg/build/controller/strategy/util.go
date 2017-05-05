@@ -11,8 +11,8 @@ import (
 	imageapi "github.com/openshift/origin/pkg/image/api"
 	"github.com/openshift/origin/pkg/util/namer"
 	"github.com/openshift/origin/pkg/version"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kvalidation "k8s.io/kubernetes/pkg/util/validation"
 )
 
 const (
@@ -24,8 +24,6 @@ const (
 	SourceImagePullSecretMountPath = "/var/run/secrets/openshift.io/source-image"
 	sourceSecretMountPath          = "/var/run/secrets/openshift.io/source"
 )
-
-var whitelistEnvVarNames = []string{"BUILD_LOGLEVEL", "GIT_SSL_NO_VERIFY"}
 
 // FatalError is an error which can't be retried.
 type FatalError struct {
@@ -201,45 +199,6 @@ func setupAdditionalSecrets(pod *kapi.Pod, secrets []buildapi.SecretSpec) {
 		mountSecretVolume(pod, secretSpec.SecretSource.Name, secretSpec.MountPath, "secret")
 		glog.V(3).Infof("Installed additional secret in %s, in Pod %s/%s", secretSpec.MountPath, pod.Namespace, pod.Name)
 	}
-}
-
-// mergeTrustedEnvWithoutDuplicates merges two environment lists without having
-// duplicate items in the output list.  Only trusted environment variables
-// will be merged.
-func mergeTrustedEnvWithoutDuplicates(source []kapi.EnvVar, output *[]kapi.EnvVar) {
-
-	// filter out all environment variables except trusted/well known
-	// values, because we do not want random environment variables being
-	// fed into the privileged STI container via the BuildConfig definition.
-	type sourceMapItem struct {
-		index int
-		value string
-	}
-
-	index := 0
-	filteredSourceMap := make(map[string]sourceMapItem)
-	filteredSource := []kapi.EnvVar{}
-	for _, env := range source {
-		for _, acceptable := range whitelistEnvVarNames {
-			if env.Name == acceptable {
-				filteredSource = append(filteredSource, env)
-				filteredSourceMap[env.Name] = sourceMapItem{index, env.Value}
-				index++
-				break
-			}
-		}
-	}
-
-	result := *output
-	for i, env := range result {
-		// If the value exists in output, override it and remove it
-		// from the source list
-		if v, found := filteredSourceMap[env.Name]; found {
-			result[i].Value = v.value
-			filteredSource = append(filteredSource[:v.index], filteredSource[v.index+1:]...)
-		}
-	}
-	*output = append(result, filteredSource...)
 }
 
 // getContainerVerbosity returns the defined BUILD_LOGLEVEL value

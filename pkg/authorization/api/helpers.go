@@ -6,11 +6,11 @@ import (
 	"strings"
 	"unicode"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/serviceaccount"
-	"k8s.io/kubernetes/pkg/util/sets"
 	// uservalidation "github.com/openshift/origin/pkg/user/api/validation"
 )
 
@@ -164,24 +164,32 @@ func BuildSubjects(users, groups []string, userNameValidator, groupNameValidator
 			continue
 		}
 
-		kind := UserKind
-		if len(userNameValidator(user, false)) != 0 {
-			kind = SystemUserKind
-		}
-
+		kind := determineUserKind(user, userNameValidator)
 		subjects = append(subjects, kapi.ObjectReference{Kind: kind, Name: user})
 	}
 
 	for _, group := range groups {
-		kind := GroupKind
-		if len(groupNameValidator(group, false)) != 0 {
-			kind = SystemGroupKind
-		}
-
+		kind := determineGroupKind(group, groupNameValidator)
 		subjects = append(subjects, kapi.ObjectReference{Kind: kind, Name: group})
 	}
 
 	return subjects
+}
+
+func determineUserKind(user string, userNameValidator validation.ValidateNameFunc) string {
+	kind := UserKind
+	if len(userNameValidator(user, false)) != 0 {
+		kind = SystemUserKind
+	}
+	return kind
+}
+
+func determineGroupKind(group string, groupNameValidator validation.ValidateNameFunc) string {
+	kind := GroupKind
+	if len(groupNameValidator(group, false)) != 0 {
+		kind = SystemGroupKind
+	}
+	return kind
 }
 
 // StringSubjectsFor returns users and groups for comparison against user.Info.  currentNamespace is used to
@@ -358,6 +366,10 @@ func (r *PolicyRuleBuilder) RuleOrDie() PolicyRule {
 }
 
 func (r *PolicyRuleBuilder) Rule() (PolicyRule, error) {
+	if r.PolicyRule.AttributeRestrictions != nil {
+		return PolicyRule{}, fmt.Errorf("rule may not have attributeRestrictions because they are deprecated and ignored: %#v", r.PolicyRule)
+	}
+
 	if len(r.PolicyRule.Verbs) == 0 {
 		return PolicyRule{}, fmt.Errorf("verbs are required: %#v", r.PolicyRule)
 	}

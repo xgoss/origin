@@ -11,17 +11,20 @@ import (
 	"github.com/docker/distribution/context"
 	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/manifest/schema2"
+	"github.com/docker/distribution/registry/api/errcode"
 	repomw "github.com/docker/distribution/registry/middleware/repository"
+	registrystorage "github.com/docker/distribution/registry/storage"
 
-	kapi "k8s.io/kubernetes/pkg/api"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	restclient "k8s.io/client-go/rest"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	"k8s.io/kubernetes/pkg/client/restclient"
 
 	"github.com/openshift/origin/pkg/client"
-	imageapi "github.com/openshift/origin/pkg/image/api"
-	"github.com/openshift/origin/pkg/image/importer"
-
 	"github.com/openshift/origin/pkg/dockerregistry/server/audit"
+	"github.com/openshift/origin/pkg/dockerregistry/server/metrics"
+	imageapi "github.com/openshift/origin/pkg/image/api"
+	quotautil "github.com/openshift/origin/pkg/quota/util"
 )
 
 const (
@@ -91,7 +94,7 @@ func init() {
 	cachedLayers = cache
 
 	// load the client when the middleware is initialized, which allows test code to change
-	// DefaultRegistryClient before starting a registry.
+	// the registry client before starting a registry.
 	repomw.Register("openshift",
 		func(ctx context.Context, repo distribution.Repository, options map[string]interface{}) (distribution.Repository, error) {
 			if dockerRegistry == nil {
@@ -102,7 +105,7 @@ func init() {
 				panic(fmt.Sprintf("Configuration error: OpenShift storage driver middleware not activated"))
 			}
 
-			registryOSClient, kClient, errClients := DefaultRegistryClient.Clients()
+			registryOSClient, kCoreClient, errClients := RegistryClientFrom(ctx).Clients()
 			if errClients != nil {
 				return nil, errClients
 			}
@@ -110,12 +113,12 @@ func init() {
 				quotaEnforcing = newQuotaEnforcingConfig(ctx, os.Getenv(EnforceQuotaEnvVar), os.Getenv(ProjectCacheTTLEnvVar), options)
 			}
 
-			return newRepositoryWithClient(registryOSClient, kClient.Core(), kClient.Core(), ctx, repo, options)
+			return newRepositoryWithClient(ctx, registryOSClient, kCoreClient, repo, options)
 		},
 	)
 
 	secureTransport = http.DefaultTransport
-	insecureTransport, err = restclient.TransportFor(&restclient.Config{Insecure: true})
+	insecureTransport, err = restclient.TransportFor(&restclient.Config{TLSClientConfig: restclient.TLSClientConfig{Insecure: true}})
 	if err != nil {
 		panic(fmt.Sprintf("Unable to configure a default transport for importing insecure images: %v", err))
 	}
@@ -127,7 +130,6 @@ type repository struct {
 	distribution.Repository
 
 	ctx              context.Context
-	quotaClient      kcoreclient.ResourceQuotasGetter
 	limitClient      kcoreclient.LimitRangesGetter
 	registryOSClient client.Interface
 	registryAddr     string
@@ -143,18 +145,23 @@ type repository struct {
 	acceptschema2 bool
 	// blobrepositorycachettl is an eviction timeout for <blob belongs to repository> entries of cachedLayers
 	blobrepositorycachettl time.Duration
+	// cachedImages contains images cached for the lifetime of the request being handled.
+	cachedImages map[digest.Digest]*imageapi.Image
+	// cachedImageStream stays cached for the entire time of handling signle repository-scoped request.
+	imageStreamGetter *cachedImageStreamGetter
 	// cachedLayers remembers a mapping of layer digest to repositories recently seen with that image to avoid
 	// having to check every potential upstream repository when a blob request is made. The cache is useful only
 	// when session affinity is on for the registry, but in practice the first pull will fill the cache.
 	cachedLayers digestToRepositoryCache
+	// remoteBlobGetter is used to fetch blobs from remote registries if pullthrough is enabled.
+	remoteBlobGetter BlobGetterService
 }
 
 // newRepositoryWithClient returns a new repository middleware.
 func newRepositoryWithClient(
-	registryOSClient client.Interface,
-	quotaClient kcoreclient.ResourceQuotasGetter,
-	limitClient kcoreclient.LimitRangesGetter,
 	ctx context.Context,
+	registryOSClient client.Interface,
+	limitClient kcoreclient.LimitRangesGetter,
 	repo distribution.Repository,
 	options map[string]interface{},
 ) (distribution.Repository, error) {
@@ -184,12 +191,19 @@ func newRepositoryWithClient(
 	if len(nameParts) != 2 {
 		return nil, fmt.Errorf("invalid repository name %q: it must be of the format <project>/<name>", repo.Named().Name())
 	}
+	namespace, name := nameParts[0], nameParts[1]
 
-	return &repository{
+	imageStreamGetter := &cachedImageStreamGetter{
+		ctx:          ctx,
+		namespace:    namespace,
+		name:         name,
+		isNamespacer: registryOSClient,
+	}
+
+	r := &repository{
 		Repository: repo,
 
 		ctx:                    ctx,
-		quotaClient:            quotaClient,
 		limitClient:            limitClient,
 		registryOSClient:       registryOSClient,
 		registryAddr:           registryAddr,
@@ -199,19 +213,36 @@ func newRepositoryWithClient(
 		blobrepositorycachettl: blobrepositorycachettl,
 		pullthrough:            pullthrough,
 		mirrorPullthrough:      mirrorPullthrough,
+		imageStreamGetter:      imageStreamGetter,
+		cachedImages:           make(map[digest.Digest]*imageapi.Image),
 		cachedLayers:           cachedLayers,
-	}, nil
+	}
+
+	if pullthrough {
+		r.remoteBlobGetter = NewBlobGetterService(
+			r.namespace,
+			r.name,
+			blobrepositorycachettl,
+			imageStreamGetter.get,
+			registryOSClient,
+			cachedLayers)
+	}
+
+	return r, nil
 }
 
 // Manifests returns r, which implements distribution.ManifestService.
 func (r *repository) Manifests(ctx context.Context, options ...distribution.ManifestServiceOption) (distribution.ManifestService, error) {
-	ms, err := r.Repository.Manifests(WithRepository(ctx, r))
+	// we do a verification of our own
+	// TODO: let upstream do the verification once they pass correct context object to their manifest handler
+	opts := append(options, registrystorage.SkipLayerVerification())
+	ms, err := r.Repository.Manifests(withRepository(ctx, r), opts...)
 	if err != nil {
 		return nil, err
 	}
 
 	ms = &manifestService{
-		ctx:           WithRepository(ctx, r),
+		ctx:           withRepository(ctx, r),
 		repo:          r,
 		manifests:     ms,
 		acceptschema2: r.acceptschema2,
@@ -230,8 +261,15 @@ func (r *repository) Manifests(ctx context.Context, options ...distribution.Mani
 	}
 
 	if audit.LoggerExists(ctx) {
-		ms = &auditManifestService{
-			manifests: ms,
+		ms = audit.NewManifestService(ctx, ms)
+	}
+
+	config := ConfigurationFrom(ctx)
+
+	if config.Metrics.Enabled {
+		ms = &metrics.ManifestService{
+			Manifests: ms,
+			Reponame:  r.Named().Name(),
 		}
 	}
 
@@ -240,16 +278,13 @@ func (r *repository) Manifests(ctx context.Context, options ...distribution.Mani
 
 // Blobs returns a blob store which can delegate to remote repositories.
 func (r *repository) Blobs(ctx context.Context) distribution.BlobStore {
-	repo := repository(*r)
-	repo.ctx = ctx
-
 	bs := r.Repository.Blobs(ctx)
 
-	if !quotaEnforcing.enforcementDisabled {
+	if quotaEnforcing.enforcementEnabled {
 		bs = &quotaRestrictedBlobStore{
 			BlobStore: bs,
 
-			repo: &repo,
+			repo: r,
 		}
 	}
 
@@ -257,20 +292,26 @@ func (r *repository) Blobs(ctx context.Context) distribution.BlobStore {
 		bs = &pullthroughBlobStore{
 			BlobStore: bs,
 
-			repo:          &repo,
-			digestToStore: make(map[string]distribution.BlobStore),
-			mirror:        r.mirrorPullthrough,
+			repo:   r,
+			mirror: r.mirrorPullthrough,
 		}
 	}
 
 	bs = &errorBlobStore{
 		store: bs,
-		repo:  &repo,
+		repo:  r,
 	}
 
 	if audit.LoggerExists(ctx) {
-		bs = &auditBlobStore{
-			store: bs,
+		bs = audit.NewBlobStore(ctx, bs)
+	}
+
+	config := ConfigurationFrom(ctx)
+
+	if config.Metrics.Enabled {
+		bs = &metrics.BlobStore{
+			Store:    bs,
+			Reponame: r.Named().Name(),
 		}
 	}
 
@@ -292,40 +333,117 @@ func (r *repository) Tags(ctx context.Context) distribution.TagService {
 	}
 
 	if audit.LoggerExists(ctx) {
-		ts = &auditTagService{
-			tags: ts,
+		ts = audit.NewTagService(ctx, ts)
+	}
+
+	config := ConfigurationFrom(ctx)
+
+	if config.Metrics.Enabled {
+		ts = &metrics.TagService{
+			Tags:     ts,
+			Reponame: r.Named().Name(),
 		}
 	}
 
 	return ts
 }
 
-// importContext loads secrets for this image stream and returns a context for getting distribution
-// clients to remote repositories.
-func (r *repository) importContext() importer.RepositoryRetriever {
-	secrets, err := r.registryOSClient.ImageStreamSecrets(r.namespace).Secrets(r.name, kapi.ListOptions{})
-	if err != nil {
-		context.GetLogger(r.ctx).Errorf("error getting secrets for repository %q: %v", r.Named().Name(), err)
-		secrets = &kapi.SecretList{}
+// createImageStream creates a new image stream corresponding to r and caches it.
+func (r *repository) createImageStream(ctx context.Context) (*imageapi.ImageStream, error) {
+	stream := imageapi.ImageStream{}
+	stream.Name = r.name
+
+	uclient, ok := userClientFrom(ctx)
+	if !ok {
+		errmsg := "error creating user client to auto provision image stream: user client to master API unavailable"
+		context.GetLogger(ctx).Errorf(errmsg)
+		return nil, errcode.ErrorCodeUnknown.WithDetail(errmsg)
 	}
-	credentials := importer.NewCredentialsForSecrets(secrets.Items)
-	return importer.NewContext(secureTransport, insecureTransport).WithCredentials(credentials)
+
+	is, err := uclient.ImageStreams(r.namespace).Create(&stream)
+	switch {
+	case kerrors.IsAlreadyExists(err), kerrors.IsConflict(err):
+		context.GetLogger(ctx).Infof("conflict while creating ImageStream: %v", err)
+		return r.imageStreamGetter.get()
+	case kerrors.IsForbidden(err), kerrors.IsUnauthorized(err), quotautil.IsErrorQuotaExceeded(err):
+		context.GetLogger(ctx).Errorf("denied creating ImageStream: %v", err)
+		return nil, errcode.ErrorCodeDenied.WithDetail(err)
+	case err != nil:
+		context.GetLogger(ctx).Errorf("error auto provisioning ImageStream: %s", err)
+		return nil, errcode.ErrorCodeUnknown.WithDetail(err)
+	}
+
+	r.imageStreamGetter.cacheImageStream(is)
+	return is, nil
 }
 
-// getImageStream retrieves the ImageStream for r.
-func (r *repository) getImageStream() (*imageapi.ImageStream, error) {
-	return r.registryOSClient.ImageStreams(r.namespace).Get(r.name)
-}
-
-// getImage retrieves the Image with digest `dgst`.
+// getImage retrieves the Image with digest `dgst`. No authorization check is done.
 func (r *repository) getImage(dgst digest.Digest) (*imageapi.Image, error) {
-	return r.registryOSClient.Images().Get(dgst.String())
+	if image, exists := r.cachedImages[dgst]; exists {
+		context.GetLogger(r.ctx).Infof("(*repository).getImage: returning cached copy of %s", image.Name)
+		return image, nil
+	}
+
+	image, err := r.registryOSClient.Images().Get(dgst.String(), metav1.GetOptions{})
+	if err != nil {
+		context.GetLogger(r.ctx).Errorf("failed to get image: %v", err)
+		return nil, wrapKStatusErrorOnGetImage(r.name, dgst, err)
+	}
+
+	context.GetLogger(r.ctx).Infof("(*repository).getImage: got image %s", image.Name)
+	r.cachedImages[dgst] = image
+	return image, nil
 }
 
-// getImageStreamImage retrieves the Image with digest `dgst` for the ImageStream
-// associated with r. This ensures the image belongs to the image stream.
-func (r *repository) getImageStreamImage(dgst digest.Digest) (*imageapi.ImageStreamImage, error) {
-	return r.registryOSClient.ImageStreamImages(r.namespace).Get(r.name, dgst.String())
+// getStoredImageOfImageStream retrieves the Image with digest `dgst` and
+// ensures that the image belongs to the ImageStream associated with r. It
+// uses two queries to master API:
+//
+//  1st to get a corresponding image stream
+//  2nd to get the image
+//
+// This allows us to cache the image stream for later use.
+//
+// If you need the image object to be modified according to image stream tag,
+// please use getImageOfImageStream.
+func (r *repository) getStoredImageOfImageStream(dgst digest.Digest) (*imageapi.Image, *imageapi.TagEvent, *imageapi.ImageStream, error) {
+	stream, err := r.imageStreamGetter.get()
+	if err != nil {
+		context.GetLogger(r.ctx).Errorf("failed to get ImageStream: %v", err)
+		return nil, nil, nil, wrapKStatusErrorOnGetImage(r.name, dgst, err)
+	}
+
+	tagEvent, err := imageapi.ResolveImageID(stream, dgst.String())
+	if err != nil {
+		context.GetLogger(r.ctx).Errorf("failed to resolve image %s in ImageStream %s/%s: %v", dgst.String(), r.namespace, r.name, err)
+		return nil, nil, nil, wrapKStatusErrorOnGetImage(r.name, dgst, err)
+	}
+
+	image, err := r.getImage(dgst)
+	if err != nil {
+		return nil, nil, nil, wrapKStatusErrorOnGetImage(r.name, dgst, err)
+	}
+
+	return image, tagEvent, stream, nil
+}
+
+// getImageOfImageStream retrieves the Image with digest `dgst` for
+// the ImageStream associated with r. The image's field DockerImageReference
+// is modified on the fly to pretend that we've got the image from the source
+// from which the image was tagged.to match tag's DockerImageReference.
+//
+// NOTE: due to on the fly modification, the returned image object should
+// not be sent to the master API. If you need unmodified version of the
+// image object, please use getStoredImageOfImageStream.
+func (r *repository) getImageOfImageStream(dgst digest.Digest) (*imageapi.Image, *imageapi.ImageStream, error) {
+	image, tagEvent, stream, err := r.getStoredImageOfImageStream(dgst)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	image.DockerImageReference = tagEvent.DockerImageReference
+
+	return image, stream, nil
 }
 
 // updateImage modifies the Image.
@@ -392,15 +510,15 @@ func (r *repository) manifestFromImageWithCachedLayers(image *imageapi.Image, ca
 }
 
 func (r *repository) checkPendingErrors(ctx context.Context) error {
-	return checkPendingErrors(context.GetLogger(r.ctx), ctx, r.namespace, r.name)
+	return checkPendingErrors(ctx, context.GetLogger(r.ctx), r.namespace, r.name)
 }
 
-func checkPendingErrors(logger context.Logger, ctx context.Context, namespace, name string) error {
-	if !AuthPerformed(ctx) {
+func checkPendingErrors(ctx context.Context, logger context.Logger, namespace, name string) error {
+	if !authPerformed(ctx) {
 		return fmt.Errorf("openshift.auth.completed missing from context")
 	}
 
-	deferredErrors, haveDeferredErrors := DeferredErrorsFrom(ctx)
+	deferredErrors, haveDeferredErrors := deferredErrorsFrom(ctx)
 	if !haveDeferredErrors {
 		return nil
 	}

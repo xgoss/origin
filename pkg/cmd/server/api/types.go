@@ -1,10 +1,10 @@
 package api
 
 import (
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // A new entry shall be added to FeatureAliases for every change to following values.
@@ -43,41 +43,82 @@ var (
 	// exposed externally.
 	DeadOpenShiftStorageVersionLevels = []string{"v1beta1", "v1beta3"}
 
-	APIGroupKube           = ""
-	APIGroupExtensions     = "extensions"
-	APIGroupApps           = "apps"
-	APIGroupAuthentication = "authentication.k8s.io"
-	APIGroupAutoscaling    = "autoscaling"
-	APIGroupBatch          = "batch"
-	APIGroupCertificates   = "certificates.k8s.io"
-	APIGroupFederation     = "federation"
-	APIGroupPolicy         = "policy"
-	APIGroupStorage        = "storage.k8s.io"
+	APIGroupKube              = ""
+	APIGroupExtensions        = "extensions"
+	APIGroupApps              = "apps"
+	APIGroupAuthentication    = "authentication.k8s.io"
+	APIGroupAuthorization     = "authorization.k8s.io"
+	APIGroupImagePolicy       = "imagepolicy.k8s.io"
+	APIGroupAutoscaling       = "autoscaling"
+	APIGroupBatch             = "batch"
+	APIGroupCertificates      = "certificates.k8s.io"
+	APIGroupFederation        = "federation"
+	APIGroupPolicy            = "policy"
+	APIGroupStorage           = "storage.k8s.io"
+	APIGroupComponentConfig   = "componentconfig"
+	APIGroupAuthorizationRbac = "rbac.authorization.k8s.io"
+	APIGroupSettings          = "settings.k8s.io"
+
+	OriginAPIGroupCore                = ""
+	OriginAPIGroupAuthorization       = "authorization.openshift.io"
+	OriginAPIGroupBuild               = "build.openshift.io"
+	OriginAPIGroupDeploy              = "apps.openshift.io"
+	OriginAPIGroupTemplate            = "template.openshift.io"
+	OriginAPIGroupImage               = "image.openshift.io"
+	OriginAPIGroupProject             = "project.openshift.io"
+	OriginAPIGroupProjectRequestLimit = "requestlimit.project.openshift.io"
+	OriginAPIGroupUser                = "user.openshift.io"
+	OriginAPIGroupOAuth               = "oauth.openshift.io"
+	OriginAPIGroupRoute               = "route.openshift.io"
+	OriginAPIGroupNetwork             = "network.openshift.io"
+	OriginAPIGroupQuota               = "quota.openshift.io"
+	OriginAPIGroupSecurity            = "security.openshift.io"
 
 	// Map of group names to allowed REST API versions
 	KubeAPIGroupsToAllowedVersions = map[string][]string{
-		APIGroupKube:           {"v1"},
-		APIGroupExtensions:     {"v1beta1"},
-		APIGroupApps:           {"v1beta1"},
-		APIGroupAuthentication: {"v1beta1"},
-		APIGroupAutoscaling:    {"v1"},
-		APIGroupBatch:          {"v1", "v2alpha1"},
-		APIGroupCertificates:   {"v1alpha1"},
-		APIGroupPolicy:         {"v1beta1"},
-		APIGroupStorage:        {"v1beta1"},
+		APIGroupKube:              {"v1"},
+		APIGroupExtensions:        {"v1beta1"},
+		APIGroupApps:              {"v1beta1"},
+		APIGroupAuthentication:    {"v1", "v1beta1"},
+		APIGroupAuthorization:     {"v1", "v1beta1"},
+		APIGroupAuthorizationRbac: {"v1beta1"},
+		APIGroupAutoscaling:       {"v1", "v2alpha1"},
+		APIGroupBatch:             {"v1", "v2alpha1"},
+		APIGroupCertificates:      {"v1beta1"},
+		APIGroupPolicy:            {"v1beta1"},
+		APIGroupStorage:           {"v1", "v1beta1"},
+		APIGroupSettings:          {"v1alpha1"},
 		// TODO: enable as part of a separate binary
 		//APIGroupFederation:  {"v1beta1"},
 	}
+
+	OriginAPIGroupsToAllowedVersions = map[string][]string{
+		OriginAPIGroupAuthorization: {"v1"},
+		OriginAPIGroupBuild:         {"v1"},
+		OriginAPIGroupDeploy:        {"v1"},
+		OriginAPIGroupTemplate:      {"v1"},
+		OriginAPIGroupImage:         {"v1"},
+		OriginAPIGroupProject:       {"v1"},
+		OriginAPIGroupUser:          {"v1"},
+		OriginAPIGroupOAuth:         {"v1"},
+		OriginAPIGroupNetwork:       {"v1"},
+		OriginAPIGroupRoute:         {"v1"},
+		OriginAPIGroupQuota:         {"v1"},
+		OriginAPIGroupSecurity:      {"v1"},
+	}
+
 	// Map of group names to known, but disallowed REST API versions
 	KubeAPIGroupsToDeadVersions = map[string][]string{
-		APIGroupKube:        {"v1beta3"},
-		APIGroupExtensions:  {},
-		APIGroupAutoscaling: {},
-		APIGroupBatch:       {},
-		APIGroupPolicy:      {},
-		APIGroupApps:        {},
+		APIGroupKube:              {"v1beta3"},
+		APIGroupExtensions:        {},
+		APIGroupAutoscaling:       {},
+		APIGroupBatch:             {},
+		APIGroupPolicy:            {},
+		APIGroupApps:              {},
+		APIGroupAuthorizationRbac: {"v1alpha1"},
 	}
-	KnownKubeAPIGroups = sets.StringKeySet(KubeAPIGroupsToAllowedVersions)
+	KnownKubeAPIGroups   = sets.StringKeySet(KubeAPIGroupsToAllowedVersions)
+	KnownOriginAPIGroups = sets.StringKeySet(OriginAPIGroupsToAllowedVersions)
 
 	// FeatureAliases maps deprecated names of feature flag to their canonical
 	// names. Aliases must be lower-cased for O(1) lookup.
@@ -87,13 +128,30 @@ var (
 	}
 	KnownOpenShiftFeatures = []string{FeatureBuilder, FeatureS2I, FeatureWebConsole}
 	AtomicDisabledFeatures = []string{FeatureBuilder, FeatureS2I, FeatureWebConsole}
+
+	// List public registries that we are allowing to import images from by default.
+	// By default all registries have set to be "secure", iow. the port for them is
+	// defaulted to "443".
+	// If the registry you are adding here is insecure, you can add 'Insecure: true' to
+	// make it default to port '80'.
+	// If the registry you are adding use custom port, you have to specify the port as
+	// part of the domain name.
+	DefaultAllowedRegistriesForImport = &AllowedRegistries{
+		{DomainName: "docker.io"},
+		{DomainName: "*.docker.io"}, // registry-1.docker.io
+		{DomainName: "registry.access.redhat.com"},
+		{DomainName: "gcr.io"},
+		{DomainName: "quay.io"},
+		// FIXME: Probably need to have more fine-tuned pattern defined
+		{DomainName: "*.amazonaws.com"},
+	}
 )
 
 type ExtendedArguments map[string][]string
 
 // NodeConfig is the fully specified config starting an OpenShift node
 type NodeConfig struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// NodeName is the value used to identify this particular node in the cluster.  If possible, this should be your fully qualified hostname.
 	// If you're describing a set of static nodes to the master, this value must match one of the values in the list
@@ -228,6 +286,10 @@ type DockerConfig struct {
 	// ExecHandlerName is the name of the handler to use for executing
 	// commands in Docker containers.
 	ExecHandlerName DockerExecHandlerType
+	// DockerShimSocket is the location of the dockershim socket the kubelet uses.
+	DockerShimSocket string
+	// DockershimRootDirectory is the dockershim root directory.
+	DockershimRootDirectory string
 }
 
 type DockerExecHandlerType string
@@ -247,10 +309,14 @@ const (
 type FeatureList []string
 
 type MasterConfig struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// ServingInfo describes how to start serving
 	ServingInfo HTTPServingInfo
+
+	// AuthConfig configures authentication options in addition to the standard
+	// oauth token and client certificate authenticators
+	AuthConfig MasterAuthConfig
 
 	// CORSAllowedOrigins
 	CORSAllowedOrigins []string
@@ -340,6 +406,32 @@ type MasterConfig struct {
 
 	// AuditConfig holds information related to auditing capabilities.
 	AuditConfig AuditConfig
+
+	// EnableTemplateServiceBroker is a temporary switch which enables TemplateServiceBroker.
+	EnableTemplateServiceBroker bool
+}
+
+// MasterAuthConfig configures authentication options in addition to the standard
+// oauth token and client certificate authenticators
+type MasterAuthConfig struct {
+	// RequestHeader holds options for setting up a front proxy against the the API.  It is optional.
+	RequestHeader *RequestHeaderAuthenticationOptions
+}
+
+// RequestHeaderAuthenticationOptions provides options for setting up a front proxy against the entire
+// API instead of against the /oauth endpoint.
+type RequestHeaderAuthenticationOptions struct {
+	// ClientCA is a file with the trusted signer certs.  It is required.
+	ClientCA string
+	// ClientCommonNames is a required list of common names to require a match from.
+	ClientCommonNames []string
+
+	// UsernameHeaders is the list of headers to check for user information.  First hit wins.
+	UsernameHeaders []string
+	// GroupNameHeader is the set of headers to check for group information.  All are unioned.
+	GroupHeaders []string
+	// ExtraHeaderPrefixes is the set of request header prefixes to inspect for user extra. X-Remote-Extra- is suggested.
+	ExtraHeaderPrefixes []string
 }
 
 // AuditConfig holds configuration for the audit capabilities
@@ -388,6 +480,28 @@ type ImagePolicyConfig struct {
 	// MaxScheduledImageImportsPerMinute is the maximum number of image streams that will be imported in the background per minute.
 	// The default value is 60. Set to -1 for unlimited.
 	MaxScheduledImageImportsPerMinute int
+	// AllowedRegistriesForImport limits the docker registries that normal users may import
+	// images from. Set this list to the registries that you trust to contain valid Docker
+	// images and that you want applications to be able to import from. Users with
+	// permission to create Images or ImageStreamMappings via the API are not affected by
+	// this policy - typically only administrators or system integrations will have those
+	// permissions.
+	AllowedRegistriesForImport *AllowedRegistries
+}
+
+// AllowedRegistries represents a list of registries allowed for the image import.
+type AllowedRegistries []RegistryLocation
+
+// RegistryLocation contains a location of the registry specified by the registry domain
+// name. The domain name might include wildcards, like '*' or '??'.
+type RegistryLocation struct {
+	// DomainName specifies a domain name for the registry
+	// In case the registry use non-standard (80 or 443) port, the port should be included
+	// in the domain name as well.
+	DomainName string
+	// Insecure indicates whether the registry is secure (https) or insecure (http)
+	// By default (if not specified) the registry is assumed as secure.
+	Insecure bool
 }
 
 type ProjectConfig struct {
@@ -559,6 +673,12 @@ type ServingInfo struct {
 	ClientCA string
 	// NamedCertificates is a list of certificates to use to secure requests to specific hostnames
 	NamedCertificates []NamedCertificate
+	// MinTLSVersion is the minimum TLS version supported.
+	// Values must match version names from https://golang.org/pkg/crypto/tls/#pkg-constants
+	MinTLSVersion string
+	// CipherSuites contains an overridden list of ciphers for the server to support.
+	// Values must match cipher suite IDs from https://golang.org/pkg/crypto/tls/#pkg-constants
+	CipherSuites []string
 }
 
 // NamedCertificate specifies a certificate/key, and the names it should be served for
@@ -748,7 +868,7 @@ type SessionConfig struct {
 
 // SessionSecrets list the secrets to use to sign/encrypt and authenticate/decrypt created sessions.
 type SessionSecrets struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// Secrets is a list of secrets
 	// New sessions are signed and encrypted using the first secret.
@@ -777,29 +897,29 @@ type IdentityProvider struct {
 }
 
 type BasicAuthPasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// RemoteConnectionInfo contains information about how to connect to the external basic auth server
 	RemoteConnectionInfo RemoteConnectionInfo
 }
 
 type AllowAllPasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 }
 
 type DenyAllPasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 }
 
 type HTPasswdPasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// File is a reference to your htpasswd file
 	File string
 }
 
 type LDAPPasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 	// URL is an RFC 2255 URL which specifies the LDAP search parameters to use. The syntax of the URL is
 	//    ldap://host:port/basedn?attribute?scope?filter
 	URL string
@@ -836,7 +956,7 @@ type LDAPAttributeMapping struct {
 }
 
 type KeystonePasswordIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 	// RemoteConnectionInfo contains information about how to connect to the keystone server
 	RemoteConnectionInfo RemoteConnectionInfo
 	// Domain Name is required for keystone v3
@@ -844,7 +964,7 @@ type KeystonePasswordIdentityProvider struct {
 }
 
 type RequestHeaderIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// LoginURL is a URL to redirect unauthenticated /authorize requests to
 	// Unauthenticated requests from OAuth clients which expect interactive logins will be redirected here
@@ -878,7 +998,7 @@ type RequestHeaderIdentityProvider struct {
 }
 
 type GitHubIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// ClientID is the oauth client ID
 	ClientID string
@@ -891,7 +1011,7 @@ type GitHubIdentityProvider struct {
 }
 
 type GitLabIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// CA is the optional trusted certificate authority bundle to use when making requests to the server
 	// If empty, the default system roots are used
@@ -905,7 +1025,7 @@ type GitLabIdentityProvider struct {
 }
 
 type GoogleIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// ClientID is the oauth client ID
 	ClientID string
@@ -917,7 +1037,7 @@ type GoogleIdentityProvider struct {
 }
 
 type OpenIDIdentityProvider struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// CA is the optional trusted certificate authority bundle to use when making requests to the server
 	// If empty, the default system roots are used
@@ -1107,7 +1227,7 @@ type StringSourceSpec struct {
 }
 
 type LDAPSyncConfig struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// URL is the scheme, host and port of the LDAP server to connect to: scheme://host:port
 	URL string
@@ -1254,7 +1374,7 @@ type LDAPQuery struct {
 
 type AdmissionPluginConfig struct {
 	// Location is the path to a configuration file that contains the plugin's
-	// configuration
+	// configuration.
 	Location string
 
 	// Configuration is an embedded configuration object to be used as the plugin's
@@ -1290,7 +1410,7 @@ type ServiceServingCert struct {
 // When this type is present as the `configuration` object under `pluginConfig` and *if* the admission plugin supports it,
 // this will cause an "off by default" admission plugin to be enabled
 type DefaultAdmissionConfig struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
 	// Disable turns off an admission plugin that is enabled by default.
 	Disable bool

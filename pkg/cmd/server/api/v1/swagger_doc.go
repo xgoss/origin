@@ -169,8 +169,10 @@ func (DenyAllPasswordIdentityProvider) SwaggerDoc() map[string]string {
 }
 
 var map_DockerConfig = map[string]string{
-	"":                "DockerConfig holds Docker related configuration options.",
-	"execHandlerName": "ExecHandlerName is the name of the handler to use for executing commands in Docker containers.",
+	"":                        "DockerConfig holds Docker related configuration options.",
+	"execHandlerName":         "ExecHandlerName is the name of the handler to use for executing commands in Docker containers.",
+	"dockerShimSocket":        "DockerShimSocket is the location of the dockershim socket the kubelet uses.",
+	"dockerShimRootDirectory": "DockershimRootDirectory is the dockershim root directory.",
 }
 
 func (DockerConfig) SwaggerDoc() map[string]string {
@@ -305,6 +307,7 @@ var map_ImagePolicyConfig = map[string]string{
 	"disableScheduledImport":                     "DisableScheduledImport allows scheduled background import of images to be disabled.",
 	"scheduledImageImportMinimumIntervalSeconds": "ScheduledImageImportMinimumIntervalSeconds is the minimum number of seconds that can elapse between when image streams scheduled for background import are checked against the upstream repository. The default value is 15 minutes.",
 	"maxScheduledImageImportsPerMinute":          "MaxScheduledImageImportsPerMinute is the maximum number of scheduled image streams that will be imported in the background per minute. The default value is 60. Set to -1 for unlimited.",
+	"allowedRegistriesForImport":                 "AllowedRegistriesForImport limits the docker registries that normal users may import images from. Set this list to the registries that you trust to contain valid Docker images and that you want applications to be able to import from. Users with permission to create Images or ImageStreamMappings via the API are not affected by this policy - typically only administrators or system integrations will have those permissions.",
 }
 
 func (ImagePolicyConfig) SwaggerDoc() map[string]string {
@@ -431,6 +434,15 @@ func (LocalQuota) SwaggerDoc() map[string]string {
 	return map_LocalQuota
 }
 
+var map_MasterAuthConfig = map[string]string{
+	"":              "MasterAuthConfig configures authentication options in addition to the standard oauth token and client certificate authenticators",
+	"requestHeader": "RequestHeader holds options for setting up a front proxy against the the API.  It is optional.",
+}
+
+func (MasterAuthConfig) SwaggerDoc() map[string]string {
+	return map_MasterAuthConfig
+}
+
 var map_MasterClients = map[string]string{
 	"": "MasterClients holds references to `.kubeconfig` files that qualify master clients for OpenShift and Kubernetes",
 	"openshiftLoopbackKubeConfig":                 "OpenShiftLoopbackKubeConfig is a .kubeconfig filename for system components to loopback to this master",
@@ -444,36 +456,38 @@ func (MasterClients) SwaggerDoc() map[string]string {
 }
 
 var map_MasterConfig = map[string]string{
-	"":                       "MasterConfig holds the necessary configuration options for the OpenShift master",
-	"servingInfo":            "ServingInfo describes how to start serving",
-	"corsAllowedOrigins":     "CORSAllowedOrigins",
-	"apiLevels":              "APILevels is a list of API levels that should be enabled on startup: v1 as examples",
-	"masterPublicURL":        "MasterPublicURL is how clients can access the OpenShift API server",
-	"controllers":            "Controllers is a list of the controllers that should be started. If set to \"none\", no controllers will start automatically. The default value is \"*\" which will start all controllers. When using \"*\", you may exclude controllers by prepending a \"-\" in front of their name. No other values are recognized at this time.",
-	"pauseControllers":       "PauseControllers instructs the master to not automatically start controllers, but instead to wait until a notification to the server is received before launching them.",
-	"controllerLeaseTTL":     "ControllerLeaseTTL enables controller election, instructing the master to attempt to acquire a lease before controllers start and renewing it within a number of seconds defined by this value. Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or omitted) and controller election can be disabled with -1.",
-	"admissionConfig":        "AdmissionConfig contains admission control plugin configuration.",
-	"controllerConfig":       "ControllerConfig holds configuration values for controllers",
-	"disabledFeatures":       "DisabledFeatures is a list of features that should not be started.  We omitempty here because its very unlikely that anyone will want to manually disable features and we don't want to encourage it.",
-	"etcdStorageConfig":      "EtcdStorageConfig contains information about how API resources are stored in Etcd. These values are only relevant when etcd is the backing store for the cluster.",
-	"etcdClientInfo":         "EtcdClientInfo contains information about how to connect to etcd",
-	"kubeletClientInfo":      "KubeletClientInfo contains information about how to connect to kubelets",
-	"kubernetesMasterConfig": "KubernetesMasterConfig, if present start the kubernetes master in this process",
-	"etcdConfig":             "EtcdConfig, if present start etcd in this process",
-	"oauthConfig":            "OAuthConfig, if present start the /oauth endpoint in this process",
-	"assetConfig":            "AssetConfig, if present start the asset server in this process",
-	"dnsConfig":              "DNSConfig, if present start the DNS server in this process",
-	"serviceAccountConfig":   "ServiceAccountConfig holds options related to service accounts",
-	"masterClients":          "MasterClients holds all the client connection information for controllers and other system components",
-	"imageConfig":            "ImageConfig holds options that describe how to build image names for system components",
-	"imagePolicyConfig":      "ImagePolicyConfig controls limits and behavior for importing images",
-	"policyConfig":           "PolicyConfig holds information about where to locate critical pieces of bootstrapping policy",
-	"projectConfig":          "ProjectConfig holds information about project creation and defaults",
-	"routingConfig":          "RoutingConfig holds information about routing and route generation",
-	"networkConfig":          "NetworkConfig to be passed to the compiled in network plugin",
-	"volumeConfig":           "MasterVolumeConfig contains options for configuring volume plugins in the master node.",
-	"jenkinsPipelineConfig":  "JenkinsPipelineConfig holds information about the default Jenkins template used for JenkinsPipeline build strategy.",
-	"auditConfig":            "AuditConfig holds information related to auditing capabilities.",
+	"":                            "MasterConfig holds the necessary configuration options for the OpenShift master",
+	"servingInfo":                 "ServingInfo describes how to start serving",
+	"authConfig":                  "AuthConfig configures authentication options in addition to the standard oauth token and client certificate authenticators",
+	"corsAllowedOrigins":          "CORSAllowedOrigins",
+	"apiLevels":                   "APILevels is a list of API levels that should be enabled on startup: v1 as examples",
+	"masterPublicURL":             "MasterPublicURL is how clients can access the OpenShift API server",
+	"controllers":                 "Controllers is a list of the controllers that should be started. If set to \"none\", no controllers will start automatically. The default value is \"*\" which will start all controllers. When using \"*\", you may exclude controllers by prepending a \"-\" in front of their name. No other values are recognized at this time.",
+	"pauseControllers":            "PauseControllers instructs the master to not automatically start controllers, but instead to wait until a notification to the server is received before launching them.",
+	"controllerLeaseTTL":          "ControllerLeaseTTL enables controller election, instructing the master to attempt to acquire a lease before controllers start and renewing it within a number of seconds defined by this value. Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or omitted) and controller election can be disabled with -1.",
+	"admissionConfig":             "AdmissionConfig contains admission control plugin configuration.",
+	"controllerConfig":            "ControllerConfig holds configuration values for controllers",
+	"disabledFeatures":            "DisabledFeatures is a list of features that should not be started.  We omitempty here because its very unlikely that anyone will want to manually disable features and we don't want to encourage it.",
+	"etcdStorageConfig":           "EtcdStorageConfig contains information about how API resources are stored in Etcd. These values are only relevant when etcd is the backing store for the cluster.",
+	"etcdClientInfo":              "EtcdClientInfo contains information about how to connect to etcd",
+	"kubeletClientInfo":           "KubeletClientInfo contains information about how to connect to kubelets",
+	"kubernetesMasterConfig":      "KubernetesMasterConfig, if present start the kubernetes master in this process",
+	"etcdConfig":                  "EtcdConfig, if present start etcd in this process",
+	"oauthConfig":                 "OAuthConfig, if present start the /oauth endpoint in this process",
+	"assetConfig":                 "AssetConfig, if present start the asset server in this process",
+	"dnsConfig":                   "DNSConfig, if present start the DNS server in this process",
+	"serviceAccountConfig":        "ServiceAccountConfig holds options related to service accounts",
+	"masterClients":               "MasterClients holds all the client connection information for controllers and other system components",
+	"imageConfig":                 "ImageConfig holds options that describe how to build image names for system components",
+	"imagePolicyConfig":           "ImagePolicyConfig controls limits and behavior for importing images",
+	"policyConfig":                "PolicyConfig holds information about where to locate critical pieces of bootstrapping policy",
+	"projectConfig":               "ProjectConfig holds information about project creation and defaults",
+	"routingConfig":               "RoutingConfig holds information about routing and route generation",
+	"networkConfig":               "NetworkConfig to be passed to the compiled in network plugin",
+	"volumeConfig":                "MasterVolumeConfig contains options for configuring volume plugins in the master node.",
+	"jenkinsPipelineConfig":       "JenkinsPipelineConfig holds information about the default Jenkins template used for JenkinsPipeline build strategy.",
+	"auditConfig":                 "AuditConfig holds information related to auditing capabilities.",
+	"enableTemplateServiceBroker": "EnableTemplateServiceBroker is a temporary switch which enables TemplateServiceBroker.",
 }
 
 func (MasterConfig) SwaggerDoc() map[string]string {
@@ -691,6 +705,16 @@ func (RFC2307Config) SwaggerDoc() map[string]string {
 	return map_RFC2307Config
 }
 
+var map_RegistryLocation = map[string]string{
+	"":           "RegistryLocation contains a location of the registry specified by the registry domain name. The domain name might include wildcards, like '*' or '??'.",
+	"domainName": "DomainName specifies a domain name for the registry In case the registry use non-standard (80 or 443) port, the port should be included in the domain name as well.",
+	"insecure":   "Insecure indicates whether the registry is secure (https) or insecure (http) By default (if not specified) the registry is assumed as secure.",
+}
+
+func (RegistryLocation) SwaggerDoc() map[string]string {
+	return map_RegistryLocation
+}
+
 var map_RemoteConnectionInfo = map[string]string{
 	"":    "RemoteConnectionInfo holds information necessary for establishing a remote connection",
 	"url": "URL is the remote URL to connect to",
@@ -699,6 +723,19 @@ var map_RemoteConnectionInfo = map[string]string{
 
 func (RemoteConnectionInfo) SwaggerDoc() map[string]string {
 	return map_RemoteConnectionInfo
+}
+
+var map_RequestHeaderAuthenticationOptions = map[string]string{
+	"":                    "RequestHeaderAuthenticationOptions provides options for setting up a front proxy against the entire API instead of against the /oauth endpoint.",
+	"clientCA":            "ClientCA is a file with the trusted signer certs.  It is required.",
+	"clientCommonNames":   "ClientCommonNames is a required list of common names to require a match from.",
+	"usernameHeaders":     "UsernameHeaders is the list of headers to check for user information.  First hit wins.",
+	"groupHeaders":        "GroupNameHeader is the set of headers to check for group information.  All are unioned.",
+	"extraHeaderPrefixes": "ExtraHeaderPrefixes is the set of request header prefixes to inspect for user extra. X-Remote-Extra- is suggested.",
+}
+
+func (RequestHeaderAuthenticationOptions) SwaggerDoc() map[string]string {
+	return map_RequestHeaderAuthenticationOptions
 }
 
 var map_RequestHeaderIdentityProvider = map[string]string{
@@ -765,6 +802,8 @@ var map_ServingInfo = map[string]string{
 	"bindNetwork":       "BindNetwork is the type of network to bind to - defaults to \"tcp4\", accepts \"tcp\", \"tcp4\", and \"tcp6\"",
 	"clientCA":          "ClientCA is the certificate bundle for all the signers that you'll recognize for incoming client certificates",
 	"namedCertificates": "NamedCertificates is a list of certificates to use to secure requests to specific hostnames",
+	"minTLSVersion":     "MinTLSVersion is the minimum TLS version supported. Values must match version names from https://golang.org/pkg/crypto/tls/#pkg-constants",
+	"cipherSuites":      "CipherSuites contains an overridden list of ciphers for the server to support. Values must match cipher suite IDs from https://golang.org/pkg/crypto/tls/#pkg-constants",
 }
 
 func (ServingInfo) SwaggerDoc() map[string]string {

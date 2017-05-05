@@ -8,13 +8,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/watch"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
-	kctl "k8s.io/kubernetes/pkg/kubectl"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/watch"
+	kprinters "k8s.io/kubernetes/pkg/printers"
 
 	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/cli/describe"
@@ -52,6 +52,7 @@ func NewCmdImportImage(fullName string, f *clientcmd.Factory, out, errout io.Wri
 	cmd.Flags().StringVar(&opts.From, "from", "", "A Docker image repository to import images from")
 	cmd.Flags().BoolVar(&opts.Confirm, "confirm", false, "If true, allow the image stream import location to be set or changed")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "If true, import all tags from the provided source on creation or if --from is specified")
+	cmd.Flags().StringVar(&opts.ReferencePolicy, "reference-policy", sourceReferencePolicy, "Allow to request pullthrough for external image when set to 'local'. Defaults to 'source'.")
 	opts.Insecure = cmd.Flags().Bool("insecure", false, "If true, allow importing from registries that have invalid HTTPS certificates or are hosted via HTTP. This flag will take precedence over the insecure annotation.")
 
 	return cmd
@@ -66,10 +67,11 @@ type ImportImageOptions struct {
 	Insecure *bool
 
 	// internal values
-	Namespace string
-	Name      string
-	Tag       string
-	Target    string
+	Namespace       string
+	Name            string
+	Tag             string
+	Target          string
+	ReferencePolicy string
 
 	CommandName string
 
@@ -91,6 +93,9 @@ func (o *ImportImageOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, 
 
 	if !cmd.Flags().Lookup("insecure").Changed {
 		o.Insecure = nil
+	}
+	if !cmd.Flags().Lookup("reference-policy").Changed {
+		o.ReferencePolicy = ""
 	}
 
 	namespace, _, err := f.DefaultNamespace()
@@ -160,7 +165,7 @@ func (o *ImportImageOptions) Run() error {
 
 		// optimization, use the image stream returned by the call
 		d := describe.ImageStreamDescriber{Interface: o.osClient}
-		info, err := d.Describe(o.Namespace, stream.Name, kctl.DescriberSettings{})
+		info, err := d.Describe(o.Namespace, stream.Name, kprinters.DescriberSettings{})
 		if err != nil {
 			return err
 		}
@@ -205,7 +210,7 @@ func (o *ImportImageOptions) Run() error {
 	fmt.Fprint(o.out, "The import completed successfully.\n\n")
 
 	d := describe.ImageStreamDescriber{Interface: o.osClient}
-	info, err := d.Describe(updatedStream.Namespace, updatedStream.Name, kctl.DescriberSettings{})
+	info, err := d.Describe(updatedStream.Namespace, updatedStream.Name, kprinters.DescriberSettings{})
 	if err != nil {
 		return err
 	}
@@ -216,11 +221,11 @@ func (o *ImportImageOptions) Run() error {
 
 func wasError(isi *imageapi.ImageStreamImport) bool {
 	for _, image := range isi.Status.Images {
-		if image.Status.Status == unversioned.StatusFailure {
+		if image.Status.Status == metav1.StatusFailure {
 			return true
 		}
 	}
-	if isi.Status.Repository != nil && isi.Status.Repository.Status.Status == unversioned.StatusFailure {
+	if isi.Status.Repository != nil && isi.Status.Repository.Status.Status == metav1.StatusFailure {
 		return true
 	}
 	return false
@@ -236,7 +241,7 @@ func (e importError) Error() string {
 }
 
 func (o *ImportImageOptions) waitForImport(resourceVersion string) (*imageapi.ImageStream, error) {
-	streamWatch, err := o.isClient.Watch(kapi.ListOptions{FieldSelector: fields.OneTermEqualSelector("metadata.name", o.Name), ResourceVersion: resourceVersion})
+	streamWatch, err := o.isClient.Watch(metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("metadata.name", o.Name).String(), ResourceVersion: resourceVersion})
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +281,7 @@ func (o *ImportImageOptions) waitForImport(resourceVersion string) (*imageapi.Im
 
 func (o *ImportImageOptions) createImageImport() (*imageapi.ImageStream, *imageapi.ImageStreamImport, error) {
 	var isi *imageapi.ImageStreamImport
-	stream, err := o.isClient.Get(o.Name)
+	stream, err := o.isClient.Get(o.Name, metav1.GetOptions{})
 	// no stream, try creating one
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -423,16 +428,23 @@ func (o *ImportImageOptions) newImageStream() (*imageapi.ImageStream, *imageapi.
 	if len(from) == 0 {
 		from = o.Target
 	}
-	var stream *imageapi.ImageStream
-	// create new ImageStream
+	var (
+		stream *imageapi.ImageStream
+		isi    *imageapi.ImageStreamImport
+	)
+	// create new ImageStream and accompanying ImageStreamImport
+	// TODO: this should be removed along with the legacy path, we don't need to
+	// create the IS in the new path, the import mechanism will do that for us,
+	// this is only for the legacy path that we need to create the IS.
 	if o.All {
 		stream = &imageapi.ImageStream{
-			ObjectMeta: kapi.ObjectMeta{Name: o.Name},
+			ObjectMeta: metav1.ObjectMeta{Name: o.Name},
 			Spec:       imageapi.ImageStreamSpec{DockerImageRepository: from},
 		}
+		isi = o.newImageStreamImportAll(stream, from)
 	} else {
 		stream = &imageapi.ImageStream{
-			ObjectMeta: kapi.ObjectMeta{Name: o.Name},
+			ObjectMeta: metav1.ObjectMeta{Name: o.Name},
 			Spec: imageapi.ImageStreamSpec{
 				Tags: map[string]imageapi.TagReference{
 					tag: {
@@ -440,25 +452,34 @@ func (o *ImportImageOptions) newImageStream() (*imageapi.ImageStream, *imageapi.
 							Kind: "DockerImage",
 							Name: from,
 						},
+						ReferencePolicy: o.getReferencePolicy(),
 					},
 				},
 			},
 		}
-	}
-	// and accompanying ImageStreamImport
-	var isi *imageapi.ImageStreamImport
-	if o.All {
-		isi = o.newImageStreamImportAll(stream, from)
-	} else {
 		isi = o.newImageStreamImportTags(stream, map[string]string{tag: from})
 	}
 
 	return stream, isi
 }
 
+func (o *ImportImageOptions) getReferencePolicy() imageapi.TagReferencePolicy {
+	ref := imageapi.TagReferencePolicy{}
+	if len(o.ReferencePolicy) == 0 {
+		return ref
+	}
+	switch o.ReferencePolicy {
+	case sourceReferencePolicy:
+		ref.Type = imageapi.SourceTagReferencePolicy
+	case localReferencePolicy:
+		ref.Type = imageapi.LocalTagReferencePolicy
+	}
+	return ref
+}
+
 func (o *ImportImageOptions) newImageStreamImport(stream *imageapi.ImageStream) (*imageapi.ImageStreamImport, bool) {
 	isi := &imageapi.ImageStreamImport{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:            stream.Name,
 			Namespace:       o.Namespace,
 			ResourceVersion: stream.ResourceVersion,
@@ -482,7 +503,8 @@ func (o *ImportImageOptions) newImageStreamImportAll(stream *imageapi.ImageStrea
 			Kind: "DockerImage",
 			Name: from,
 		},
-		ImportPolicy: imageapi.TagImportPolicy{Insecure: insecure},
+		ImportPolicy:    imageapi.TagImportPolicy{Insecure: insecure},
+		ReferencePolicy: o.getReferencePolicy(),
 	}
 
 	return isi
@@ -496,8 +518,9 @@ func (o *ImportImageOptions) newImageStreamImportTags(stream *imageapi.ImageStre
 				Kind: "DockerImage",
 				Name: from,
 			},
-			To:           &kapi.LocalObjectReference{Name: tag},
-			ImportPolicy: imageapi.TagImportPolicy{Insecure: insecure},
+			To:              &kapi.LocalObjectReference{Name: tag},
+			ImportPolicy:    imageapi.TagImportPolicy{Insecure: insecure},
+			ReferencePolicy: o.getReferencePolicy(),
 		})
 	}
 	return isi

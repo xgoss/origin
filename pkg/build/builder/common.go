@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/client/retry"
-	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 
 	"github.com/docker/distribution/reference"
 	"github.com/fsouza/go-dockerclient"
@@ -24,8 +24,6 @@ import (
 var glog = utilglog.ToFile(os.Stderr, 2)
 
 const (
-	OriginalSourceURLAnnotationKey = "openshift.io/original-source-url"
-
 	// containerNamePrefix prefixes the name of containers launched by a build.
 	// We cannot reuse the prefix "k8s" because we don't want the containers to
 	// be managed by a kubelet.
@@ -41,6 +39,7 @@ type KeyValue struct {
 // GitClient performs git operations
 type GitClient interface {
 	CloneWithOptions(dir string, url string, args ...string) error
+	Fetch(dir string, url string, ref string) error
 	Checkout(dir string, ref string) error
 	SubmoduleUpdate(dir string, init, recursive bool) error
 	TimedListRemote(timeout time.Duration, url string, args ...string) (string, string, error)
@@ -55,11 +54,7 @@ func buildInfo(build *api.Build, sourceInfo *git.SourceInfo) []KeyValue {
 		{"OPENSHIFT_BUILD_NAMESPACE", build.Namespace},
 	}
 	if build.Spec.Source.Git != nil {
-		sourceURL := build.Spec.Source.Git.URI
-		if originalURL, ok := build.Annotations[OriginalSourceURLAnnotationKey]; ok {
-			sourceURL = originalURL
-		}
-		kv = append(kv, KeyValue{"OPENSHIFT_BUILD_SOURCE", sourceURL})
+		kv = append(kv, KeyValue{"OPENSHIFT_BUILD_SOURCE", build.Spec.Source.Git.URI})
 		if build.Spec.Source.Git.Ref != "" {
 			kv = append(kv, KeyValue{"OPENSHIFT_BUILD_REFERENCE", build.Spec.Source.Git.Ref})
 		}
@@ -150,11 +145,11 @@ func execPostCommitHook(client DockerClient, postCommitSpec api.BuildPostCommitS
 			Memory:     limits.MemoryLimitBytes,
 			MemorySwap: limits.MemorySwap,
 		},
-	}, docker.LogsOptions{
+	}, docker.AttachToContainerOptions{
 		// Stream logs to stdout and stderr.
 		OutputStream: os.Stdout,
 		ErrorStream:  os.Stderr,
-		Follow:       true,
+		Stream:       true,
 		Stdout:       true,
 		Stderr:       true,
 	})
@@ -183,7 +178,7 @@ func updateBuildRevision(build *api.Build, sourceInfo *git.SourceInfo) *api.Sour
 func retryBuildStatusUpdate(build *api.Build, client client.BuildInterface, sourceRev *api.SourceRevision) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		// before updating, make sure we are using the latest version of the build
-		latestBuild, err := client.Get(build.Name)
+		latestBuild, err := client.Get(build.Name, metav1.GetOptions{})
 		if err != nil {
 			// usually this means we failed to get resources due to the missing
 			// privilleges
@@ -197,6 +192,7 @@ func retryBuildStatusUpdate(build *api.Build, client client.BuildInterface, sour
 		latestBuild.Status.Reason = build.Status.Reason
 		latestBuild.Status.Message = build.Status.Message
 		latestBuild.Status.Output.To = build.Status.Output.To
+		latestBuild.Status.Stages = build.Status.Stages
 
 		if _, err := client.UpdateDetails(latestBuild); err != nil {
 			return err
@@ -207,6 +203,6 @@ func retryBuildStatusUpdate(build *api.Build, client client.BuildInterface, sour
 
 func handleBuildStatusUpdate(build *api.Build, client client.BuildInterface, sourceRev *api.SourceRevision) {
 	if updateErr := retryBuildStatusUpdate(build, client, sourceRev); updateErr != nil {
-		utilruntime.HandleError(fmt.Errorf("error occurred while updating the build status: %v", updateErr))
+		glog.Infof("error: Unable to update build status: %v", updateErr)
 	}
 }

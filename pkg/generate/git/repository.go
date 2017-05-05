@@ -29,7 +29,7 @@ type Repository interface {
 	CloneWithOptions(dir string, url string, args ...string) error
 	CloneBare(dir string, url string) error
 	CloneMirror(dir string, url string) error
-	Fetch(dir string) error
+	Fetch(dir string, url string, ref string) error
 	Checkout(dir string, ref string) error
 	SubmoduleUpdate(dir string, init, recursive bool) error
 	Archive(dir, ref, format string, w io.Writer) error
@@ -257,8 +257,8 @@ func (r *repository) TimedListRemote(timeout time.Duration, url string, args ...
 }
 
 // Fetch updates the provided git repository
-func (r *repository) Fetch(location string) error {
-	_, _, err := r.git(location, "fetch", "--all")
+func (r *repository) Fetch(location, uri, ref string) error {
+	_, _, err := r.git(location, "fetch", uri, ref)
 	return err
 }
 
@@ -364,7 +364,7 @@ func command(name, dir string, env []string, args ...string) (stdout, stderr str
 func timedCommand(timeout time.Duration, name, dir string, env []string, args ...string) (stdout, stderr string, err error) {
 	var stdoutBuffer, stderrBuffer bytes.Buffer
 
-	glog.V(4).Infof("Executing %s %s %s", strings.Join(env, " "), name, strings.Join(args, " "))
+	glog.V(4).Infof("Executing %s %s", name, strings.Join(args, " "))
 
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir

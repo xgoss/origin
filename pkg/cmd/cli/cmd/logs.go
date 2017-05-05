@@ -7,12 +7,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/meta"
 	kcmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/runtime"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	"github.com/openshift/origin/pkg/cmd/templates"
@@ -119,10 +119,10 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 
 	version := kcmdutil.GetFlagInt64(cmd, "version")
 	_, resource := meta.KindToResource(infos[0].Mapping.GroupVersionKind)
-
+	gr := resource.GroupResource()
 	// TODO: podLogOptions should be included in our own logOptions objects.
-	switch resource.GroupResource() {
-	case buildapi.Resource("build"), buildapi.Resource("buildconfig"):
+	switch {
+	case buildapi.IsResourceOrLegacy("build", gr), buildapi.IsResourceOrLegacy("buildconfig", gr):
 		bopts := &buildapi.BuildLogOptions{
 			Follow:       podLogOptions.Follow,
 			Previous:     podLogOptions.Previous,
@@ -136,7 +136,8 @@ func (o *OpenShiftLogsOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command
 			bopts.Version = &version
 		}
 		o.Options = bopts
-	case deployapi.Resource("deploymentconfig"):
+
+	case deployapi.IsResourceOrLegacy("deploymentconfig", gr):
 		dopts := &deployapi.DeploymentLogOptions{
 			Follow:       podLogOptions.Follow,
 			Previous:     podLogOptions.Previous,
@@ -188,6 +189,5 @@ func (o OpenShiftLogsOptions) RunLog() error {
 		// Use our own options object.
 		o.KubeLogOptions.Options = o.Options
 	}
-	_, err := o.KubeLogOptions.RunLogs()
-	return err
+	return o.KubeLogOptions.RunLogs()
 }

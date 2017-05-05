@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kapi "k8s.io/kubernetes/pkg/api/v1"
 )
 
@@ -13,9 +13,9 @@ import (
 // Build encapsulates the inputs needed to produce a new deployable image, as well as
 // the status of the execution and a reference to the Pod which executed the build.
 type Build struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// Standard object's metadata.
-	kapi.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// spec is all the inputs used to execute the build.
 	Spec BuildSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
@@ -103,6 +103,14 @@ type BuildTriggerCause struct {
 	// imageChangeBuild stores information about an imagechange event
 	// that triggered a new build.
 	ImageChangeBuild *ImageChangeCause `json:"imageChangeBuild,omitempty" protobuf:"bytes,4,opt,name=imageChangeBuild"`
+
+	// GitLabWebHook represents data for a GitLab webhook that fired a specific
+	// build.
+	GitLabWebHook *GitLabWebHookCause `json:"gitlabWebHook,omitempty" protobuf:"bytes,5,opt,name=gitlabWebHook"`
+
+	// BitbucketWebHook represents data for a Bitbucket webhook that fired a
+	// specific build.
+	BitbucketWebHook *BitbucketWebHookCause `json:"bitbucketWebHook,omitempty" protobuf:"bytes,6,opt,name=bitbucketWebHook"`
 }
 
 // GenericWebHookCause holds information about a generic WebHook that
@@ -126,6 +134,29 @@ type GitHubWebHookCause struct {
 	Secret string `json:"secret,omitempty" protobuf:"bytes,2,opt,name=secret"`
 }
 
+// CommonWebHookCause factors out the identical format of these webhook
+// causes into struct so we can share it in the specific causes;  it is too late for
+// GitHub and Generic but we can leverage this pattern with GitLab and Bitbucket.
+type CommonWebHookCause struct {
+	// Revision is the git source revision information of the trigger.
+	Revision *SourceRevision `json:"revision,omitempty" protobuf:"bytes,1,opt,name=revision"`
+
+	// Secret is the obfuscated webhook secret that triggered a build.
+	Secret string `json:"secret,omitempty" protobuf:"bytes,2,opt,name=secret"`
+}
+
+// GitLabWebHookCause has information about a GitLab webhook that triggered a
+// build.
+type GitLabWebHookCause struct {
+	CommonWebHookCause `json:",inline" protobuf:"bytes,1,opt,name=commonSpec"`
+}
+
+// BitbucketWebHookCause has information about a Bitbucket webhook that triggered a
+// build.
+type BitbucketWebHookCause struct {
+	CommonWebHookCause `json:",inline" protobuf:"bytes,1,opt,name=commonSpec"`
+}
+
 // ImageChangeCause contains information about the image that triggered a
 // build
 type ImageChangeCause struct {
@@ -139,7 +170,8 @@ type ImageChangeCause struct {
 
 // BuildStatus contains the status of a build
 type BuildStatus struct {
-	// phase is the point in the build lifecycle.
+	// phase is the point in the build lifecycle. Possible values are
+	// "New", "Pending", "Running", "Complete", "Failed", "Error", and "Cancelled".
 	Phase BuildPhase `json:"phase" protobuf:"bytes,1,opt,name=phase,casttype=BuildPhase"`
 
 	// cancelled describes if a cancel event was triggered for the build.
@@ -154,13 +186,13 @@ type BuildStatus struct {
 	// startTimestamp is a timestamp representing the server time when this Build started
 	// running in a Pod.
 	// It is represented in RFC3339 form and is in UTC.
-	StartTimestamp *unversioned.Time `json:"startTimestamp,omitempty" protobuf:"bytes,5,opt,name=startTimestamp"`
+	StartTimestamp *metav1.Time `json:"startTimestamp,omitempty" protobuf:"bytes,5,opt,name=startTimestamp"`
 
 	// completionTimestamp is a timestamp representing the server time when this Build was
 	// finished, whether that build failed or succeeded.  It reflects the time at which
 	// the Pod running the Build terminated.
 	// It is represented in RFC3339 form and is in UTC.
-	CompletionTimestamp *unversioned.Time `json:"completionTimestamp,omitempty" protobuf:"bytes,6,opt,name=completionTimestamp"`
+	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty" protobuf:"bytes,6,opt,name=completionTimestamp"`
 
 	// duration contains time.Duration object describing build time.
 	Duration time.Duration `json:"duration,omitempty" protobuf:"varint,7,opt,name=duration,casttype=time.Duration"`
@@ -176,7 +208,95 @@ type BuildStatus struct {
 
 	// output describes the Docker image the build has produced.
 	Output BuildStatusOutput `json:"output,omitempty" protobuf:"bytes,10,opt,name=output"`
+
+	// stages contains details about each stage that occurs during the build
+	// including start time, duration (in milliseconds), and the steps that
+	// occured within each stage.
+	Stages []StageInfo `json:"stages,omitempty" protobuf:"bytes,11,opt,name=stages"`
 }
+
+// StageInfo contains details about a build stage.
+type StageInfo struct {
+	// name is a unique identifier for each build stage that occurs.
+	Name StageName `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
+
+	// startTime is a timestamp representing the server time when this Stage started.
+	// It is represented in RFC3339 form and is in UTC.
+	StartTime metav1.Time `json:"startTime,omitempty" protobuf:"bytes,2,opt,name=startTime"`
+
+	// durationMilliseconds identifies how long the stage took
+	// to complete in milliseconds.
+	// Note: the duration of a stage can exceed the sum of the duration of the steps within
+	// the stage as not all actions are accounted for in explicit build steps.
+	DurationMilliseconds int64 `json:"durationMilliseconds,omitempty" protobuf:"varint,3,opt,name=durationMilliseconds"`
+
+	// steps contains details about each step that occurs during a build stage
+	// including start time and duration in milliseconds.
+	Steps []StepInfo `json:"steps,omitempty" protobuf:"bytes,4,opt,name=steps"`
+}
+
+// StageName is the unique identifier for each build stage.
+type StageName string
+
+// Valid values for StageName
+const (
+	// StageFetchInputs fetches any inputs such as source code.
+	StageFetchInputs StageName = "FetchInputs"
+
+	// StagePullImages pulls any images that are needed such as
+	// base images or input images.
+	StagePullImages StageName = "PullImages"
+
+	// StageBuild performs the steps necessary to build the image.
+	StageBuild StageName = "Build"
+
+	// StagePostCommit executes any post commit steps.
+	StagePostCommit StageName = "PostCommit"
+
+	// StagePushImage pushes the image to the node.
+	StagePushImage StageName = "PushImage"
+)
+
+// StepInfo contains details about a build step.
+type StepInfo struct {
+	// name is a unique identifier for each build step.
+	Name StepName `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
+
+	// startTime is a timestamp representing the server time when this Step started.
+	// it is represented in RFC3339 form and is in UTC.
+	StartTime metav1.Time `json:"startTime,omitempty" protobuf:"bytes,2,opt,name=startTime"`
+
+	// durationMilliseconds identifies how long the step took
+	// to complete in milliseconds.
+	DurationMilliseconds int64 `json:"durationMilliseconds,omitempty" protobuf:"varint,3,opt,name=durationMilliseconds"`
+}
+
+// StepName is a unique identifier for each build step.
+type StepName string
+
+// Valid values for StepName
+const (
+	// StepExecPostCommitHook executes the buildconfigs post commit hook.
+	StepExecPostCommitHook StepName = "RunPostCommitHook"
+
+	// StepFetchGitSource fetches source code for the build.
+	StepFetchGitSource StepName = "FetchGitSource"
+
+	// StepPullBaseImage pulls a base image for the build.
+	StepPullBaseImage StepName = "PullBaseImage"
+
+	// StepPullInputImage pulls an input image for the build.
+	StepPullInputImage StepName = "PullInputImage"
+
+	// StepPushImage pushes an image to the registry.
+	StepPushImage StepName = "PushImage"
+
+	// StepPushDockerImage pushes a docker image to the registry.
+	StepPushDockerImage StepName = "PushDockerImage"
+
+	//StepDockerBuild performs the docker build
+	StepDockerBuild StepName = "DockerBuild"
+)
 
 // BuildPhase represents the status of a build at a point in time.
 type BuildPhase string
@@ -313,7 +433,9 @@ type ImageSource struct {
 // ImageSourcePath describes a path to be copied from a source image and its destination within the build directory.
 type ImageSourcePath struct {
 	// sourcePath is the absolute path of the file or directory inside the image to
-	// copy to the build directory.
+	// copy to the build directory.  If the source path ends in /. then the content of
+	// the directory will be copied, but the directory itself will not be created at the
+	// destination.
 	SourcePath string `json:"sourcePath" protobuf:"bytes,1,opt,name=sourcePath"`
 
 	// destinationDir is the relative directory within the build directory
@@ -461,7 +583,8 @@ type CustomBuildStrategy struct {
 	// registries
 	PullSecret *kapi.LocalObjectReference `json:"pullSecret,omitempty" protobuf:"bytes,2,opt,name=pullSecret"`
 
-	// env contains additional environment variables you want to pass into a builder container
+	// env contains additional environment variables you want to pass into a builder container.
+	// ValueFrom is not supported.
 	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,3,rep,name=env"`
 
 	// exposeDockerSocket will allow running Docker commands (and build Docker images) from
@@ -480,6 +603,27 @@ type CustomBuildStrategy struct {
 	BuildAPIVersion string `json:"buildAPIVersion,omitempty" protobuf:"bytes,7,opt,name=buildAPIVersion"`
 }
 
+// ImageOptimizationPolicy describes what optimizations the builder can perform when building images.
+type ImageOptimizationPolicy string
+
+const (
+	// ImageOptimizationNone will generate a canonical Docker image as produced by the
+	// `docker build` command.
+	ImageOptimizationNone ImageOptimizationPolicy = "None"
+
+	// ImageOptimizationSkipLayers is an experimental policy and will avoid creating
+	// unique layers for each dockerfile line, resulting in smaller images and saving time
+	// during creation. Some Dockerfile syntax is not fully supported - content added to
+	// a VOLUME by an earlier layer may have incorrect uid, gid, and filesystem permissions.
+	// If an unsupported setting is detected, the build will fail.
+	ImageOptimizationSkipLayers ImageOptimizationPolicy = "SkipLayers"
+
+	// ImageOptimizationSkipLayersAndWarn is the same as SkipLayers, but will only
+	// warn to the build output instead of failing when unsupported syntax is detected. This
+	// policy is experimental.
+	ImageOptimizationSkipLayersAndWarn ImageOptimizationPolicy = "SkipLayersAndWarn"
+)
+
 // DockerBuildStrategy defines input parameters specific to Docker build.
 type DockerBuildStrategy struct {
 	// from is reference to an DockerImage, ImageStreamTag, or ImageStreamImage from which
@@ -496,7 +640,8 @@ type DockerBuildStrategy struct {
 	// --no-cache=true flag
 	NoCache bool `json:"noCache,omitempty" protobuf:"varint,3,opt,name=noCache"`
 
-	// env contains additional environment variables you want to pass into a builder container
+	// env contains additional environment variables you want to pass into a builder container.
+	// ValueFrom is not supported.
 	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,4,rep,name=env"`
 
 	// forcePull describes if the builder should pull the images from registry prior to building.
@@ -505,6 +650,19 @@ type DockerBuildStrategy struct {
 	// dockerfilePath is the path of the Dockerfile that will be used to build the Docker image,
 	// relative to the root of the context (contextDir).
 	DockerfilePath string `json:"dockerfilePath,omitempty" protobuf:"bytes,6,opt,name=dockerfilePath"`
+
+	// buildArgs contains build arguments that will be resolved in the Dockerfile.  See
+	// https://docs.docker.com/engine/reference/builder/#/arg for more details.
+	BuildArgs []kapi.EnvVar `json:"buildArgs,omitempty" protobuf:"bytes,7,rep,name=buildArgs"`
+
+	// imageOptimizationPolicy describes what optimizations the system can use when building images
+	// to reduce the final size or time spent building the image. The default policy is 'None' which
+	// means the final build image will be equivalent to an image created by the Docker build API.
+	// The experimental policy 'SkipLayers' will avoid commiting new layers in between each
+	// image step, and will fail if the Dockerfile cannot provide compatibility with the 'None'
+	// policy. An additional experimental policy 'SkipLayersAndWarn' is the same as
+	// 'SkipLayers' but simply warns if compatibility cannot be preserved.
+	ImageOptimizationPolicy *ImageOptimizationPolicy `json:"imageOptimizationPolicy,omitempty" protobuf:"bytes,8,opt,name=imageOptimizationPolicy,casttype=ImageOptimizationPolicy"`
 }
 
 // SourceBuildStrategy defines input parameters specific to an Source build.
@@ -518,7 +676,8 @@ type SourceBuildStrategy struct {
 	// registries
 	PullSecret *kapi.LocalObjectReference `json:"pullSecret,omitempty" protobuf:"bytes,2,opt,name=pullSecret"`
 
-	// env contains additional environment variables you want to pass into a builder container
+	// env contains additional environment variables you want to pass into a builder container.
+	// ValueFrom is not supported.
 	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,3,rep,name=env"`
 
 	// scripts is the location of Source scripts
@@ -534,14 +693,16 @@ type SourceBuildStrategy struct {
 	// without unneeded dependencies installed. The building of the application
 	// is still done in the builder image but, post build, you can copy the
 	// needed artifacts in the runtime image for use.
-	// This field and the feature it enables are in tech preview.
+	// Deprecated: This feature will be removed in a future release. Use ImageSource
+	// to copy binary artifacts created from one build into a separate runtime image.
 	RuntimeImage *kapi.ObjectReference `json:"runtimeImage,omitempty" protobuf:"bytes,7,opt,name=runtimeImage"`
 
 	// runtimeArtifacts specifies a list of source/destination pairs that will be
 	// copied from the builder to the runtime image. sourcePath can be a file or
 	// directory. destinationDir must be a directory. destinationDir can also be
 	// empty or equal to ".", in this case it just refers to the root of WORKDIR.
-	// This field and the feature it enables are in tech preview.
+	// Deprecated: This feature will be removed in a future release. Use ImageSource
+	// to copy binary artifacts created from one build into a separate runtime image.
 	RuntimeArtifacts []ImageSourcePath `json:"runtimeArtifacts,omitempty" protobuf:"bytes,8,rep,name=runtimeArtifacts"`
 }
 
@@ -555,6 +716,10 @@ type JenkinsPipelineBuildStrategy struct {
 
 	// Jenkinsfile defines the optional raw contents of a Jenkinsfile which defines a Jenkins pipeline build.
 	Jenkinsfile string `json:"jenkinsfile,omitempty" protobuf:"bytes,2,opt,name=jenkinsfile"`
+
+	// env contains additional environment variables you want to pass into a build pipeline.
+	// ValueFrom is not supported.
+	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,3,rep,name=env"`
 }
 
 // A BuildPostCommitSpec holds a build post commit hook specification. The hook
@@ -678,9 +843,9 @@ type ImageLabel struct {
 //
 // Each build created by a build configuration is numbered and refers back to its parent configuration. Multiple builds can be triggered at once. Builds that do not have "output" set can be used to test code or run a verification build.
 type BuildConfig struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// metadata for BuildConfig.
-	kapi.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// spec holds all the input necessary to produce a new build, and the conditions when
 	// to trigger them.
@@ -767,6 +932,13 @@ type BuildTriggerPolicy struct {
 
 	// imageChange contains parameters for an ImageChange type of trigger
 	ImageChange *ImageChangeTrigger `json:"imageChange,omitempty" protobuf:"bytes,4,opt,name=imageChange"`
+
+	// GitLabWebHook contains the parameters for a GitLab webhook type of trigger
+	GitLabWebHook *WebHookTrigger `json:"gitlab,omitempty" protobuf:"bytes,5,opt,name=gitlab"`
+
+	// BitbucketWebHook contains the parameters for a Bitbucket webhook type of
+	// trigger
+	BitbucketWebHook *WebHookTrigger `json:"bitbucket,omitempty" protobuf:"bytes,6,opt,name=bitbucket"`
 }
 
 // BuildTriggerType refers to a specific BuildTriggerPolicy implementation.
@@ -783,6 +955,14 @@ const (
 	GenericWebHookBuildTriggerType           BuildTriggerType = "Generic"
 	GenericWebHookBuildTriggerTypeDeprecated BuildTriggerType = "generic"
 
+	// GitLabWebHookBuildTriggerType represents a trigger that launches builds on
+	// GitLab webhook invocations
+	GitLabWebHookBuildTriggerType BuildTriggerType = "GitLab"
+
+	// BitbucketWebHookBuildTriggerType represents a trigger that launches builds on
+	// Bitbucket webhook invocations
+	BitbucketWebHookBuildTriggerType BuildTriggerType = "Bitbucket"
+
 	// ImageChangeBuildTriggerType represents a trigger that launches builds on
 	// availability of a new version of an image
 	ImageChangeBuildTriggerType           BuildTriggerType = "ImageChange"
@@ -795,9 +975,9 @@ const (
 
 // BuildList is a collection of Builds.
 type BuildList struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// metadata for BuildList.
-	unversioned.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// items is a list of builds
 	Items []Build `json:"items" protobuf:"bytes,2,rep,name=items"`
@@ -805,9 +985,9 @@ type BuildList struct {
 
 // BuildConfigList is a collection of BuildConfigs.
 type BuildConfigList struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// metadata for BuildConfigList.
-	unversioned.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// items is a list of build configs
 	Items []BuildConfig `json:"items" protobuf:"bytes,2,rep,name=items"`
@@ -822,8 +1002,12 @@ type GenericWebHookEvent struct {
 	// git is the git information if the Type is BuildSourceGit
 	Git *GitInfo `json:"git,omitempty" protobuf:"bytes,2,opt,name=git"`
 
-	// env contains additional environment variables you want to pass into a builder container
+	// env contains additional environment variables you want to pass into a builder container.
+	// ValueFrom is not supported.
 	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,3,rep,name=env"`
+
+	// DockerStrategyOptions contains additional docker-strategy specific options for the build
+	DockerStrategyOptions *DockerStrategyOptions `json:"dockerStrategyOptions,omitempty" protobuf:"bytes,4,opt,name=dockerStrategyOptions"`
 }
 
 // GitInfo is the aggregated git information for a generic webhook post
@@ -834,14 +1018,21 @@ type GitInfo struct {
 
 // BuildLog is the (unused) resource associated with the build log redirector
 type BuildLog struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+}
+
+// DockerStrategyOptions contains extra strategy options for Docker builds
+type DockerStrategyOptions struct {
+	// Args contains any build arguments that are to be passed to Docker.  See
+	// https://docs.docker.com/engine/reference/builder/#/arg for more details
+	BuildArgs []kapi.EnvVar `json:"buildArgs,omitempty" protobuf:"bytes,1,rep,name=buildArgs"`
 }
 
 // BuildRequest is the resource used to pass parameters to build generator
 type BuildRequest struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// metadata for BuildRequest.
-	kapi.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// revision is the information from the source for a specific repo snapshot.
 	Revision *SourceRevision `json:"revision,omitempty" protobuf:"bytes,2,opt,name=revision"`
@@ -860,19 +1051,23 @@ type BuildRequest struct {
 	// not be generated.
 	LastVersion *int64 `json:"lastVersion,omitempty" protobuf:"varint,6,opt,name=lastVersion"`
 
-	// env contains additional environment variables you want to pass into a builder container
+	// env contains additional environment variables you want to pass into a builder container.
+	// ValueFrom is not supported.
 	Env []kapi.EnvVar `json:"env,omitempty" protobuf:"bytes,7,rep,name=env"`
 
 	// triggeredBy describes which triggers started the most recent update to the
 	// build configuration and contains information about those triggers.
 	TriggeredBy []BuildTriggerCause `json:"triggeredBy" protobuf:"bytes,8,rep,name=triggeredBy"`
+
+	// DockerStrategyOptions contains additional docker-strategy specific options for the build
+	DockerStrategyOptions *DockerStrategyOptions `json:"dockerStrategyOptions,omitempty" protobuf:"bytes,9,opt,name=dockerStrategyOptions"`
 }
 
 // BinaryBuildRequestOptions are the options required to fully speficy a binary build request
 type BinaryBuildRequestOptions struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 	// metadata for BinaryBuildRequestOptions.
-	kapi.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// asFile determines if the binary should be created as a file within the source rather than extracted as an archive
 	AsFile string `json:"asFile,omitempty" protobuf:"bytes,2,opt,name=asFile"`
@@ -900,7 +1095,7 @@ type BinaryBuildRequestOptions struct {
 
 // BuildLogOptions is the REST options for a build log
 type BuildLogOptions struct {
-	unversioned.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
 
 	// cointainer for which to stream logs. Defaults to only container if there is one container in the pod.
 	Container string `json:"container,omitempty" protobuf:"bytes,1,opt,name=container"`
@@ -918,7 +1113,7 @@ type BuildLogOptions struct {
 	// precedes the time a pod was started, only logs since the pod start will be returned.
 	// If this value is in the future, no logs will be returned.
 	// Only one of sinceSeconds or sinceTime may be specified.
-	SinceTime *unversioned.Time `json:"sinceTime,omitempty" protobuf:"bytes,5,opt,name=sinceTime"`
+	SinceTime *metav1.Time `json:"sinceTime,omitempty" protobuf:"bytes,5,opt,name=sinceTime"`
 	// timestamps, If true, add an RFC3339 or RFC3339Nano timestamp at the beginning of every line
 	// of log output. Defaults to false.
 	Timestamps bool `json:"timestamps,omitempty" protobuf:"varint,6,opt,name=timestamps"`

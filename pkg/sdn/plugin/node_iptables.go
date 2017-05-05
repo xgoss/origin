@@ -7,10 +7,10 @@ import (
 
 	"github.com/golang/glog"
 
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	utildbus "k8s.io/kubernetes/pkg/util/dbus"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/iptables"
-	utilwait "k8s.io/kubernetes/pkg/util/wait"
 )
 
 type FirewallRule struct {
@@ -82,11 +82,13 @@ func (n *NodeIPTables) syncIPTableRules() error {
 	for _, rule := range rules {
 		_, err := n.ipt.EnsureRule(iptables.Prepend, iptables.Table(rule.table), iptables.Chain(rule.chain), rule.args...)
 		if err != nil {
-			return fmt.Errorf("Failed to ensure rule %v exists: %v", rule, err)
+			return fmt.Errorf("failed to ensure rule %v exists: %v", rule, err)
 		}
 	}
 	return nil
 }
+
+const VXLAN_PORT = "4789"
 
 // Get openshift iptables rules
 func (n *NodeIPTables) getStaticNodeIPTablesRules() []FirewallRule {

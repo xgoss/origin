@@ -10,17 +10,22 @@ import (
 
 	"github.com/golang/glog"
 
+	kapierrs "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	ktypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kapierrs "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/client/cache"
-	"k8s.io/kubernetes/pkg/labels"
-	ktypes "k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util/intstr"
-	utilwait "k8s.io/kubernetes/pkg/util/wait"
 
 	osapi "github.com/openshift/origin/pkg/sdn/api"
+)
+
+const (
+	// randomly-selected conntrack zone ID; FIXME, make this configurable
+	networkPolicyConntrackZone = 13877
 )
 
 type networkPolicyPlugin struct {
@@ -73,10 +78,10 @@ func (np *networkPolicyPlugin) Start(node *OsdnNode) error {
 		return err
 	}
 
-	otx := node.ovs.NewTransaction()
+	otx := node.oc.NewTransaction()
 	otx.AddFlow("table=21, priority=200, ip, nw_dst=%s, actions=goto_table:30", np.node.networkInfo.ServiceNetwork.String())
-	otx.AddFlow("table=21, priority=100, ip, actions=ct(commit,table=30)")
-	otx.AddFlow("table=80, priority=50, ip, actions=ct(commit,table=81)")
+	otx.AddFlow("table=21, priority=100, ip, actions=ct(zone=%d,commit,table=30)", networkPolicyConntrackZone)
+	otx.AddFlow("table=80, priority=50, ip, actions=ct(zone=%d,commit,table=81)", networkPolicyConntrackZone)
 	otx.AddFlow("table=81, priority=100, ip, ct_state=+trk+est, actions=output:NXM_NX_REG2[]")
 	otx.AddFlow("table=81, priority=0, actions=drop")
 	if err := otx.EndTransaction(); err != nil {
@@ -99,14 +104,14 @@ func (np *networkPolicyPlugin) initNamespaces() error {
 	np.lock.Lock()
 	defer np.lock.Unlock()
 
-	namespaces, err := np.node.kClient.Namespaces().List(kapi.ListOptions{})
+	namespaces, err := np.node.kClient.Core().Namespaces().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	for _, ns := range namespaces.Items {
 		np.kNamespaces[ns.Name] = ns
 
-		if vnid, err := np.vnids.GetVNID(ns.Name); err == nil {
+		if vnid, err := np.vnids.WaitAndGetVNID(ns.Name); err == nil {
 			np.namespaces[vnid] = &npNamespace{
 				name:     ns.Name,
 				vnid:     vnid,
@@ -117,7 +122,7 @@ func (np *networkPolicyPlugin) initNamespaces() error {
 		}
 	}
 
-	policies, err := np.node.kClient.Extensions().NetworkPolicies(kapi.NamespaceAll).List(kapi.ListOptions{})
+	policies, err := np.node.kClient.Extensions().NetworkPolicies(kapi.NamespaceAll).List(metav1.ListOptions{})
 	if err != nil {
 		if kapierrs.IsForbidden(err) {
 			glog.Errorf("Unable to query NetworkPolicies (%v) - please ensure your nodes have access to view NetworkPolicy (eg, 'oadm policy reconcile-cluster-roles')", err)
@@ -125,7 +130,7 @@ func (np *networkPolicyPlugin) initNamespaces() error {
 		return err
 	}
 	for _, policy := range policies.Items {
-		vnid, err := np.vnids.GetVNID(policy.Namespace)
+		vnid, err := np.vnids.WaitAndGetVNID(policy.Namespace)
 		if err != nil {
 			continue
 		}
@@ -193,7 +198,7 @@ func (np *networkPolicyPlugin) syncNamespace(npns *npNamespace) {
 	}
 
 	glog.V(5).Infof("syncNamespace %d", npns.vnid)
-	otx := np.node.ovs.NewTransaction()
+	otx := np.node.oc.NewTransaction()
 	otx.DeleteFlows("table=80, reg1=%d", npns.vnid)
 	if inUse {
 		if npns.isolated {
@@ -247,7 +252,7 @@ func (np *networkPolicyPlugin) UnrefVNID(vnid uint32) {
 // because it's possible another thread will already have cancelled the watch
 // (and changed the npns fields) before this function runs.
 func (np *networkPolicyPlugin) watchPods(npns *npNamespace, pods map[ktypes.UID]kapi.Pod, stopPodWatch chan struct{}) {
-	RunNamespacedPodEventQueue(np.node.kClient.CoreClient.RESTClient(), npns.name, stopPodWatch, func(delta cache.Delta) error {
+	RunNamespacedPodEventQueue(np.node.kClient.Core().RESTClient(), npns.name, stopPodWatch, func(delta cache.Delta) error {
 		pod := delta.Object.(*kapi.Pod)
 		glog.V(5).Infof("Watch %s event for Pod %s/%s", delta.Type, pod.Namespace, pod.Name)
 
@@ -328,9 +333,9 @@ func (np *networkPolicyPlugin) updatePodWatch(npns *npNamespace) {
 	}
 }
 
-func (np *networkPolicyPlugin) selectNamespaces(lsel *unversioned.LabelSelector) []uint32 {
+func (np *networkPolicyPlugin) selectNamespaces(lsel *metav1.LabelSelector) []uint32 {
 	vnids := []uint32{}
-	sel, err := unversioned.LabelSelectorAsSelector(lsel)
+	sel, err := metav1.LabelSelectorAsSelector(lsel)
 	if err != nil {
 		// Shouldn't happen
 		glog.Errorf("ValidateNetworkPolicy() failure! Invalid NamespaceSelector: %v", err)
@@ -346,9 +351,9 @@ func (np *networkPolicyPlugin) selectNamespaces(lsel *unversioned.LabelSelector)
 	return vnids
 }
 
-func (np *networkPolicyPlugin) selectPods(npns *npNamespace, lsel *unversioned.LabelSelector) []string {
+func (np *networkPolicyPlugin) selectPods(npns *npNamespace, lsel *metav1.LabelSelector) []string {
 	ips := []string{}
-	sel, err := unversioned.LabelSelectorAsSelector(lsel)
+	sel, err := metav1.LabelSelectorAsSelector(lsel)
 	if err != nil {
 		// Shouldn't happen
 		glog.Errorf("ValidateNetworkPolicy() failure! Invalid PodSelector: %v", err)
@@ -464,7 +469,7 @@ func (np *networkPolicyPlugin) updateNetworkPolicy(npns *npNamespace, policy *ex
 }
 
 func (np *networkPolicyPlugin) watchNetworkPolicies() {
-	RunEventQueue(np.node.kClient.ExtensionsClient.RESTClient(), NetworkPolicies, func(delta cache.Delta) error {
+	RunEventQueue(np.node.kClient.Extensions().RESTClient(), NetworkPolicies, func(delta cache.Delta) error {
 		policy := delta.Object.(*extensions.NetworkPolicy)
 
 		glog.V(5).Infof("Watch %s event for NetworkPolicy %s/%s", delta.Type, policy.Namespace, policy.Name)
@@ -531,7 +536,7 @@ func namespaceIsIsolated(ns *kapi.Namespace) bool {
 }
 
 func (np *networkPolicyPlugin) watchNamespaces() {
-	RunEventQueue(np.node.kClient.CoreClient.RESTClient(), Namespaces, func(delta cache.Delta) error {
+	RunEventQueue(np.node.kClient.Core().RESTClient(), Namespaces, func(delta cache.Delta) error {
 		ns := delta.Object.(*kapi.Namespace)
 
 		glog.V(5).Infof("Watch %s event for Namespace %q", delta.Type, ns.Name)

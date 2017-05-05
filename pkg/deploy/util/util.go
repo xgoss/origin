@@ -8,53 +8,27 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	kdeplutil "k8s.io/kubernetes/pkg/controller/deployment/util"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/watch"
 
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	"github.com/openshift/origin/pkg/util/namer"
 )
 
-const (
-	// Reasons for deployment config conditions:
-	//
-	// ReplicationControllerUpdatedReason is added in a deployment config when one of its replication
-	// controllers is updated as part of the rollout process.
-	ReplicationControllerUpdatedReason = "ReplicationControllerUpdated"
-	// FailedRcCreateReason is added in a deployment config when it cannot create a new replication
-	// controller.
-	FailedRcCreateReason = "ReplicationControllerCreateError"
-	// NewReplicationControllerReason is added in a deployment config when it creates a new replication
-	// controller.
-	NewReplicationControllerReason = "NewReplicationControllerCreated"
-	// NewRcAvailableReason is added in a deployment config when its newest replication controller is made
-	// available ie. the number of new pods that have passed readiness checks and run for at least
-	// minReadySeconds is at least the minimum available pods that need to run for the deployment config.
-	NewRcAvailableReason = "NewReplicationControllerAvailable"
-	// TimedOutReason is added in a deployment config when its newest replication controller fails to show
-	// any progress within the given deadline (progressDeadlineSeconds).
-	TimedOutReason = "ProgressDeadlineExceeded"
-	// PausedDeployReason is added in a deployment config when it is paused. Lack of progress shouldn't be
-	// estimated once a deployment config is paused.
-	PausedDeployReason = "DeploymentConfigPaused"
-	// ResumedDeployReason is added in a deployment config when it is resumed. Useful for not failing accidentally
-	// deployment configs that paused amidst a rollout.
-	ResumedDeployReason = "DeploymentConfigResumed"
-)
-
 // NewDeploymentCondition creates a new deployment condition.
-func NewDeploymentCondition(condType deployapi.DeploymentConditionType, status api.ConditionStatus, reason, message string) *deployapi.DeploymentCondition {
+func NewDeploymentCondition(condType deployapi.DeploymentConditionType, status api.ConditionStatus, reason deployapi.DeploymentConditionReason, message string) *deployapi.DeploymentCondition {
 	return &deployapi.DeploymentCondition{
 		Type:               condType,
 		Status:             status,
-		LastUpdateTime:     unversioned.Now(),
-		LastTransitionTime: unversioned.Now(),
+		LastUpdateTime:     metav1.Now(),
+		LastTransitionTime: metav1.Now(),
 		Reason:             reason,
 		Message:            message,
 	}
@@ -306,7 +280,7 @@ func MakeDeployment(config *deployapi.DeploymentConfig, codec runtime.Codec) (*a
 	podAnnotations[deployapi.DeploymentVersionAnnotation] = strconv.FormatInt(config.Status.LatestVersion, 10)
 
 	deployment := &api.ReplicationController{
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      deploymentName,
 			Namespace: config.Namespace,
 			Annotations: map[string]string{
@@ -325,7 +299,7 @@ func MakeDeployment(config *deployapi.DeploymentConfig, codec runtime.Codec) (*a
 			Replicas: 0,
 			Selector: selector,
 			Template: &api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
@@ -368,7 +342,7 @@ func GetAvailablePods(pods []*api.Pod, minReadySeconds int32) int32 {
 	available := int32(0)
 	for i := range pods {
 		pod := pods[i]
-		if kdeplutil.IsPodAvailable(pod, minReadySeconds, time.Now()) {
+		if api.IsPodAvailable(pod, minReadySeconds, metav1.NewTime(time.Now())) {
 			available++
 		}
 	}
@@ -527,7 +501,7 @@ func MaxSurge(config deployapi.DeploymentConfig) int32 {
 
 // annotationFor returns the annotation with key for obj.
 func annotationFor(obj runtime.Object, key string) string {
-	meta, err := api.ObjectMetaFor(obj)
+	meta, err := metav1.ObjectMetaFor(obj)
 	if err != nil {
 		return ""
 	}
@@ -586,13 +560,13 @@ func WaitForRunningDeployerPod(podClient kcoreclient.PodsGetter, rc *api.Replica
 	canGetLogs := func(p *api.Pod) bool {
 		return api.PodSucceeded == p.Status.Phase || api.PodFailed == p.Status.Phase || api.PodRunning == p.Status.Phase
 	}
-	pod, err := podClient.Pods(rc.Namespace).Get(podName)
+	pod, err := podClient.Pods(rc.Namespace).Get(podName, metav1.GetOptions{})
 	if err == nil && canGetLogs(pod) {
 		return nil
 	}
 	watcher, err := podClient.Pods(rc.Namespace).Watch(
-		api.ListOptions{
-			FieldSelector: fields.Set{"metadata.name": podName}.AsSelector(),
+		metav1.ListOptions{
+			FieldSelector: fields.Set{"metadata.name": podName}.AsSelector().String(),
 		},
 	)
 	if err != nil {
@@ -621,6 +595,14 @@ type ByLatestVersionAsc []*api.ReplicationController
 func (d ByLatestVersionAsc) Len() int      { return len(d) }
 func (d ByLatestVersionAsc) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
 func (d ByLatestVersionAsc) Less(i, j int) bool {
+	return DeploymentVersionFor(d[i]) < DeploymentVersionFor(d[j])
+}
+
+type ByLatestVersionAscV1 []*kapiv1.ReplicationController
+
+func (d ByLatestVersionAscV1) Len() int      { return len(d) }
+func (d ByLatestVersionAscV1) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
+func (d ByLatestVersionAscV1) Less(i, j int) bool {
 	return DeploymentVersionFor(d[i]) < DeploymentVersionFor(d[j])
 }
 

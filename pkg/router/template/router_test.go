@@ -4,10 +4,11 @@ import (
 	"crypto/md5"
 	"fmt"
 	"reflect"
+	"regexp"
 	"testing"
 
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util/intstr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	routeapi "github.com/openshift/origin/pkg/route/api"
 )
@@ -199,7 +200,7 @@ func TestDeleteEndpoints(t *testing.T) {
 func TestRouteKey(t *testing.T) {
 	router := NewFakeTemplateRouter()
 	route := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "foo",
 			Name:      "bar",
 		},
@@ -207,8 +208,8 @@ func TestRouteKey(t *testing.T) {
 
 	key := router.routeKey(route)
 
-	if key != "foo_bar" {
-		t.Errorf("Expected key 'foo_bar' but got: %s", key)
+	if key != "foo:bar" {
+		t.Errorf("Expected key 'foo:bar' but got: %s", key)
 	}
 
 	testCases := []struct {
@@ -248,7 +249,7 @@ func TestRouteKey(t *testing.T) {
 	startCount := len(router.state)
 	for _, tc := range testCases {
 		route := &routeapi.Route{
-			ObjectMeta: kapi.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Namespace: tc.Namespace,
 				Name:      tc.Name,
 			},
@@ -290,7 +291,7 @@ func TestCreateServiceAliasConfig(t *testing.T) {
 	serviceWeight := int32(30)
 
 	route := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      "bar",
 		},
@@ -338,7 +339,7 @@ func TestAddRoute(t *testing.T) {
 	serviceName := "TestService"
 
 	route := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      "bar",
 		},
@@ -383,7 +384,7 @@ func TestUpdateRoute(t *testing.T) {
 
 	// Add a route that can be targeted for an update
 	route := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "foo",
 			Name:      "bar",
 		},
@@ -458,7 +459,7 @@ func findCert(cert string, certs map[string]Certificate, isPrivateKey bool, t *t
 func TestRemoveRoute(t *testing.T) {
 	router := NewFakeTemplateRouter()
 	route := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "foo",
 			Name:      "bar",
 		},
@@ -467,7 +468,7 @@ func TestRemoveRoute(t *testing.T) {
 		},
 	}
 	route2 := &routeapi.Route{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "foo",
 			Name:      "bar2",
 		},
@@ -636,7 +637,7 @@ func TestAddRouteEdgeTerminationInsecurePolicy(t *testing.T) {
 
 	for _, tc := range testCases {
 		route := &routeapi.Route{
-			ObjectMeta: kapi.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "foo",
 				Name:      tc.Name,
 			},
@@ -666,6 +667,145 @@ func TestAddRouteEdgeTerminationInsecurePolicy(t *testing.T) {
 			if saCfg.Host != route.Spec.Host || saCfg.Path != route.Spec.Path || !compareTLS(route, saCfg, t) || saCfg.InsecureEdgeTerminationPolicy != tc.InsecurePolicy {
 				t.Errorf("InsecureEdgeTerminationPolicy test %s: route %v did not match serivce alias config %v",
 					tc.Name, route, saCfg)
+			}
+		}
+	}
+}
+
+func TestGenerateRouteRegexp(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		path     string
+		wildcard bool
+
+		match   []string
+		nomatch []string
+	}{
+		{
+			name:     "no path",
+			hostname: "example.com",
+			path:     "",
+			wildcard: false,
+			match: []string{
+				"example.com",
+				"example.com:80",
+				"example.com/",
+				"example.com/sub",
+				"example.com/sub/",
+			},
+			nomatch: []string{"other.com"},
+		},
+		{
+			name:     "root path with trailing slash",
+			hostname: "example.com",
+			path:     "/",
+			wildcard: false,
+			match: []string{
+				"example.com",
+				"example.com:80",
+				"example.com/",
+				"example.com/sub",
+				"example.com/sub/",
+			},
+			nomatch: []string{"other.com"},
+		},
+		{
+			name:     "subpath with trailing slash",
+			hostname: "example.com",
+			path:     "/sub/",
+			wildcard: false,
+			match: []string{
+				"example.com/sub/",
+				"example.com/sub/subsub",
+			},
+			nomatch: []string{
+				"other.com",
+				"example.com",
+				"example.com:80",
+				"example.com/",
+				"example.com/sub",    // path with trailing slash doesn't match URL without
+				"example.com/subpar", // path segment boundary match required
+			},
+		},
+		{
+			name:     "subpath without trailing slash",
+			hostname: "example.com",
+			path:     "/sub",
+			wildcard: false,
+			match: []string{
+				"example.com/sub",
+				"example.com/sub/",
+				"example.com/sub/subsub",
+			},
+			nomatch: []string{
+				"other.com",
+				"example.com",
+				"example.com:80",
+				"example.com/",
+				"example.com/subpar", // path segment boundary match required
+			},
+		},
+		{
+			name:     "wildcard",
+			hostname: "www.example.com",
+			path:     "/",
+			wildcard: true,
+			match: []string{
+				"www.example.com",
+				"www.example.com/",
+				"www.example.com/sub",
+				"www.example.com/sub/",
+				"www.example.com:80",
+				"www.example.com:80/",
+				"www.example.com:80/sub",
+				"www.example.com:80/sub/",
+				"foo.example.com",
+				"foo.example.com/",
+				"foo.example.com/sub",
+				"foo.example.com/sub/",
+			},
+			nomatch: []string{
+				"wwwexample.com",
+				"foo.bar.example.com",
+			},
+		},
+		{
+			name:     "non-wildcard",
+			hostname: "www.example.com",
+			path:     "/",
+			wildcard: false,
+			match: []string{
+				"www.example.com",
+				"www.example.com/",
+				"www.example.com/sub",
+				"www.example.com/sub/",
+				"www.example.com:80",
+				"www.example.com:80/",
+				"www.example.com:80/sub",
+				"www.example.com:80/sub/",
+			},
+			nomatch: []string{
+				"foo.example.com",
+				"foo.example.com/",
+				"foo.example.com/sub",
+				"foo.example.com/sub/",
+				"wwwexample.com",
+				"foo.bar.example.com",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		r := regexp.MustCompile(generateRouteRegexp(tt.hostname, tt.path, tt.wildcard))
+		for _, s := range tt.match {
+			if !r.Match([]byte(s)) {
+				t.Errorf("%s: expected %s to match %s, but didn't", tt.name, r, s)
+			}
+		}
+		for _, s := range tt.nomatch {
+			if r.Match([]byte(s)) {
+				t.Errorf("%s: expected %s not to match %s, but did", tt.name, r, s)
 			}
 		}
 	}

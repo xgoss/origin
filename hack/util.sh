@@ -15,13 +15,6 @@ function kill_all_processes() {
 }
 readonly -f kill_all_processes
 
-# delete_empty_logs deletes empty logs
-function delete_empty_logs() {
-	# Clean up zero byte log files
-	find "${ARTIFACT_DIR}" "${LOG_DIR}" -type f -name '*.log' \( -empty \) -delete
-}
-readonly -f delete_empty_logs
-
 # truncate_large_logs truncates large logs
 function truncate_large_logs() {
 	# Clean up large log files so they don't end up on jenkins
@@ -53,10 +46,10 @@ function cleanup_openshift() {
 	# really have it smack people in their logs.  This is a severe correctness problem
 	grep -a5 "CACHE.*ALTERED" ${LOG_DIR}/openshift.log
 
-	os::cleanup::dump_etcd
 	os::cleanup::dump_container_logs
 
 	if [[ -z "${SKIP_TEARDOWN-}" ]]; then
+		os::cleanup::dump_etcd
 		os::log::info "Tearing down test"
 		kill_all_processes
 
@@ -68,12 +61,6 @@ function cleanup_openshift() {
 		set -u
 	fi
 
-	if grep -q 'no Docker socket found' "${LOG_DIR}/openshift.log" && command -v journalctl >/dev/null 2>&1; then
-		# the Docker daemon crashed, we need the logs
-		journalctl --unit docker.service --since -4hours > "${LOG_DIR}/docker.log"
-	fi
-
-	delete_empty_logs
 	truncate_large_logs
 
 	os::log::info "Cleanup complete"
@@ -94,6 +81,7 @@ function find_files() {
 		-o -wholename './pkg/assets/*/bindata.go' \
 		-o -wholename './pkg/bootstrap/bindata.go' \
 		-o -wholename './openshift.local.*' \
+		-o -wholename './test/extended/testdata/bindata.go' \
 		-o -wholename '*/vendor/*' \
 		-o -wholename './assets/bower_components/*' \
 		\) -prune \

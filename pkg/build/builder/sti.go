@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -9,18 +10,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	s2iapi "github.com/openshift/source-to-image/pkg/api"
 	"github.com/openshift/source-to-image/pkg/api/describe"
 	"github.com/openshift/source-to-image/pkg/api/validation"
 	s2ibuild "github.com/openshift/source-to-image/pkg/build"
 	s2i "github.com/openshift/source-to-image/pkg/build/strategies"
+	"github.com/openshift/source-to-image/pkg/docker"
 
 	"github.com/openshift/origin/pkg/build/api"
 	"github.com/openshift/origin/pkg/build/builder/cmd/dockercfg"
+	"github.com/openshift/origin/pkg/build/builder/timing"
 	"github.com/openshift/origin/pkg/build/controller/strategy"
 	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/generate/git"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // builderFactory is the internal interface to decouple S2I-specific code from Origin builder code
@@ -40,7 +46,11 @@ type runtimeBuilderFactory struct{}
 
 // Builder delegates execution to S2I-specific code
 func (_ runtimeBuilderFactory) Builder(config *s2iapi.Config, overrides s2ibuild.Overrides) (s2ibuild.Builder, s2iapi.BuildInfo, error) {
-	builder, buildInfo, err := s2i.Strategy(config, overrides)
+	client, err := docker.NewEngineAPIClient(config.DockerConfig)
+	if err != nil {
+		return nil, s2iapi.BuildInfo{}, err
+	}
+	builder, buildInfo, err := s2i.Strategy(client, config, overrides)
 	return builder, buildInfo, err
 }
 
@@ -90,6 +100,14 @@ func newS2IBuilder(dockerClient DockerClient, dockerSocket string, buildsClient 
 // Build executes STI build based on configured builder, S2I builder factory
 // and S2I config validator
 func (s *S2IBuilder) Build() error {
+
+	var err error
+	ctx := timing.NewContext(context.Background())
+	defer func() {
+		s.build.Status.Stages = api.AppendStageAndStepInfo(s.build.Status.Stages, timing.GetStages(ctx))
+		handleBuildStatusUpdate(s.build, s.client, nil)
+	}()
+
 	if s.build.Spec.Strategy.SourceStrategy == nil {
 		return errors.New("the source to image builder must be used with the source strategy")
 	}
@@ -114,14 +132,23 @@ func (s *S2IBuilder) Build() error {
 	pushTag := s.build.Status.OutputDockerImageReference
 
 	// fetch source
-	sourceInfo, err := fetchSource(s.dockerClient, srcDir, s.build, initialURLCheckTimeout, os.Stdin, s.gitClient)
+	sourceInfo, err := fetchSource(ctx, s.dockerClient, srcDir, s.build, initialURLCheckTimeout, os.Stdin, s.gitClient)
+
 	if err != nil {
-		s.build.Status.Phase = api.BuildPhaseFailed
-		s.build.Status.Reason = api.StatusReasonFetchSourceFailed
-		s.build.Status.Message = api.StatusMessageFetchSourceFailed
+		switch err.(type) {
+		case contextDirNotFoundError:
+			s.build.Status.Phase = api.BuildPhaseFailed
+			s.build.Status.Reason = api.StatusReasonInvalidContextDirectory
+			s.build.Status.Message = api.StatusMessageInvalidContextDirectory
+		default:
+			s.build.Status.Phase = api.BuildPhaseFailed
+			s.build.Status.Reason = api.StatusReasonFetchSourceFailed
+			s.build.Status.Message = api.StatusMessageFetchSourceFailed
+		}
 		handleBuildStatusUpdate(s.build, s.client, nil)
 		return err
 	}
+
 	contextDir := ""
 	if len(s.build.Spec.Source.ContextDir) > 0 {
 		contextDir = filepath.Clean(s.build.Spec.Source.ContextDir)
@@ -252,7 +279,11 @@ func (s *S2IBuilder) Build() error {
 		return errors.New(buffer.String())
 	}
 
-	glog.V(4).Infof("Creating a new S2I builder with build config: %#v\n", describe.Config(config))
+	client, err := docker.NewEngineAPIClient(config.DockerConfig)
+	if err != nil {
+		return err
+	}
+	glog.V(4).Infof("Creating a new S2I builder with build config: %#v\n", describe.Config(client, config))
 	builder, buildInfo, err := s.builder.Builder(config, s2ibuild.Overrides{Downloader: nil})
 	if err != nil {
 		s.build.Status.Phase = api.BuildPhaseFailed
@@ -265,7 +296,15 @@ func (s *S2IBuilder) Build() error {
 	}
 
 	glog.V(4).Infof("Starting S2I build from %s/%s BuildConfig ...", s.build.Namespace, s.build.Name)
+	startTime := metav1.Now()
 	result, err := builder.Build(config)
+
+	for _, stage := range result.BuildInfo.Stages {
+		for _, step := range stage.Steps {
+			timing.RecordNewStep(ctx, api.StageName(stage.Name), api.StepName(step.Name), metav1.NewTime(step.StartTime), metav1.NewTime(step.StartTime.Add(time.Duration(step.DurationMilliseconds)*time.Millisecond)))
+		}
+	}
+
 	if err != nil {
 		s.build.Status.Phase = api.BuildPhaseFailed
 		s.build.Status.Reason, s.build.Status.Message = convertS2IFailureType(
@@ -278,7 +317,12 @@ func (s *S2IBuilder) Build() error {
 	}
 
 	cName := containerName("s2i", s.build.Name, s.build.Namespace, "post-commit")
-	if err = execPostCommitHook(s.dockerClient, s.build.Spec.PostCommit, buildTag, cName); err != nil {
+	startTime = metav1.Now()
+	err = execPostCommitHook(s.dockerClient, s.build.Spec.PostCommit, buildTag, cName)
+
+	timing.RecordNewStep(ctx, api.StagePostCommit, api.StepExecPostCommitHook, startTime, metav1.Now())
+
+	if err != nil {
 		s.build.Status.Phase = api.BuildPhaseFailed
 		s.build.Status.Reason = api.StatusReasonPostCommitHookFailed
 		s.build.Status.Message = api.StatusMessagePostCommitHookFailed
@@ -308,7 +352,11 @@ func (s *S2IBuilder) Build() error {
 			glog.V(3).Infof("No push secret provided")
 		}
 		glog.V(0).Infof("\nPushing image %s ...", pushTag)
+		startTime = metav1.Now()
 		digest, err := pushImage(s.dockerClient, pushTag, pushAuthConfig)
+
+		timing.RecordNewStep(ctx, api.StagePushImage, api.StepPushImage, startTime, metav1.Now())
+
 		if err != nil {
 			s.build.Status.Phase = api.BuildPhaseFailed
 			s.build.Status.Reason = api.StatusReasonPushImageToRegistryFailed
@@ -316,6 +364,7 @@ func (s *S2IBuilder) Build() error {
 			handleBuildStatusUpdate(s.build, s.client, nil)
 			return reportPushFailure(err, authPresent, pushAuthConfig)
 		}
+
 		if len(digest) > 0 {
 			s.build.Status.Output.To = &api.BuildStatusOutputTo{
 				ImageDigest: digest,
@@ -358,6 +407,7 @@ func buildEnvVars(build *api.Build, sourceInfo *git.SourceInfo) s2iapi.Environme
 
 func buildLabels(build *api.Build) map[string]string {
 	labels := make(map[string]string)
+	addBuildLabels(labels, build)
 	for _, lbl := range build.Spec.Output.ImageLabels {
 		labels[lbl.Name] = lbl.Value
 	}

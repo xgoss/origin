@@ -6,11 +6,11 @@ import (
 
 	log "github.com/golang/glog"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/client/cache"
-	"k8s.io/kubernetes/pkg/util/sets"
-	utilwait "k8s.io/kubernetes/pkg/util/wait"
 
 	osclient "github.com/openshift/origin/pkg/client"
 	osapi "github.com/openshift/origin/pkg/sdn/api"
@@ -35,7 +35,7 @@ func newMasterVNIDMap(allowRenumbering bool) *masterVNIDMap {
 
 	return &masterVNIDMap{
 		netIDManager:     pnetid.NewInMemory(netIDRange),
-		adminNamespaces:  sets.NewString(kapi.NamespaceDefault),
+		adminNamespaces:  sets.NewString(metav1.NamespaceDefault),
 		ids:              make(map[string]uint32),
 		allowRenumbering: allowRenumbering,
 	}
@@ -74,7 +74,7 @@ func (vmap *masterVNIDMap) isAdminNamespace(nsName string) bool {
 }
 
 func (vmap *masterVNIDMap) populateVNIDs(osClient *osclient.Client) error {
-	netnsList, err := osClient.NetNamespaces().List(kapi.ListOptions{})
+	netnsList, err := osClient.NetNamespaces().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -210,8 +210,8 @@ func (vmap *masterVNIDMap) assignVNID(osClient *osclient.Client, nsName string) 
 	if !exists {
 		// Create NetNamespace Object and update vnid map
 		netns := &osapi.NetNamespace{
-			TypeMeta:   unversioned.TypeMeta{Kind: "NetNamespace"},
-			ObjectMeta: kapi.ObjectMeta{Name: nsName},
+			TypeMeta:   metav1.TypeMeta{Kind: "NetNamespace"},
+			ObjectMeta: metav1.ObjectMeta{Name: nsName},
 			NetName:    nsName,
 			NetID:      netid,
 		}
@@ -280,7 +280,7 @@ func (master *OsdnMaster) VnidStartMaster() error {
 }
 
 func (master *OsdnMaster) watchNamespaces() {
-	RunEventQueue(master.kClient.CoreClient.RESTClient(), Namespaces, func(delta cache.Delta) error {
+	RunEventQueue(master.kClient.Core().RESTClient(), Namespaces, func(delta cache.Delta) error {
 		ns := delta.Object.(*kapi.Namespace)
 		name := ns.ObjectMeta.Name
 
@@ -288,11 +288,11 @@ func (master *OsdnMaster) watchNamespaces() {
 		switch delta.Type {
 		case cache.Sync, cache.Added, cache.Updated:
 			if err := master.vnids.assignVNID(master.osClient, name); err != nil {
-				return fmt.Errorf("Error assigning netid: %v", err)
+				return fmt.Errorf("error assigning netid: %v", err)
 			}
 		case cache.Deleted:
 			if err := master.vnids.revokeVNID(master.osClient, name); err != nil {
-				return fmt.Errorf("Error revoking netid: %v", err)
+				return fmt.Errorf("error revoking netid: %v", err)
 			}
 		}
 		return nil
@@ -309,7 +309,7 @@ func (master *OsdnMaster) watchNetNamespaces() {
 		case cache.Sync, cache.Added, cache.Updated:
 			err := master.vnids.updateVNID(master.osClient, netns)
 			if err != nil {
-				return fmt.Errorf("Error updating netid: %v", err)
+				return fmt.Errorf("error updating netid: %v", err)
 			}
 		}
 		return nil

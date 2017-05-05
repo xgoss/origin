@@ -3,16 +3,16 @@ package etcd
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/generic"
+	"k8s.io/apiserver/pkg/registry/generic/registry"
+	"k8s.io/apiserver/pkg/registry/rest"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	extvalidation "k8s.io/kubernetes/pkg/apis/extensions/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic/registry"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
 
 	"github.com/openshift/origin/pkg/deploy/api"
 	"github.com/openshift/origin/pkg/deploy/registry/deployconfig"
@@ -29,28 +29,27 @@ type REST struct {
 // and a scaleREST containing the REST storage for the Scale subresources of DeploymentConfigs.
 func NewREST(optsGetter restoptions.Getter) (*REST, *StatusREST, *ScaleREST, error) {
 	store := &registry.Store{
+		Copier:            kapi.Scheme,
 		NewFunc:           func() runtime.Object { return &api.DeploymentConfig{} },
 		NewListFunc:       func() runtime.Object { return &api.DeploymentConfigList{} },
+		PredicateFunc:     deployconfig.Matcher,
 		QualifiedResource: api.Resource("deploymentconfigs"),
-		ObjectNameFunc: func(obj runtime.Object) (string, error) {
-			return obj.(*api.DeploymentConfig).Name, nil
-		},
-		PredicateFunc: func(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-			return deployconfig.Matcher(label, field)
-		},
-		CreateStrategy:      deployconfig.Strategy,
-		UpdateStrategy:      deployconfig.Strategy,
-		DeleteStrategy:      deployconfig.Strategy,
-		ReturnDeletedObject: false,
+
+		CreateStrategy: deployconfig.Strategy,
+		UpdateStrategy: deployconfig.Strategy,
+		DeleteStrategy: deployconfig.Strategy,
 	}
 
-	if err := restoptions.ApplyOptions(optsGetter, store, true, storage.NoTriggerPublisher); err != nil {
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: deployconfig.GetAttrs}
+	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, nil, nil, err
 	}
 
 	deploymentConfigREST := &REST{store}
+
 	statusStore := *store
 	statusStore.UpdateStrategy = deployconfig.StatusStrategy
+
 	statusREST := &StatusREST{store: &statusStore}
 	scaleREST := &ScaleREST{registry: deployconfig.NewRegistry(deploymentConfigREST)}
 
@@ -71,8 +70,8 @@ func (r *ScaleREST) New() runtime.Object {
 }
 
 // Get retrieves (computes) the Scale subresource for the given DeploymentConfig name.
-func (r *ScaleREST) Get(ctx kapi.Context, name string) (runtime.Object, error) {
-	deploymentConfig, err := r.registry.GetDeploymentConfig(ctx, name)
+func (r *ScaleREST) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	deploymentConfig, err := r.registry.GetDeploymentConfig(ctx, name, options)
 	if err != nil {
 		return nil, err
 	}
@@ -81,8 +80,8 @@ func (r *ScaleREST) Get(ctx kapi.Context, name string) (runtime.Object, error) {
 }
 
 // Update scales the DeploymentConfig for the given Scale subresource, returning the updated Scale.
-func (r *ScaleREST) Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
-	deploymentConfig, err := r.registry.GetDeploymentConfig(ctx, name)
+func (r *ScaleREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	deploymentConfig, err := r.registry.GetDeploymentConfig(ctx, name, &metav1.GetOptions{})
 	if err != nil {
 		return nil, false, errors.NewNotFound(extensions.Resource("scale"), name)
 	}
@@ -115,14 +114,19 @@ type StatusREST struct {
 	store *registry.Store
 }
 
-// StatusREST implements the Updater interface.
-var _ = rest.Updater(&StatusREST{})
+// StatusREST implements Patcher
+var _ = rest.Patcher(&StatusREST{})
 
 func (r *StatusREST) New() runtime.Object {
 	return &api.DeploymentConfig{}
 }
 
+// Get retrieves the object from the storage. It is required to support Patch.
+func (r *StatusREST) Get(ctx apirequest.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	return r.store.Get(ctx, name, options)
+}
+
 // Update alters the status subset of an deploymentConfig.
-func (r *StatusREST) Update(ctx kapi.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+func (r *StatusREST) Update(ctx apirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
 	return r.store.Update(ctx, name, objInfo)
 }

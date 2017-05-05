@@ -1,13 +1,12 @@
 package etcd
 
 import (
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic/registry"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/registry/generic"
+	"k8s.io/apiserver/pkg/registry/generic/registry"
+	kapi "k8s.io/kubernetes/pkg/api"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	"github.com/openshift/origin/pkg/authorization/api"
 	"github.com/openshift/origin/pkg/authorization/registry/clusterpolicybinding"
 	"github.com/openshift/origin/pkg/util/restoptions"
 )
@@ -16,25 +15,21 @@ type REST struct {
 	*registry.Store
 }
 
-// NewStorage returns a RESTStorage object that will work against ClusterPolicyBinding.
-func NewStorage(optsGetter restoptions.Getter) (*REST, error) {
-
+// NewREST returns a RESTStorage object that will work against ClusterPolicyBinding.
+func NewREST(optsGetter restoptions.Getter) (*REST, error) {
 	store := &registry.Store{
-		NewFunc:           func() runtime.Object { return &authorizationapi.ClusterPolicyBinding{} },
-		NewListFunc:       func() runtime.Object { return &authorizationapi.ClusterPolicyBindingList{} },
-		QualifiedResource: authorizationapi.Resource("clusterpolicybindings"),
-		ObjectNameFunc: func(obj runtime.Object) (string, error) {
-			return obj.(*authorizationapi.ClusterPolicyBinding).Name, nil
-		},
-		PredicateFunc: func(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-			return clusterpolicybinding.Matcher(label, field)
-		},
+		Copier:            kapi.Scheme,
+		NewFunc:           func() runtime.Object { return &api.ClusterPolicyBinding{} },
+		NewListFunc:       func() runtime.Object { return &api.ClusterPolicyBindingList{} },
+		PredicateFunc:     clusterpolicybinding.Matcher,
+		QualifiedResource: api.Resource("clusterpolicybindings"),
 
 		CreateStrategy: clusterpolicybinding.Strategy,
 		UpdateStrategy: clusterpolicybinding.Strategy,
 	}
 
-	if err := restoptions.ApplyOptions(optsGetter, store, false, storage.NoTriggerPublisher); err != nil {
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: clusterpolicybinding.GetAttrs}
+	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
 	}
 

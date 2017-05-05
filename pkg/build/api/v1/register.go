@@ -1,21 +1,26 @@
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-const GroupName = ""
-
-// SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
+const GroupName = "build.openshift.io"
+const LegacyGroupName = ""
 
 var (
+	SchemeGroupVersion       = schema.GroupVersion{Group: GroupName, Version: "v1"}
+	LegacySchemeGroupVersion = schema.GroupVersion{Group: LegacyGroupName, Version: "v1"}
+
+	LegacySchemeBuilder    = runtime.NewSchemeBuilder(addLegacyKnownTypes, addConversionFuncs, addDefaultingFuncs)
+	AddToSchemeInCoreGroup = LegacySchemeBuilder.AddToScheme
+
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes, addConversionFuncs, addDefaultingFuncs)
 	AddToScheme   = SchemeBuilder.AddToScheme
 )
 
-// Adds the list of known types to api.Scheme.
+// addKnownTypes adds types to API group
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Build{},
@@ -27,14 +32,23 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&BuildLogOptions{},
 		&BinaryBuildRequestOptions{},
 	)
+	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
 }
 
-func (obj *Build) GetObjectKind() unversioned.ObjectKind                     { return &obj.TypeMeta }
-func (obj *BuildList) GetObjectKind() unversioned.ObjectKind                 { return &obj.TypeMeta }
-func (obj *BuildConfig) GetObjectKind() unversioned.ObjectKind               { return &obj.TypeMeta }
-func (obj *BuildConfigList) GetObjectKind() unversioned.ObjectKind           { return &obj.TypeMeta }
-func (obj *BuildLog) GetObjectKind() unversioned.ObjectKind                  { return &obj.TypeMeta }
-func (obj *BuildRequest) GetObjectKind() unversioned.ObjectKind              { return &obj.TypeMeta }
-func (obj *BuildLogOptions) GetObjectKind() unversioned.ObjectKind           { return &obj.TypeMeta }
-func (obj *BinaryBuildRequestOptions) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }
+// addLegacyKnownTypes adds types to legacy API group
+// DEPRECATED: This will be deprecated and should not be modified.
+func addLegacyKnownTypes(scheme *runtime.Scheme) error {
+	types := []runtime.Object{
+		&Build{},
+		&BuildList{},
+		&BuildConfig{},
+		&BuildConfigList{},
+		&BuildLog{},
+		&BuildRequest{},
+		&BuildLogOptions{},
+		&BinaryBuildRequestOptions{},
+	}
+	scheme.AddKnownTypes(LegacySchemeGroupVersion, types...)
+	return nil
+}

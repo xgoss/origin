@@ -5,6 +5,7 @@ import (
 	"net"
 	osexec "os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/golang/glog"
@@ -19,15 +20,16 @@ import (
 
 	docker "github.com/fsouza/go-dockerclient"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	kubeutilnet "k8s.io/apimachinery/pkg/util/net"
+	kwait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/cache"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/fields"
 	knetwork "k8s.io/kubernetes/pkg/kubelet/network"
-	"k8s.io/kubernetes/pkg/labels"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
-	kubeutilnet "k8s.io/kubernetes/pkg/util/net"
-	kwait "k8s.io/kubernetes/pkg/util/wait"
 )
 
 type osdnPolicy interface {
@@ -48,9 +50,9 @@ type osdnPolicy interface {
 
 type OsdnNode struct {
 	policy             osdnPolicy
-	kClient            *kclientset.Clientset
+	kClient            kclientset.Interface
 	osClient           *osclient.Client
-	ovs                *ovs.Interface
+	oc                 *ovsController
 	networkInfo        *NetworkInfo
 	podManager         *podManager
 	localSubnetCIDR    string
@@ -60,7 +62,11 @@ type OsdnNode struct {
 	kubeletInitReady   chan struct{}
 	iptablesSyncPeriod time.Duration
 	mtu                uint32
+
+	// Synchronizes operations on egressPolicies
+	egressPoliciesLock sync.Mutex
 	egressPolicies     map[uint32][]osapi.EgressNetworkPolicy
+	egressDNS          *EgressDNS
 
 	host             knetwork.Host
 	kubeletCniPlugin knetwork.NetworkPlugin
@@ -69,16 +75,20 @@ type OsdnNode struct {
 }
 
 // Called by higher layers to create the plugin SDN node instance
-func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclientset.Clientset, hostname string, selfIP string, iptablesSyncPeriod time.Duration, mtu uint32) (*OsdnNode, error) {
+func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient kclientset.Interface, hostname string, selfIP string, iptablesSyncPeriod time.Duration, mtu uint32) (*OsdnNode, error) {
 	var policy osdnPolicy
+	var pluginId int
 	var minOvsVersion string
 	switch strings.ToLower(pluginName) {
 	case osapi.SingleTenantPluginName:
 		policy = NewSingleTenantPlugin()
+		pluginId = 0
 	case osapi.MultiTenantPluginName:
 		policy = NewMultiTenantPlugin()
+		pluginId = 1
 	case osapi.NetworkPolicyPluginName:
 		policy = NewNetworkPolicyPlugin()
+		pluginId = 2
 		minOvsVersion = "2.5.0"
 	default:
 		// Not an OpenShift plugin
@@ -113,12 +123,14 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 	if err != nil {
 		return nil, err
 	}
+	oc := NewOVSController(ovsif, pluginId)
 
 	plugin := &OsdnNode{
 		policy:             policy,
 		kClient:            kClient,
 		osClient:           osClient,
-		ovs:                ovsif,
+		oc:                 oc,
+		podManager:         newPodManager(kClient, policy, mtu, oc),
 		localIP:            selfIP,
 		hostName:           hostname,
 		podNetworkReady:    make(chan struct{}),
@@ -126,6 +138,7 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 		iptablesSyncPeriod: iptablesSyncPeriod,
 		mtu:                mtu,
 		egressPolicies:     make(map[uint32][]osapi.EgressNetworkPolicy),
+		egressDNS:          NewEgressDNS(),
 	}
 
 	if err := plugin.dockerPreCNICleanup(); err != nil {
@@ -198,17 +211,31 @@ func (node *OsdnNode) Start() error {
 	var err error
 	node.networkInfo, err = getNetworkInfo(node.osClient)
 	if err != nil {
-		return fmt.Errorf("Failed to get network information: %v", err)
-	}
-
-	nodeIPTables := newNodeIPTables(node.networkInfo.ClusterNetwork.String(), node.iptablesSyncPeriod)
-	if err = nodeIPTables.Setup(); err != nil {
-		return fmt.Errorf("Failed to set up iptables: %v", err)
+		return fmt.Errorf("failed to get network information: %v", err)
 	}
 
 	node.localSubnetCIDR, err = node.getLocalSubnet()
 	if err != nil {
 		return err
+	}
+
+	// Wait for kubelet to init the plugin so we get a knetwork.Host
+	log.V(5).Infof("Waiting for kubelet network plugin initialization")
+	<-node.kubeletInitReady
+	// Wait for kubelet itself to finish initializing
+	kwait.PollInfinite(100*time.Millisecond,
+		func() (bool, error) {
+			if node.host.GetRuntime() == nil {
+				return false, nil
+			}
+			return true, nil
+		})
+
+	//**** After this point, all OsdnNode fields have been initialized
+
+	nodeIPTables := newNodeIPTables(node.networkInfo.ClusterNetwork.String(), node.iptablesSyncPeriod)
+	if err = nodeIPTables.Setup(); err != nil {
+		return fmt.Errorf("failed to set up iptables: %v", err)
 	}
 
 	networkChanged, err := node.SetupSDN()
@@ -226,30 +253,14 @@ func (node *OsdnNode) Start() error {
 	}
 	go kwait.Forever(node.watchServices, 0)
 
-	// Wait for kubelet to init the plugin so we get a knetwork.Host
-	log.V(5).Infof("Waiting for kubelet network plugin initialization")
-	<-node.kubeletInitReady
-	// Wait for kubelet itself to finish initializing
-	kwait.PollInfinite(100*time.Millisecond,
-		func() (bool, error) {
-			if node.host.GetRuntime() == nil {
-				return false, nil
-			}
-			return true, nil
-		})
-
-	log.V(5).Infof("Creating and initializing openshift-sdn pod manager")
-	node.podManager, err = newPodManager(node.host, node.localSubnetCIDR, node.networkInfo, node.kClient, node.policy, node.mtu, node.ovs)
-	if err != nil {
-		return err
-	}
-	if err := node.podManager.Start(cniserver.CNIServerSocketPath); err != nil {
+	log.V(5).Infof("Starting openshift-sdn pod manager")
+	if err := node.podManager.Start(cniserver.CNIServerSocketPath, node.host, node.localSubnetCIDR, node.networkInfo.ClusterNetwork); err != nil {
 		return err
 	}
 
 	if networkChanged {
 		var pods []kapi.Pod
-		pods, err = node.GetLocalPods(kapi.NamespaceAll)
+		pods, err = node.GetLocalPods(metav1.NamespaceAll)
 		if err != nil {
 			return err
 		}
@@ -290,9 +301,9 @@ func (node *OsdnNode) UpdatePod(pod kapi.Pod) error {
 
 func (node *OsdnNode) GetLocalPods(namespace string) ([]kapi.Pod, error) {
 	fieldSelector := fields.Set{"spec.nodeName": node.hostName}.AsSelector()
-	opts := kapi.ListOptions{
-		LabelSelector: labels.Everything(),
-		FieldSelector: fieldSelector,
+	opts := metav1.ListOptions{
+		LabelSelector: labels.Everything().String(),
+		FieldSelector: fieldSelector.String(),
 	}
 	podList, err := node.kClient.Core().Pods(namespace).List(opts)
 	if err != nil {
@@ -337,7 +348,7 @@ func isServiceChanged(oldsvc, newsvc *kapi.Service) bool {
 
 func (node *OsdnNode) watchServices() {
 	services := make(map[string]*kapi.Service)
-	RunEventQueue(node.kClient.CoreClient.RESTClient(), Services, func(delta cache.Delta) error {
+	RunEventQueue(node.kClient.Core().RESTClient(), Services, func(delta cache.Delta) error {
 		serv := delta.Object.(*kapi.Service)
 
 		// Ignore headless services

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 
 	utilglog "github.com/openshift/source-to-image/pkg/util/glog"
 
@@ -63,13 +64,13 @@ func (d *downloader) Download(url *url.URL, targetFile string) (*api.SourceInfo,
 	defer out.Close()
 
 	if err != nil {
-		glog.Errorf("Unable to create target file %s (%s)", targetFile, err)
+		glog.Errorf("Unable to create target file %s (%v)", targetFile, err)
 		return nil, err
 	}
 
 	if _, err = io.Copy(out, reader); err != nil {
 		os.Remove(targetFile)
-		glog.Warningf("Skipping file %s due to error copying from source: %s", targetFile, err)
+		glog.Warningf("Skipping file %s due to error copying from source: %v", targetFile, err)
 		return nil, err
 	}
 
@@ -83,18 +84,31 @@ type HTTPURLReader struct {
 	Get func(url string) (*http.Response, error)
 }
 
+var transportMap map[api.ProxyConfig]*http.Transport
+var transportMapMutex sync.Mutex
+
+func init() {
+	transportMap = make(map[api.ProxyConfig]*http.Transport)
+}
+
 // NewHTTPURLReader returns a new HTTPURLReader.
 func NewHTTPURLReader(proxyConfig *api.ProxyConfig) *HTTPURLReader {
 	getFunc := http.Get
 	if proxyConfig != nil {
-		transport := &http.Transport{
-			Proxy: func(req *http.Request) (*url.URL, error) {
-				if proxyConfig.HTTPSProxy != nil && req.URL.Scheme == "https" {
-					return proxyConfig.HTTPSProxy, nil
-				}
-				return proxyConfig.HTTPProxy, nil
-			},
+		transportMapMutex.Lock()
+		transport, ok := transportMap[*proxyConfig]
+		if !ok {
+			transport = &http.Transport{
+				Proxy: func(req *http.Request) (*url.URL, error) {
+					if proxyConfig.HTTPSProxy != nil && req.URL.Scheme == "https" {
+						return proxyConfig.HTTPSProxy, nil
+					}
+					return proxyConfig.HTTPProxy, nil
+				},
+			}
+			transportMap[*proxyConfig] = transport
 		}
+		transportMapMutex.Unlock()
 		client := &http.Client{
 			Transport: transport,
 		}

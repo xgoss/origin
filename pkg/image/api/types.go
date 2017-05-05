@@ -1,14 +1,14 @@
 package api
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 )
 
 // ImageList is a list of Image objects.
 type ImageList struct {
-	unversioned.TypeMeta
-	unversioned.ListMeta
+	metav1.TypeMeta
+	metav1.ListMeta
 
 	Items []Image
 }
@@ -52,11 +52,12 @@ const (
 )
 
 // +genclient=true
+// +nonNamespaced=true
 
 // Image is an immutable representation of a Docker image and metadata at a point in time.
 type Image struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// The string that can be used to pull this image.
 	DockerImageReference string
@@ -99,8 +100,8 @@ const (
 // Mandatory fields should be parsed by clients doing image verification. The others are parsed from
 // signature's content by the server. They serve just an informative purpose.
 type ImageSignature struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// Required: Describes a type of stored blob.
 	Type string
@@ -118,7 +119,7 @@ type ImageSignature struct {
 	// Contains claims from the signature.
 	SignedClaims map[string]string
 	// If specified, it is the time of signature's creation.
-	Created *unversioned.Time
+	Created *metav1.Time
 	// If specified, it holds information about an issuer of signing certificate or key (a person or entity
 	// who signed the signing certificate or key).
 	IssuedBy *SignatureIssuer
@@ -151,9 +152,9 @@ type SignatureCondition struct {
 	// Status of the condition, one of True, False, Unknown.
 	Status kapi.ConditionStatus
 	// Last time the condition was checked.
-	LastProbeTime unversioned.Time
+	LastProbeTime metav1.Time
 	// Last time the condition transit from one status to another.
-	LastTransitionTime unversioned.Time
+	LastTransitionTime metav1.Time
 	// (brief) reason for the condition's last transition.
 	Reason string
 	// Human readable message indicating details about last transition.
@@ -185,8 +186,8 @@ type SignatureSubject struct {
 
 // ImageStreamList is a list of ImageStream objects.
 type ImageStreamList struct {
-	unversioned.TypeMeta
-	unversioned.ListMeta
+	metav1.TypeMeta
+	metav1.ListMeta
 
 	Items []ImageStream
 }
@@ -195,8 +196,8 @@ type ImageStreamList struct {
 // when images are tagged in a stream, and an optional reference to a Docker image
 // repository on a registry.
 type ImageStream struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// Spec describes the desired state of this stream
 	Spec ImageStreamSpec
@@ -295,7 +296,7 @@ type TagEventList struct {
 // TagEvent is used by ImageRepositoryStatus to keep a historical record of images associated with a tag.
 type TagEvent struct {
 	// When the TagEvent was created
-	Created unversioned.Time
+	Created metav1.Time
 	// The string that can be used to pull this image
 	DockerImageReference string
 	// The image
@@ -319,7 +320,7 @@ type TagEventCondition struct {
 	// Status of the condition, one of True, False, Unknown.
 	Status kapi.ConditionStatus
 	// LastTransitionTIme is the time the condition transitioned from one status to another.
-	LastTransitionTime unversioned.Time
+	LastTransitionTime metav1.Time
 	// Reason is a brief machine readable explanation for the condition's last transition.
 	Reason string
 	// Message is a human readable description of the details about last transition, complementing reason.
@@ -334,8 +335,8 @@ type TagEventCondition struct {
 // ImageStreamMapping represents a mapping from a single tag to a Docker image as
 // well as the reference to the Docker image repository the image came from.
 type ImageStreamMapping struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// The Docker image repository the specified image is located in
 	// DEPRECATED: remove once v1beta1 support is dropped
@@ -349,8 +350,8 @@ type ImageStreamMapping struct {
 
 // ImageStreamTag has a .Name in the format <stream name>:<tag>.
 type ImageStreamTag struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// Tag is the spec tag associated with this image stream tag, and it may be null
 	// if only pushes have occurred to this image stream.
@@ -371,16 +372,16 @@ type ImageStreamTag struct {
 
 // ImageStreamTagList is a list of ImageStreamTag objects.
 type ImageStreamTagList struct {
-	unversioned.TypeMeta
-	unversioned.ListMeta
+	metav1.TypeMeta
+	metav1.ListMeta
 
 	Items []ImageStreamTag
 }
 
 // ImageStreamImage represents an Image that is retrieved by image name from an ImageStream.
 type ImageStreamImage struct {
-	unversioned.TypeMeta
-	kapi.ObjectMeta
+	metav1.TypeMeta
+	metav1.ObjectMeta
 
 	// The Image associated with the ImageStream and image name.
 	Image Image
@@ -398,10 +399,10 @@ type DockerImageReference struct {
 // ImageStreamImport allows a caller to request information about a set of images for possible
 // import into an image stream, or actually tag the images into the image stream.
 type ImageStreamImport struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 	// ObjectMeta must identify the name of the image stream to create or update. If resourceVersion
 	// or UID are set, they must match the image stream that will be loaded from the server.
-	kapi.ObjectMeta
+	metav1.ObjectMeta
 
 	// Spec is the set of items desired to be imported
 	Spec ImageStreamImportSpec
@@ -437,13 +438,14 @@ type RepositoryImportSpec struct {
 	From kapi.ObjectReference
 
 	ImportPolicy    TagImportPolicy
+	ReferencePolicy TagReferencePolicy
 	IncludeManifest bool
 }
 
 // RepositoryImportStatus describes the outcome of the repository import
 type RepositoryImportStatus struct {
 	// Status reflects whether any failure occurred during import
-	Status unversioned.Status
+	Status metav1.Status
 	// Images is the list of imported images
 	Images []ImageImportStatus
 	// AdditionalTags are tags that exist in the repository but were not imported because
@@ -457,12 +459,13 @@ type ImageImportSpec struct {
 	To   *kapi.LocalObjectReference
 
 	ImportPolicy    TagImportPolicy
+	ReferencePolicy TagReferencePolicy
 	IncludeManifest bool
 }
 
 // ImageImportStatus describes the result of an image import.
 type ImageImportStatus struct {
 	Tag    string
-	Status unversioned.Status
+	Status metav1.Status
 	Image  *Image
 }

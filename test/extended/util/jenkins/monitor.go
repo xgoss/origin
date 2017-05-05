@@ -9,8 +9,9 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	exutil "github.com/openshift/origin/test/extended/util"
-	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 // JobMon is a Jenkins job monitor
@@ -61,6 +62,13 @@ func (jmon *JobMon) Await(timeout time.Duration) error {
 		}
 
 		ginkgolog("Jenkins job %q build complete:\n%s\n\n", jmon.jobName, body)
+		// If Jenkins job has completed, output its log
+		body, status, err = jmon.j.GetResource("job/%s/%s/consoleText", jmon.jobName, jmon.buildNumber)
+		if err != nil || status != 200 {
+			ginkgolog("Unable to retrieve job log from Jenkins.\nStatus code: %d\nError: %v\nResponse Text: %s\n", status, err, body)
+			return true, nil
+		}
+		ginkgolog("Jenkins job %q log:\n%s\n\n", jmon.jobName, body)
 		return true, nil
 	})
 	return err

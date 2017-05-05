@@ -878,7 +878,7 @@ var _examplesImageStreamsImageStreamsCentos7Json = []byte(`{
               "openshift.io/display-name": "Jenkins 1.X",
               "description": "Provides a Jenkins 1.X server on CentOS 7. For more information about using this container image, including OpenShift considerations, see https://github.com/openshift/jenkins/blob/master/README.md.",
               "iconClass": "icon-jenkins",
-              "tags": "jenkins",
+              "tags": "hidden,jenkins",
               "version": "1.x"
             },
             "from": {
@@ -1027,7 +1027,7 @@ var _examplesImageStreamsImageStreamsRhel7Json = []byte(`{
             },
             "from": {
               "kind": "ImageStreamTag",
-              "name": "4"
+              "name": "6"
             }
           },
           {
@@ -1060,6 +1060,22 @@ var _examplesImageStreamsImageStreamsRhel7Json = []byte(`{
             "from": {
               "kind": "DockerImage",
               "name": "registry.access.redhat.com/rhscl/nodejs-4-rhel7:latest"
+            }
+          },
+          {
+            "name": "6",
+            "annotations": {
+              "openshift.io/display-name": "Node.js 6",
+              "description": "Build and run Node.js 6 applications on RHEL 7. For more information about using this builder image, including OpenShift considerations, see https://github.com/sclorg/s2i-nodejs-container.",
+              "iconClass": "icon-nodejs",
+              "tags": "builder,nodejs",
+              "supports":"nodejs:6,nodejs",
+              "version": "6",
+              "sampleRepo": "https://github.com/openshift/nodejs-ex.git"
+            },
+            "from": {
+              "kind": "DockerImage",
+              "name": "registry.access.redhat.com/rhscl/nodejs-6-rhel7:latest"
             }
           }
         ]
@@ -1177,7 +1193,7 @@ var _examplesImageStreamsImageStreamsRhel7Json = []byte(`{
               "tags": "hidden,builder,php",
               "supports":"php:5.5,php",
               "version": "5.5",
-              "sampleRepo": "https://github.com/openshift/cakephp-ex.git"              
+              "sampleRepo": "https://github.com/openshift/cakephp-ex.git"
             },
             "from": {
               "kind": "DockerImage",
@@ -1631,7 +1647,7 @@ var _examplesImageStreamsImageStreamsRhel7Json = []byte(`{
               "openshift.io/display-name": "Jenkins 1.X",
               "description": "Provides a Jenkins 1.X server on RHEL 7. For more information about using this container image, including OpenShift considerations, see https://github.com/openshift/jenkins/blob/master/README.md.",
               "iconClass": "icon-jenkins",
-              "tags": "jenkins",
+              "tags": "hidden,jenkins",
               "version": "1.x"
             },
             "from": {
@@ -3878,6 +3894,16 @@ var _examplesDbTemplatesRedisEphemeralTemplateJson = []byte(`{
   },
   "objects": [
     {
+      "kind": "Secret",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": "${DATABASE_SERVICE_NAME}"
+      },
+      "stringData" : {
+        "database-password" : "${REDIS_PASSWORD}"
+      }
+    },
+    {
       "kind": "Service",
       "apiVersion": "v1",
       "metadata": {
@@ -3974,7 +4000,12 @@ var _examplesDbTemplatesRedisEphemeralTemplateJson = []byte(`{
                 "env": [
                   {
                     "name": "REDIS_PASSWORD",
-                    "value": "${REDIS_PASSWORD}"
+                    "valueFrom": {
+                      "secretKeyRef" : {
+                        "name" : "${DATABASE_SERVICE_NAME}",
+                        "key" : "database-password"
+                      }
+                    }
                   }
                 ],
                 "resources": {
@@ -4091,6 +4122,16 @@ var _examplesDbTemplatesRedisPersistentTemplateJson = []byte(`{
   },
   "objects": [
     {
+      "kind": "Secret",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": "${DATABASE_SERVICE_NAME}"
+      },
+      "stringData" : {
+        "database-password" : "${REDIS_PASSWORD}"
+      }
+    },
+    {
       "kind": "Service",
       "apiVersion": "v1",
       "metadata": {
@@ -4204,7 +4245,12 @@ var _examplesDbTemplatesRedisPersistentTemplateJson = []byte(`{
                 "env": [
                   {
                     "name": "REDIS_PASSWORD",
-                    "value": "${REDIS_PASSWORD}"
+                    "valueFrom": {
+                      "secretKeyRef" : {
+                        "name" : "${DATABASE_SERVICE_NAME}",
+                        "key" : "database-password"
+                      }
+                    }
                   }
                 ],
                 "resources": {
@@ -4417,6 +4463,10 @@ var _examplesJenkinsJenkinsEphemeralTemplateJson = []byte(`{
                     "value": "true"
                   },
                   {
+                    "name": "OPENSHIFT_JENKINS_JVM_ARCH",
+                    "value": "${JVM_ARCH}"
+                  },
+                  {
                     "name": "KUBERNETES_MASTER",
                     "value": "https://kubernetes.default:443"
                   },
@@ -4560,6 +4610,12 @@ var _examplesJenkinsJenkinsEphemeralTemplateJson = []byte(`{
       "displayName": "Enable OAuth in Jenkins",
       "description": "Whether to enable OAuth OpenShift integration. If false, the static account 'admin' will be initialized with the password 'password'.",
       "value": "true"
+    },
+    {
+      "name": "JVM_ARCH",
+      "displayName": "Jenkins JVM Architecture",
+      "description": "Whether Jenkins runs with a 32 bit (i386) or 64 bit (x86_64) JVM.",
+      "value": "i386"
     },
     {
       "name": "MEMORY_LIMIT",
@@ -4730,6 +4786,10 @@ var _examplesJenkinsJenkinsPersistentTemplateJson = []byte(`{
                     "value": "true"
                   },
                   {
+                    "name": "OPENSHIFT_JENKINS_JVM_ARCH",
+                    "value": "${JVM_ARCH}"
+                  },
+                  {
                     "name": "KUBERNETES_MASTER",
                     "value": "https://kubernetes.default:443"
                   },
@@ -4875,6 +4935,12 @@ var _examplesJenkinsJenkinsPersistentTemplateJson = []byte(`{
       "value": "true"
     },
     {
+      "name": "JVM_ARCH",
+      "displayName": "Jenkins JVM Architecture",
+      "description": "Whether Jenkins runs with a 32 bit (i386) or 64 bit (x86_64) JVM.",
+      "value": "i386"
+    },
+    {
       "name": "MEMORY_LIMIT",
       "displayName": "Memory Limit",
       "description": "Maximum amount of memory the container can use.",
@@ -4953,6 +5019,7 @@ objects:
           def project=""
           def tag="blue"
           def altTag="green"
+          def verbose="${VERBOSE}"
 
           node {
             project = env.PROJECT_NAME
@@ -4969,12 +5036,12 @@ objects:
 
             stage("Build") {
               echo "building tag ${tag}"
-              openshiftBuild buildConfig: appName, showBuildLogs: "true"
+              openshiftBuild buildConfig: appName, showBuildLogs: "true", verbose: verbose
             }
 
             stage("Deploy Test") {
-              openshiftTag srcStream: appName, srcTag: 'latest', destinationStream: appName, destinationTag: tag
-              openshiftVerifyDeployment deploymentConfig: "${appName}-${tag}"
+              openshiftTag srcStream: appName, srcTag: 'latest', destinationStream: appName, destinationTag: tag, verbose: verbose
+              openshiftVerifyDeployment deploymentConfig: "${appName}-${tag}", verbose: verbose
             }
 
             stage("Test") {
@@ -5363,6 +5430,11 @@ parameters:
   name: NAMESPACE
   required: true
   value: openshift
+- description: Whether to enable verbose logging of Jenkinsfile steps in pipeline
+  displayName: Verbose
+  name: VERBOSE
+  required: true
+  value: "false"
 `)
 
 func examplesJenkinsPipelineBluegreenPipelineYamlBytes() ([]byte, error) {
@@ -7471,6 +7543,9 @@ var _examplesQuickstartsDancerMysqlPersistentJson = []byte(`{
         }
       },
       "spec": {
+        "strategy": {
+          "type": "Recreate"
+        },
         "triggers": [
           {
             "type": "ImageChange",
@@ -8011,6 +8086,9 @@ var _examplesQuickstartsDancerMysqlJson = []byte(`{
         }
       },
       "spec": {
+        "strategy": {
+          "type": "Recreate"
+        },
         "triggers": [
           {
             "type": "ImageChange",
@@ -8526,7 +8604,7 @@ var _examplesQuickstartsDjangoPostgresqlPersistentJson = []byte(`{
       },
       "spec": {
         "strategy": {
-          "type": "Rolling"
+          "type": "Recreate"
         },
         "triggers": [
           {
@@ -9079,7 +9157,7 @@ var _examplesQuickstartsDjangoPostgresqlJson = []byte(`{
       },
       "spec": {
         "strategy": {
-          "type": "Rolling"
+          "type": "Recreate"
         },
         "triggers": [
           {
@@ -9612,7 +9690,7 @@ var _examplesQuickstartsNodejsMongodbPersistentJson = []byte(`{
       },
       "spec": {
         "strategy": {
-          "type": "Rolling"
+          "type": "Recreate"
         },
         "triggers": [
           {
@@ -10174,7 +10252,7 @@ var _examplesQuickstartsNodejsMongodbJson = []byte(`{
       },
       "spec": {
         "strategy": {
-          "type": "Rolling"
+          "type": "Recreate"
         },
         "triggers": [
           {
@@ -11813,6 +11891,8 @@ items:
   - apiVersion: v1
     kind: ClusterRole
     metadata:
+      annotations:
+        authorization.openshift.io/system-only: "true"
       name: oauth-editor
     rules:
     - resources:
@@ -11823,6 +11903,8 @@ items:
   - apiVersion: v1
     kind: ClusterRole
     metadata:
+      annotations:
+        authorization.openshift.io/system-only: "true"
       name: daemonset-admin
     rules:
     - resources:
@@ -11877,7 +11959,7 @@ items:
       generateName: logging-deployer-
     spec:
       containers:
-      - image: ${IMAGE_PREFIX}logging-deployment:${IMAGE_VERSION}
+      - image: ${IMAGE_PREFIX}logging-deployer:${IMAGE_VERSION}
         imagePullPolicy: Always
         name: deployer
         volumeMounts:

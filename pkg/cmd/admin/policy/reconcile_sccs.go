@@ -8,12 +8,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	kapierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kapierrors "k8s.io/kubernetes/pkg/api/errors"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	sccutil "k8s.io/kubernetes/pkg/securitycontextconstraints/util"
-	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	"github.com/openshift/origin/pkg/cmd/templates"
@@ -28,8 +29,9 @@ const ReconcileSCCRecommendedName = "reconcile-sccs"
 type ReconcileSCCOptions struct {
 	// confirmed indicates that the data should be persisted
 	Confirmed bool
-	// union controls if we make additive changes to the users/groups fields or overwrite them
-	// as well as preserving existing priorities (unset priorities will always be reconciled)
+	// union controls if we make additive changes to the users/groups/labels/annotations fields
+	// or overwrite them as well as preserving existing priorities (unset priorities will
+	// always be reconciled)
 	Union bool
 	// is the name of the openshift infrastructure namespace.  It is provided here so that
 	// the command doesn't need to try and parse the policy config.
@@ -51,7 +53,7 @@ var (
 		This command will not remove any additional cluster SCCs.  By default, this command
 		will not remove additional users and groups that have been granted access to the SCC and
 		will preserve existing priorities (but will always reconcile unset priorities and the policy
-		definition).
+		definition), labels, and annotations.
 
 		You can see which cluster SCCs have recommended changes by choosing an output type.`)
 
@@ -60,10 +62,10 @@ var (
 	  %[1]s
 
 	  # Update cluster SCCs that don't match the current defaults preserving additional grants
-	  # for users and group and keeping any priorities that are already set
+	  # for users, groups, labels, annotations and keeping any priorities that are already set
 	  %[1]s --confirm
 
-	  # Replace existing users, groups, and priorities that do not match defaults
+	  # Replace existing users, groups, labels, annotations, and priorities that do not match defaults
 	  %[1]s --additive-only=false --confirm`)
 )
 
@@ -127,7 +129,7 @@ func (o *ReconcileSCCOptions) Validate() error {
 	if o.SCCClient == nil {
 		return errors.New("a SCC client is required")
 	}
-	if _, err := o.NSClient.Get(o.InfraNamespace); err != nil {
+	if _, err := o.NSClient.Get(o.InfraNamespace, metav1.GetOptions{}); err != nil {
 		return fmt.Errorf("%s is not a valid namespace", o.InfraNamespace)
 	}
 	return nil
@@ -174,7 +176,7 @@ func (o *ReconcileSCCOptions) ChangedSCCs() ([]*kapi.SecurityContextConstraints,
 
 	for i := range bootstrapSCCs {
 		expectedSCC := &bootstrapSCCs[i]
-		actualSCC, err := o.SCCClient.Get(expectedSCC.Name)
+		actualSCC, err := o.SCCClient.Get(expectedSCC.Name, metav1.GetOptions{})
 		// if not found it needs to be created
 		if kapierrors.IsNotFound(err) {
 			changedSCCs = append(changedSCCs, expectedSCC)
@@ -195,7 +197,7 @@ func (o *ReconcileSCCOptions) ChangedSCCs() ([]*kapi.SecurityContextConstraints,
 // ReplaceChangedSCCs persists the changed SCCs.
 func (o *ReconcileSCCOptions) ReplaceChangedSCCs(changedSCCs []*kapi.SecurityContextConstraints) error {
 	for i := range changedSCCs {
-		_, err := o.SCCClient.Get(changedSCCs[i].Name)
+		_, err := o.SCCClient.Get(changedSCCs[i].Name, metav1.GetOptions{})
 		if err != nil && !kapierrors.IsNotFound(err) {
 			return err
 		}

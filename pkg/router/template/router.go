@@ -17,8 +17,9 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/prometheus/client_golang/prometheus"
 
-	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	routeapi "github.com/openshift/origin/pkg/route/api"
@@ -51,6 +52,7 @@ type templateRouter struct {
 	templates        map[string]*template.Template
 	reloadScriptPath string
 	reloadInterval   time.Duration
+	reloadCallbacks  []func()
 	state            map[string]ServiceAliasConfig
 	serviceUnits     map[string]ServiceUnit
 	certManager      certificateManager
@@ -91,6 +93,10 @@ type templateRouter struct {
 	synced bool
 	// whether a state change has occurred
 	stateChanged bool
+	// metricReload tracks reloads
+	metricReload prometheus.Summary
+	// metricWriteConfig tracks writing config
+	metricWriteConfig prometheus.Summary
 }
 
 // templateRouterCfg holds all configuration items required to initialize the template router
@@ -99,6 +105,7 @@ type templateRouterCfg struct {
 	templates              map[string]*template.Template
 	reloadScriptPath       string
 	reloadInterval         time.Duration
+	reloadCallbacks        []func()
 	defaultCertificate     string
 	defaultCertificatePath string
 	defaultCertificateDir  string
@@ -158,6 +165,7 @@ func newTemplateRouter(cfg templateRouterCfg) (*templateRouter, error) {
 		templates:              cfg.templates,
 		reloadScriptPath:       cfg.reloadScriptPath,
 		reloadInterval:         cfg.reloadInterval,
+		reloadCallbacks:        cfg.reloadCallbacks,
 		state:                  make(map[string]ServiceAliasConfig),
 		serviceUnits:           make(map[string]ServiceUnit),
 		certManager:            certManager,
@@ -171,6 +179,17 @@ func newTemplateRouter(cfg templateRouterCfg) (*templateRouter, error) {
 		peerEndpointsKey:       cfg.peerEndpointsKey,
 		peerEndpoints:          []Endpoint{},
 		bindPortsAfterSync:     cfg.bindPortsAfterSync,
+
+		metricReload: prometheus.MustRegisterOrGet(prometheus.NewSummary(prometheus.SummaryOpts{
+			Namespace: "template_router",
+			Name:      "reload_seconds",
+			Help:      "Measures the time spent reloading the router in seconds.",
+		})).(prometheus.Summary),
+		metricWriteConfig: prometheus.MustRegisterOrGet(prometheus.NewSummary(prometheus.SummaryOpts{
+			Namespace: "template_router",
+			Name:      "write_config_seconds",
+			Help:      "Measures the time spent writing out the router configuration to disk in seconds.",
+		})).(prometheus.Summary),
 
 		rateLimitedCommitFunction:    nil,
 		rateLimitedCommitStopChannel: make(chan struct{}),
@@ -250,7 +269,24 @@ func generateRouteRegexp(hostname, path string, wildcard bool) string {
 		}
 	}
 
-	return fmt.Sprintf("^%s(|:[0-9]+)%s(|/.*)$", hostRE, regexp.QuoteMeta(path))
+	portRE := "(:[0-9]+)?"
+
+	// build the correct subpath regex, depending on whether path ends with a segment separator
+	var pathRE, subpathRE string
+	switch {
+	case strings.TrimRight(path, "/") == "":
+		// Special-case paths consisting solely of "/" to match a root request to "" as well
+		pathRE = ""
+		subpathRE = "(/.*)?"
+	case strings.HasSuffix(path, "/"):
+		pathRE = regexp.QuoteMeta(path)
+		subpathRE = "(.*)?"
+	default:
+		pathRE = regexp.QuoteMeta(path)
+		subpathRE = "(/.*)?"
+	}
+
+	return "^" + hostRE + portRE + pathRE + subpathRE + "$"
 }
 
 // Generates the host name to use for serving/certificate matching.
@@ -366,9 +402,9 @@ func (r *templateRouter) readState() error {
 // Commit applies the changes made to the router configuration - persists
 // the state and refresh the backend. This is all done in the background
 // so that we can rate limit + coalesce multiple changes.
+// Note: If this is changed FakeCommit() in fake.go should also be updated
 func (r *templateRouter) Commit() {
 	r.lock.Lock()
-	defer r.lock.Unlock()
 
 	if !r.synced {
 		glog.V(4).Infof("Router state synchronized for the first time")
@@ -376,29 +412,47 @@ func (r *templateRouter) Commit() {
 		r.stateChanged = true
 	}
 
-	if r.stateChanged {
+	needsCommit := r.stateChanged
+	r.lock.Unlock()
+
+	if needsCommit {
 		r.rateLimitedCommitFunction.Invoke(r.rateLimitedCommitFunction)
-		r.stateChanged = false
 	}
 }
 
 // commitAndReload refreshes the backend and persists the router state.
 func (r *templateRouter) commitAndReload() error {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	// only state changes must be done under the lock
+	if err := func() error {
+		r.lock.Lock()
+		defer r.lock.Unlock()
 
-	glog.V(4).Infof("Writing the router state")
-	if err := r.writeState(); err != nil {
+		glog.V(4).Infof("Writing the router state")
+		if err := r.writeState(); err != nil {
+			return err
+		}
+
+		r.stateChanged = false
+
+		glog.V(4).Infof("Writing the router config")
+		reloadStart := time.Now()
+		err := r.writeConfig()
+		r.metricWriteConfig.Observe(float64(time.Now().Sub(reloadStart)) / float64(time.Second))
+		return err
+	}(); err != nil {
 		return err
 	}
 
-	glog.V(4).Infof("Writing the router config")
-	if err := r.writeConfig(); err != nil {
-		return err
+	for i, fn := range r.reloadCallbacks {
+		glog.V(4).Infof("Calling reload function %d", i)
+		fn()
 	}
 
 	glog.V(4).Infof("Reloading the router")
-	if err := r.reloadRouter(); err != nil {
+	reloadStart := time.Now()
+	err := r.reloadRouter()
+	r.metricReload.Observe(float64(time.Now().Sub(reloadStart)) / float64(time.Second))
+	if err != nil {
 		return err
 	}
 
@@ -459,7 +513,6 @@ func (r *templateRouter) writeConfig() error {
 // for details
 func (r *templateRouter) writeCertificates(cfg *ServiceAliasConfig) error {
 	if r.shouldWriteCerts(cfg) {
-		//TODO: better way so this doesn't need to create lots of files every time state is written, probably too expensive
 		return r.certManager.WriteCertificatesForConfig(cfg)
 	}
 	return nil
@@ -587,7 +640,7 @@ func (r *templateRouter) routeKey(route *routeapi.Route) string {
 	// is just used for the key name and not for the record/route name.
 	// This also helps the use case for the key used as a router config
 	// file name.
-	return fmt.Sprintf("%s_%s", route.Namespace, name)
+	return fmt.Sprintf("%s:%s", route.Namespace, name)
 }
 
 // createServiceAliasConfig creates a ServiceAliasConfig from a route and the router state.
@@ -785,6 +838,12 @@ func cmpStrSlices(first []string, second []string) bool {
 // it will log a warning.  The route will still be written but users may receive browser errors
 // for a host/cert mismatch
 func (r *templateRouter) shouldWriteCerts(cfg *ServiceAliasConfig) bool {
+
+	// The cert is already written
+	if cfg.Status == ServiceAliasConfigStatusSaved {
+		return false
+	}
+
 	if cfg.Certificates == nil {
 		return false
 	}
@@ -803,7 +862,7 @@ func (r *templateRouter) shouldWriteCerts(cfg *ServiceAliasConfig) bool {
 			cfg.TLSTermination, cfg.Host)
 		// if a default cert is configured we'll assume it is meant to be a wildcard and only log info
 		// otherwise we'll consider this a warning
-		if len(r.defaultCertificate) > 0 {
+		if len(r.defaultCertificatePath) > 0 {
 			glog.V(4).Info(msg)
 		} else {
 			glog.Warning(msg)
@@ -820,6 +879,13 @@ func (r *templateRouter) HasRoute(route *routeapi.Route) bool {
 	key := r.routeKey(route)
 	_, ok := r.state[key]
 	return ok
+}
+
+// SyncedAtLeastOnce indicates whether the router has completed an initial sync.
+func (r *templateRouter) SyncedAtLeastOnce() bool {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	return r.synced
 }
 
 // hasRequiredEdgeCerts ensures that at least a host certificate and key are provided.

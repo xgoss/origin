@@ -5,8 +5,9 @@ import (
 	"strconv"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/labels"
 
 	"github.com/golang/glog"
 	buildapi "github.com/openshift/origin/pkg/build/api"
@@ -102,8 +103,8 @@ type buildFilter func(buildapi.Build) bool
 // Optionally you can specify a filter function to select only builds that
 // matches your criteria.
 func BuildConfigBuilds(c buildclient.BuildLister, namespace, name string, filterFunc buildFilter) (*buildapi.BuildList, error) {
-	result, err := c.List(namespace, kapi.ListOptions{
-		LabelSelector: BuildConfigSelector(name),
+	result, err := c.List(namespace, metav1.ListOptions{
+		LabelSelector: BuildConfigSelector(name).String(),
 	})
 	if err != nil {
 		return nil, err
@@ -149,4 +150,58 @@ func VersionForBuild(build *buildapi.Build) int {
 		return 0
 	}
 	return version
+}
+
+func BuildDeepCopy(build *buildapi.Build) (*buildapi.Build, error) {
+	objCopy, err := kapi.Scheme.DeepCopy(build)
+	if err != nil {
+		return nil, err
+	}
+	copied, ok := objCopy.(*buildapi.Build)
+	if !ok {
+		return nil, fmt.Errorf("expected Build, got %#v", objCopy)
+	}
+	return copied, nil
+}
+
+// MergeTrustedEnvWithoutDuplicates merges two environment lists without having
+// duplicate items in the output list.  The source list will be filtered
+// such that only whitelisted environment variables are merged into the
+// output list.  If sourcePrecedence is true, keys in the source list
+// will override keys in the output list.
+func MergeTrustedEnvWithoutDuplicates(source []kapi.EnvVar, output *[]kapi.EnvVar, sourcePrecedence bool) {
+	// filter out all environment variables except trusted/well known
+	// values, because we do not want random environment variables being
+	// fed into the privileged STI container via the BuildConfig definition.
+	type sourceMapItem struct {
+		index int
+		value string
+	}
+
+	index := 0
+	filteredSourceMap := make(map[string]sourceMapItem)
+	filteredSource := []kapi.EnvVar{}
+	for _, env := range source {
+		for _, acceptable := range buildapi.WhitelistEnvVarNames {
+			if env.Name == acceptable {
+				filteredSource = append(filteredSource, env)
+				filteredSourceMap[env.Name] = sourceMapItem{index, env.Value}
+				index++
+				break
+			}
+		}
+	}
+
+	result := *output
+	for i, env := range result {
+		// If the value exists in output, override it and remove it
+		// from the source list
+		if v, found := filteredSourceMap[env.Name]; found {
+			if sourcePrecedence {
+				result[i].Value = v.value
+			}
+			filteredSource = append(filteredSource[:v.index], filteredSource[v.index+1:]...)
+		}
+	}
+	*output = append(result, filteredSource...)
 }

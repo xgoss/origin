@@ -10,11 +10,13 @@ import (
 
 	osclient "github.com/openshift/origin/pkg/client"
 	osapi "github.com/openshift/origin/pkg/sdn/api"
+	"github.com/openshift/origin/pkg/util/netutils"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	kcache "k8s.io/client-go/tools/cache"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	kcache "k8s.io/kubernetes/pkg/client/cache"
-	"k8s.io/kubernetes/pkg/fields"
 	kcontainer "k8s.io/kubernetes/pkg/kubelet/container"
 )
 
@@ -39,13 +41,21 @@ type NetworkInfo struct {
 }
 
 func parseNetworkInfo(clusterNetwork string, serviceNetwork string) (*NetworkInfo, error) {
-	_, cn, err := net.ParseCIDR(clusterNetwork)
+	cn, err := netutils.ParseCIDRMask(clusterNetwork)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse ClusterNetwork CIDR %s: %v", clusterNetwork, err)
+		_, cn, err := net.ParseCIDR(clusterNetwork)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ClusterNetwork CIDR %s: %v", clusterNetwork, err)
+		}
+		glog.Errorf("Configured clusterNetworkCIDR value %q is invalid; treating it as %q", clusterNetwork, cn.String())
 	}
-	_, sn, err := net.ParseCIDR(serviceNetwork)
+	sn, err := netutils.ParseCIDRMask(serviceNetwork)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse ServiceNetwork CIDR %s: %v", serviceNetwork, err)
+		_, sn, err := net.ParseCIDR(serviceNetwork)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ServiceNetwork CIDR %s: %v", serviceNetwork, err)
+		}
+		glog.Errorf("Configured serviceNetworkCIDR value %q is invalid; treating it as %q", serviceNetwork, sn.String())
 	}
 
 	return &NetworkInfo{
@@ -56,28 +66,28 @@ func parseNetworkInfo(clusterNetwork string, serviceNetwork string) (*NetworkInf
 
 func (ni *NetworkInfo) validateNodeIP(nodeIP string) error {
 	if nodeIP == "" || nodeIP == "127.0.0.1" {
-		return fmt.Errorf("Invalid node IP %q", nodeIP)
+		return fmt.Errorf("invalid node IP %q", nodeIP)
 	}
 
 	// Ensure each node's NodeIP is not contained by the cluster network,
 	// which could cause a routing loop. (rhbz#1295486)
 	ipaddr := net.ParseIP(nodeIP)
 	if ipaddr == nil {
-		return fmt.Errorf("Failed to parse node IP %s", nodeIP)
+		return fmt.Errorf("failed to parse node IP %s", nodeIP)
 	}
 
 	if ni.ClusterNetwork.Contains(ipaddr) {
-		return fmt.Errorf("Node IP %s conflicts with cluster network %s", nodeIP, ni.ClusterNetwork.String())
+		return fmt.Errorf("node IP %s conflicts with cluster network %s", nodeIP, ni.ClusterNetwork.String())
 	}
 	if ni.ServiceNetwork.Contains(ipaddr) {
-		return fmt.Errorf("Node IP %s conflicts with service network %s", nodeIP, ni.ServiceNetwork.String())
+		return fmt.Errorf("node IP %s conflicts with service network %s", nodeIP, ni.ServiceNetwork.String())
 	}
 
 	return nil
 }
 
 func getNetworkInfo(osClient *osclient.Client) (*NetworkInfo, error) {
-	cn, err := osClient.ClusterNetwork().Get(osapi.ClusterNetworkDefault)
+	cn, err := osClient.ClusterNetwork().Get(osapi.ClusterNetworkDefault, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +151,7 @@ func RunEventQueue(client kcache.Getter, resourceName ResourceName, process Proc
 		glog.Fatalf("Unknown resource %s during initialization of event queue", resourceName)
 	}
 
-	eventQueue := newEventQueue(client, resourceName, expectedType, kapi.NamespaceAll)
+	eventQueue := newEventQueue(client, resourceName, expectedType, metav1.NamespaceAll)
 	for {
 		eventQueue.Pop(process, expectedType)
 	}

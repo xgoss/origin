@@ -6,13 +6,12 @@ import (
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	// required to register defaulting functions for containers
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	_ "k8s.io/kubernetes/pkg/api/install"
 	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/diff"
-	"k8s.io/kubernetes/pkg/util/intstr"
 
-	v1 "github.com/openshift/origin/pkg/api/v1"
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	_ "github.com/openshift/origin/pkg/deploy/api/install"
 	deployv1 "github.com/openshift/origin/pkg/deploy/api/v1"
@@ -144,13 +143,15 @@ func TestDefaults(t *testing.T) {
 							Containers: []kapiv1.Container{
 								{
 									Name: "test",
-									TerminationMessagePath: "/dev/termination-log",
+									TerminationMessagePath:   "/dev/termination-log",
+									TerminationMessagePolicy: kapiv1.TerminationMessageReadFile,
 									// The pull policy will be "PullAlways" only when the
 									// image tag is 'latest'. In other case it will be
 									// "PullIfNotPresent".
 									ImagePullPolicy: kapiv1.PullIfNotPresent,
 								},
 							},
+							SchedulerName: kapiv1.DefaultSchedulerName,
 						},
 					},
 				},
@@ -398,14 +399,16 @@ func TestDefaults(t *testing.T) {
 							Containers: []kapiv1.Container{
 								{
 									Name: "first",
-									TerminationMessagePath: "/dev/termination-log",
-									ImagePullPolicy:        kapiv1.PullIfNotPresent,
+									TerminationMessagePath:   "/dev/termination-log",
+									TerminationMessagePolicy: kapiv1.TerminationMessageReadFile,
+									ImagePullPolicy:          kapiv1.PullIfNotPresent,
 								},
 							},
 							RestartPolicy:                 kapiv1.RestartPolicyAlways,
 							TerminationGracePeriodSeconds: mkintp(30),
 							SecurityContext:               &kapiv1.PodSecurityContext{},
 							DNSPolicy:                     kapiv1.DNSClusterFirst,
+							SchedulerName:                 kapiv1.DefaultSchedulerName,
 						},
 					},
 					Strategy: deployv1.DeploymentStrategy{
@@ -468,14 +471,16 @@ func TestDefaults(t *testing.T) {
 							Containers: []kapiv1.Container{
 								{
 									Name: "first",
-									TerminationMessagePath: "/dev/termination-log",
-									ImagePullPolicy:        kapiv1.PullIfNotPresent,
+									TerminationMessagePath:   "/dev/termination-log",
+									TerminationMessagePolicy: kapiv1.TerminationMessageReadFile,
+									ImagePullPolicy:          kapiv1.PullIfNotPresent,
 								},
 							},
 							RestartPolicy:                 kapiv1.RestartPolicyAlways,
 							TerminationGracePeriodSeconds: mkintp(30),
 							SecurityContext:               &kapiv1.PodSecurityContext{},
 							DNSPolicy:                     kapiv1.DNSClusterFirst,
+							SchedulerName:                 kapiv1.DefaultSchedulerName,
 						},
 					},
 					Strategy: deployv1.DeploymentStrategy{
@@ -552,14 +557,15 @@ func TestDefaults(t *testing.T) {
 			t.Errorf("unexpected object: %v", got)
 			t.FailNow()
 		}
-		if !reflect.DeepEqual(got.Spec, expected.Spec) {
+		// TODO(rebase): check that there are no fields which have different semantics for nil and []
+		if !kapi.Semantic.DeepEqual(got.Spec, expected.Spec) {
 			t.Errorf("got different than expected:\nA:\t%#v\nB:\t%#v\n\nDiff:\n%s\n\n%s", got, expected, diff.ObjectDiff(expected, got), diff.ObjectGoPrintSideBySide(expected, got))
 		}
 	}
 }
 
 func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
-	data, err := runtime.Encode(kapi.Codecs.LegacyCodec(v1.SchemeGroupVersion), obj)
+	data, err := runtime.Encode(kapi.Codecs.LegacyCodec(deployv1.LegacySchemeGroupVersion), obj)
 	if err != nil {
 		t.Errorf("%v\n %#v", err, obj)
 		return nil

@@ -1,11 +1,11 @@
 package admission
 
 import (
-	"k8s.io/kubernetes/pkg/admission"
-	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/apiserver/pkg/admission"
+	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/pkg/quota"
 
-	"github.com/openshift/origin/pkg/authorization/authorizer"
 	"github.com/openshift/origin/pkg/client"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/controller/shared"
@@ -38,7 +38,7 @@ type WantsOriginQuotaRegistry interface {
 // WantsAuthorizer should be implemented by admission plugins that
 // need access to the Authorizer interface
 type WantsAuthorizer interface {
-	SetAuthorizer(authorizer.Authorizer)
+	SetAuthorizer(kauthorizer.Authorizer)
 	admission.Validator
 }
 

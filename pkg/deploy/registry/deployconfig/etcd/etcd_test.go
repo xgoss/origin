@@ -3,11 +3,13 @@ package etcd
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	etcdtesting "k8s.io/apiserver/pkg/storage/etcd/testing"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
-	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
 
 	"github.com/openshift/origin/pkg/deploy/api"
 	_ "github.com/openshift/origin/pkg/deploy/api/install"
@@ -40,11 +42,38 @@ func TestCreate(t *testing.T) {
 	defer storage.Store.DestroyFunc()
 	test := registrytest.New(t, storage.Store)
 	valid := validDeploymentConfig()
-	valid.ObjectMeta = kapi.ObjectMeta{}
+	valid.ObjectMeta = metav1.ObjectMeta{}
 	test.TestCreate(
 		valid,
 		// invalid
 		&api.DeploymentConfig{},
+	)
+}
+
+func TestUpdate(t *testing.T) {
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	defer storage.Store.DestroyFunc()
+	test := registrytest.New(t, storage.Store)
+	test.TestUpdate(
+		validDeploymentConfig(),
+		// updateFunc
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*api.DeploymentConfig)
+			object.Spec.Replicas = 2
+			return object
+		},
+		// invalid updateFunc
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*api.DeploymentConfig)
+			object.Spec.Template = &kapi.PodTemplateSpec{}
+			return object
+		},
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*api.DeploymentConfig)
+			object.Spec.Replicas = -1
+			return object
+		},
 	)
 }
 

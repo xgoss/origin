@@ -9,10 +9,12 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/wait"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util/wait"
+	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	"github.com/openshift/origin/pkg/client"
@@ -20,6 +22,7 @@ import (
 	deployutil "github.com/openshift/origin/pkg/deploy/util"
 	imageapi "github.com/openshift/origin/pkg/image/api"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"k8s.io/kubernetes/pkg/api/v1"
 )
 
 const deploymentRunTimeout = 5 * time.Minute
@@ -44,6 +47,7 @@ var _ = g.Describe("deploymentconfigs", func() {
 		readinessFixture                = exutil.FixturePath("testdata", "deployments", "readiness-test.yaml")
 		envRefDeploymentFixture         = exutil.FixturePath("testdata", "deployments", "deployment-with-ref-env.yaml")
 		ignoresDeployersFixture         = exutil.FixturePath("testdata", "deployments", "deployment-ignores-deployer.yaml")
+		imageChangeTriggerFixture       = exutil.FixturePath("testdata", "deployments", "deployment-trigger.yaml")
 	)
 
 	g.Describe("when run iteratively [Conformance]", func() {
@@ -106,11 +110,11 @@ var _ = g.Describe("deploymentconfigs", func() {
 						}
 						for _, pod := range pods {
 							e2e.Logf("%02d: deleting deployer pod %s", i, pod.Name)
-							options := kapi.NewDeleteOptions(0)
+							options := metav1.NewDeleteOptions(0)
 							if rand.Float32() < 0.5 {
 								options = nil
 							}
-							if err := oc.KubeClient().Core().Pods(oc.Namespace()).Delete(pod.Name, options); err != nil {
+							if err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Delete(pod.Name, options); err != nil {
 								e2e.Logf("%02d: unable to delete deployer pod %q: %v", i, pod.Name, err)
 							}
 						}
@@ -197,35 +201,41 @@ var _ = g.Describe("deploymentconfigs", func() {
 		})
 	})
 
-	g.It("should respect image stream tag reference policy [Conformance]", func() {
-		o.Expect(oc.Run("create").Args("-f", resolutionFixture).Execute()).NotTo(o.HaveOccurred())
+	g.Describe("should respect image stream tag reference policy [Conformance]", func() {
+		g.AfterEach(func() {
+			failureTrap(oc, "deployment-image-resolution", g.CurrentGinkgoTestDescription().Failed)
+		})
 
-		name := "deployment-image-resolution"
-		o.Expect(waitForLatestCondition(oc, name, deploymentRunTimeout, deploymentImageTriggersResolved(2))).NotTo(o.HaveOccurred())
+		g.It("resolve the image pull spec", func() {
+			o.Expect(oc.Run("create").Args("-f", resolutionFixture).Execute()).NotTo(o.HaveOccurred())
 
-		is, err := oc.Client().ImageStreams(oc.Namespace()).Get(name)
-		o.Expect(err).NotTo(o.HaveOccurred())
-		o.Expect(is.Status.DockerImageRepository).NotTo(o.BeEmpty())
-		o.Expect(is.Status.Tags["direct"].Items).NotTo(o.BeEmpty())
-		o.Expect(is.Status.Tags["pullthrough"].Items).NotTo(o.BeEmpty())
+			name := "deployment-image-resolution"
+			o.Expect(waitForLatestCondition(oc, name, deploymentRunTimeout, deploymentImageTriggersResolved(2))).NotTo(o.HaveOccurred())
 
-		dc, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name)
-		o.Expect(err).NotTo(o.HaveOccurred())
-		o.Expect(dc.Spec.Triggers).To(o.HaveLen(3))
+			is, err := oc.Client().ImageStreams(oc.Namespace()).Get(name, metav1.GetOptions{})
+			o.Expect(err).NotTo(o.HaveOccurred())
+			o.Expect(is.Status.DockerImageRepository).NotTo(o.BeEmpty())
+			o.Expect(is.Status.Tags["direct"].Items).NotTo(o.BeEmpty())
+			o.Expect(is.Status.Tags["pullthrough"].Items).NotTo(o.BeEmpty())
 
-		imageID := is.Status.Tags["pullthrough"].Items[0].Image
-		resolvedReference := fmt.Sprintf("%s@%s", is.Status.DockerImageRepository, imageID)
-		directReference := is.Status.Tags["direct"].Items[0].DockerImageReference
+			dc, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
+			o.Expect(err).NotTo(o.HaveOccurred())
+			o.Expect(dc.Spec.Triggers).To(o.HaveLen(3))
 
-		// controller should be using pullthrough for this (pointing to local registry)
-		o.Expect(dc.Spec.Triggers[1].ImageChangeParams).NotTo(o.BeNil())
-		o.Expect(dc.Spec.Triggers[1].ImageChangeParams.LastTriggeredImage).To(o.Equal(resolvedReference))
-		o.Expect(dc.Spec.Template.Spec.Containers[0].Image).To(o.Equal(resolvedReference))
+			imageID := is.Status.Tags["pullthrough"].Items[0].Image
+			resolvedReference := fmt.Sprintf("%s@%s", is.Status.DockerImageRepository, imageID)
+			directReference := is.Status.Tags["direct"].Items[0].DockerImageReference
 
-		// controller should have preferred the base image
-		o.Expect(dc.Spec.Triggers[2].ImageChangeParams).NotTo(o.BeNil())
-		o.Expect(dc.Spec.Triggers[2].ImageChangeParams.LastTriggeredImage).To(o.Equal(directReference))
-		o.Expect(dc.Spec.Template.Spec.Containers[1].Image).To(o.Equal(directReference))
+			// controller should be using pullthrough for this (pointing to local registry)
+			o.Expect(dc.Spec.Triggers[1].ImageChangeParams).NotTo(o.BeNil())
+			o.Expect(dc.Spec.Triggers[1].ImageChangeParams.LastTriggeredImage).To(o.Equal(resolvedReference))
+			o.Expect(dc.Spec.Template.Spec.Containers[0].Image).To(o.Equal(resolvedReference))
+
+			// controller should have preferred the base image
+			o.Expect(dc.Spec.Triggers[2].ImageChangeParams).NotTo(o.BeNil())
+			o.Expect(dc.Spec.Triggers[2].ImageChangeParams.LastTriggeredImage).To(o.Equal(directReference))
+			o.Expect(dc.Spec.Template.Spec.Containers[1].Image).To(o.Equal(directReference))
+		})
 	})
 
 	g.Describe("with test deployments [Conformance]", func() {
@@ -255,15 +265,15 @@ var _ = g.Describe("deploymentconfigs", func() {
 
 			g.By("ensuring no scale up of the deployment happens")
 			wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
-				rc, err := oc.KubeClient().Core().ReplicationControllers(oc.Namespace()).Get("deployment-test-1")
+				rc, err := oc.KubeClient().CoreV1().ReplicationControllers(oc.Namespace()).Get("deployment-test-1", metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
-				o.Expect(rc.Spec.Replicas).Should(o.BeEquivalentTo(0))
+				o.Expect(*rc.Spec.Replicas).Should(o.BeEquivalentTo(0))
 				o.Expect(rc.Status.Replicas).Should(o.BeEquivalentTo(0))
 				return false, nil
 			})
 
 			g.By("verifying the scale is updated on the deployment config")
-			config, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get("deployment-test")
+			config, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get("deployment-test", metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			o.Expect(config.Spec.Replicas).Should(o.BeEquivalentTo(1))
 			o.Expect(config.Spec.Test).Should(o.BeTrue())
@@ -273,11 +283,9 @@ var _ = g.Describe("deploymentconfigs", func() {
 				rolloutCompleteWithLogs := make(chan struct{})
 				out := ""
 				go func(rolloutNumber int) {
+					defer g.GinkgoRecover()
+					defer close(rolloutCompleteWithLogs)
 					var err error
-					defer func() {
-						close(rolloutCompleteWithLogs)
-						g.GinkgoRecover()
-					}()
 					out, err = waitForDeployerToComplete(oc, fmt.Sprintf("deployment-test-%d", rolloutNumber), deploymentRunTimeout)
 					o.Expect(err).NotTo(o.HaveOccurred())
 				}(i + 2) // we already did 2 rollouts previously.
@@ -298,6 +306,56 @@ var _ = g.Describe("deploymentconfigs", func() {
 				o.Expect(out).To(o.ContainSubstring("test pre hook executed"))
 				o.Expect(out).To(o.ContainSubstring("--> Success"))
 			}
+		})
+	})
+
+	g.Describe("when changing image change trigger [Conformance]", func() {
+		g.AfterEach(func() {
+			failureTrap(oc, "example", g.CurrentGinkgoTestDescription().Failed)
+		})
+
+		g.It("should successfully trigger from an updated image", func() {
+			_, name, err := createFixture(oc, imageChangeTriggerFixture)
+			o.Expect(err).NotTo(o.HaveOccurred())
+			o.Expect(waitForSyncedConfig(oc, name, deploymentRunTimeout)).NotTo(o.HaveOccurred())
+
+			g.By("tagging the busybox:latest as test:v1 image")
+			_, err = oc.Run("tag").Args("docker.io/busybox:latest", "test:v1").Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+
+			expectLatestVersion := func(version int) {
+				dc, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
+				o.Expect(err).NotTo(o.HaveOccurred())
+				latestVersion := dc.Status.LatestVersion
+				err = wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+					dc, err = oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
+					o.Expect(err).NotTo(o.HaveOccurred())
+					latestVersion = dc.Status.LatestVersion
+					return latestVersion == int64(version), nil
+				})
+				if err == wait.ErrWaitTimeout {
+					err = fmt.Errorf("expected latestVersion: %d, got: %d", version, latestVersion)
+				}
+				o.Expect(err).NotTo(o.HaveOccurred())
+				o.Expect(waitForLatestCondition(oc, name, deploymentRunTimeout, deploymentReachedCompletion)).NotTo(o.HaveOccurred())
+			}
+
+			g.By("ensuring the deployment config latest version is 1 and rollout completed")
+			expectLatestVersion(1)
+
+			g.By("updating the image change trigger to point to test:v2 image")
+			_, err = oc.Run("set").Args("triggers", "dc/"+name, "--remove-all").Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+			_, err = oc.Run("set").Args("triggers", "dc/"+name, "--from-image", "test:v2", "--auto", "-c", "test").Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+			o.Expect(waitForSyncedConfig(oc, name, deploymentRunTimeout)).NotTo(o.HaveOccurred())
+
+			g.By("tagging the busybox:1.25 as test:v2 image")
+			_, err = oc.Run("tag").Args("docker.io/busybox:1.25", "test:v2").Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+
+			g.By("ensuring the deployment config latest version is 2 and rollout completed")
+			expectLatestVersion(2)
 		})
 	})
 
@@ -453,7 +511,7 @@ var _ = g.Describe("deploymentconfigs", func() {
 			g.By("waiting for the first rollout to complete")
 			o.Expect(waitForLatestCondition(oc, name, deploymentRunTimeout, deploymentReachedCompletion)).NotTo(o.HaveOccurred())
 
-			dc, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name)
+			dc, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("updating the deployment config in order to trigger a new rollout")
@@ -465,7 +523,7 @@ var _ = g.Describe("deploymentconfigs", func() {
 			// Wait for latestVersion=2 to be surfaced in the API
 			latestVersion := dc.Status.LatestVersion
 			err = wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
-				dc, err = oc.Client().DeploymentConfigs(oc.Namespace()).Get(name)
+				dc, err = oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
@@ -783,13 +841,19 @@ var _ = g.Describe("deploymentconfigs", func() {
 			o.Expect(waitForLatestCondition(oc, "history-limit", deploymentRunTimeout, deploymentReachedCompletion)).NotTo(o.HaveOccurred())
 			o.Expect(waitForSyncedConfig(oc, "history-limit", deploymentRunTimeout)).NotTo(o.HaveOccurred(),
 				"the controller needs to have synced with the updated deployment configuration before checking that the revision history limits are being adhered to")
-			deploymentConfig, deployments, _, err := deploymentInfo(oc, "history-limit")
+			deploymentConfig, deploymentsv1, _, err := deploymentInfo(oc, "history-limit")
 			o.Expect(err).NotTo(o.HaveOccurred())
 			// sanity check to ensure that the following asertion on the amount of old deployments is valid
 			o.Expect(*deploymentConfig.Spec.RevisionHistoryLimit).To(o.Equal(int32(revisionHistoryLimit)))
 
 			// we need to filter out any deployments that we don't care about,
 			// namely the active deployment and any newer deployments
+			// TODO: get rid of ugly conversion by porting the deploymentconfig controller to v1 RCs
+			deployments := make([]*kapi.ReplicationController, len(deploymentsv1))
+			for i := range deploymentsv1 {
+				deployments[i] = &kapi.ReplicationController{}
+				v1.Convert_v1_ReplicationController_To_api_ReplicationController(deploymentsv1[i], deployments[i], nil)
+			}
 			oldDeployments := deployutil.DeploymentsForCleanup(deploymentConfig, deployments)
 
 			// we should not have more deployments than acceptable
@@ -815,14 +879,14 @@ var _ = g.Describe("deploymentconfigs", func() {
 			o.Expect(waitForLatestCondition(oc, name, deploymentRunTimeout, deploymentRunning)).NotTo(o.HaveOccurred())
 
 			g.By("verifying that all pods are ready")
-			config, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name)
+			config, err := oc.Client().DeploymentConfigs(oc.Namespace()).Get(name, metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			selector := labels.Set(config.Spec.Selector).AsSelector()
-			opts := kapi.ListOptions{LabelSelector: selector}
+			opts := metav1.ListOptions{LabelSelector: selector.String()}
 			ready := 0
 			if err := wait.PollImmediate(500*time.Millisecond, 3*time.Minute, func() (bool, error) {
-				pods, err := oc.KubeClient().Core().Pods(oc.Namespace()).List(opts)
+				pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(opts)
 				if err != nil {
 					return false, nil
 				}
@@ -830,7 +894,7 @@ var _ = g.Describe("deploymentconfigs", func() {
 				ready = 0
 				for i := range pods.Items {
 					pod := pods.Items[i]
-					if kapi.IsPodReady(&pod) {
+					if kapiv1.IsPodReady(&pod) {
 						ready++
 					}
 				}
@@ -843,8 +907,9 @@ var _ = g.Describe("deploymentconfigs", func() {
 
 			g.By("verifying that the deployment is still running")
 			latestName := deployutil.DeploymentNameForConfigVersion(name, config.Status.LatestVersion)
-			latest, err := oc.KubeClient().Core().ReplicationControllers(oc.Namespace()).Get(latestName)
+			latest, err := oc.InternalKubeClient().Core().ReplicationControllers(oc.Namespace()).Get(latestName, metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
+
 			if deployutil.IsTerminatedDeployment(latest) {
 				o.Expect(fmt.Errorf("expected deployment %q not to have terminated", latest.Name)).NotTo(o.HaveOccurred())
 			}
@@ -883,7 +948,7 @@ var _ = g.Describe("deploymentconfigs", func() {
 				}
 				conditions = dc.Status.Conditions
 				cond := deployutil.GetDeploymentCondition(dc.Status, deployapi.DeploymentProgressing)
-				return cond != nil && cond.Reason == deployutil.NewReplicationControllerReason, nil
+				return cond != nil && cond.Reason == deployapi.NewReplicationControllerReason, nil
 			})
 			if err == wait.ErrWaitTimeout {
 				err = fmt.Errorf("deployment config %q never updated its conditions: %#v", name, conditions)

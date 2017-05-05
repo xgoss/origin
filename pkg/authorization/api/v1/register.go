@@ -1,16 +1,23 @@
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-const GroupName = ""
-
-// SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
+const (
+	GroupName       = "authorization.openshift.io"
+	LegacyGroupName = ""
+)
 
 var (
+	SchemeGroupVersion       = schema.GroupVersion{Group: GroupName, Version: "v1"}
+	LegacySchemeGroupVersion = schema.GroupVersion{Group: LegacyGroupName, Version: "v1"}
+
+	LegacySchemeBuilder    = runtime.NewSchemeBuilder(addLegacyKnownTypes, addConversionFuncs, addDefaultingFuncs)
+	AddToSchemeInCoreGroup = LegacySchemeBuilder.AddToScheme
+
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes, addConversionFuncs, addDefaultingFuncs)
 	AddToScheme   = SchemeBuilder.AddToScheme
 )
@@ -49,5 +56,43 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&RoleBindingRestriction{},
 		&RoleBindingRestrictionList{},
 	)
+	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+	return nil
+}
+
+func addLegacyKnownTypes(scheme *runtime.Scheme) error {
+	types := []runtime.Object{
+		&Role{},
+		&RoleBinding{},
+		&Policy{},
+		&PolicyBinding{},
+		&PolicyList{},
+		&PolicyBindingList{},
+		&RoleBindingList{},
+		&RoleList{},
+
+		&SelfSubjectRulesReview{},
+		&SubjectRulesReview{},
+		&ResourceAccessReview{},
+		&SubjectAccessReview{},
+		&LocalResourceAccessReview{},
+		&LocalSubjectAccessReview{},
+		&ResourceAccessReviewResponse{},
+		&SubjectAccessReviewResponse{},
+		&IsPersonalSubjectAccessReview{},
+
+		&ClusterRole{},
+		&ClusterRoleBinding{},
+		&ClusterPolicy{},
+		&ClusterPolicyBinding{},
+		&ClusterPolicyList{},
+		&ClusterPolicyBindingList{},
+		&ClusterRoleBindingList{},
+		&ClusterRoleList{},
+
+		&RoleBindingRestriction{},
+		&RoleBindingRestrictionList{},
+	}
+	scheme.AddKnownTypes(LegacySchemeGroupVersion, types...)
 	return nil
 }

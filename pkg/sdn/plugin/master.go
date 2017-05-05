@@ -11,21 +11,20 @@ import (
 	osapi "github.com/openshift/origin/pkg/sdn/api"
 	"github.com/openshift/origin/pkg/util/netutils"
 
-	kapi "k8s.io/kubernetes/pkg/api"
-	kapiunversioned "k8s.io/kubernetes/pkg/api/unversioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	kerrors "k8s.io/kubernetes/pkg/util/errors"
 )
 
 type OsdnMaster struct {
-	kClient         *kclientset.Clientset
+	kClient         kclientset.Interface
 	osClient        *osclient.Client
 	networkInfo     *NetworkInfo
 	subnetAllocator *netutils.SubnetAllocator
 	vnids           *masterVNIDMap
 }
 
-func StartMaster(networkConfig osconfigapi.MasterNetworkConfig, osClient *osclient.Client, kClient *kclientset.Clientset) error {
+func StartMaster(networkConfig osconfigapi.MasterNetworkConfig, osClient *osclient.Client, kClient kclientset.Interface) error {
 	if !osapi.IsOpenShiftNetworkPlugin(networkConfig.NetworkPluginName) {
 		return nil
 	}
@@ -45,7 +44,7 @@ func StartMaster(networkConfig osconfigapi.MasterNetworkConfig, osClient *osclie
 
 	createConfig := false
 	updateConfig := false
-	cn, err := master.osClient.ClusterNetwork().Get(osapi.ClusterNetworkDefault)
+	cn, err := master.osClient.ClusterNetwork().Get(osapi.ClusterNetworkDefault, metav1.GetOptions{})
 	if err == nil {
 		if master.networkInfo.ClusterNetwork.String() != cn.Network ||
 			networkConfig.HostSubnetLength != cn.HostSubnetLength ||
@@ -55,8 +54,8 @@ func StartMaster(networkConfig osconfigapi.MasterNetworkConfig, osClient *osclie
 		}
 	} else {
 		cn = &osapi.ClusterNetwork{
-			TypeMeta:   kapiunversioned.TypeMeta{Kind: "ClusterNetwork"},
-			ObjectMeta: kapi.ObjectMeta{Name: osapi.ClusterNetworkDefault},
+			TypeMeta:   metav1.TypeMeta{Kind: "ClusterNetwork"},
+			ObjectMeta: metav1.ObjectMeta{Name: osapi.ClusterNetworkDefault},
 		}
 		createConfig = true
 	}
@@ -120,43 +119,44 @@ func (master *OsdnMaster) validateNetworkConfig() error {
 	// Ensure cluster and service network don't overlap with host networks
 	for _, ipNet := range hostIPNets {
 		if ipNet.Contains(ni.ClusterNetwork.IP) {
-			errList = append(errList, fmt.Errorf("Error: Cluster IP: %s conflicts with host network: %s", ni.ClusterNetwork.IP.String(), ipNet.String()))
+			errList = append(errList, fmt.Errorf("cluster IP: %s conflicts with host network: %s", ni.ClusterNetwork.IP.String(), ipNet.String()))
 		}
 		if ni.ClusterNetwork.Contains(ipNet.IP) {
-			errList = append(errList, fmt.Errorf("Error: Host network with IP: %s conflicts with cluster network: %s", ipNet.IP.String(), ni.ClusterNetwork.String()))
+			errList = append(errList, fmt.Errorf("host network with IP: %s conflicts with cluster network: %s", ipNet.IP.String(), ni.ClusterNetwork.String()))
 		}
 		if ipNet.Contains(ni.ServiceNetwork.IP) {
-			errList = append(errList, fmt.Errorf("Error: Service IP: %s conflicts with host network: %s", ni.ServiceNetwork.String(), ipNet.String()))
+			errList = append(errList, fmt.Errorf("service IP: %s conflicts with host network: %s", ni.ServiceNetwork.String(), ipNet.String()))
 		}
 		if ni.ServiceNetwork.Contains(ipNet.IP) {
-			errList = append(errList, fmt.Errorf("Error: Host network with IP: %s conflicts with service network: %s", ipNet.IP.String(), ni.ServiceNetwork.String()))
+			errList = append(errList, fmt.Errorf("host network with IP: %s conflicts with service network: %s", ipNet.IP.String(), ni.ServiceNetwork.String()))
 		}
 	}
 
 	// Ensure each host subnet is within the cluster network
-	subnets, err := master.osClient.HostSubnets().List(kapi.ListOptions{})
+	subnets, err := master.osClient.HostSubnets().List(metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("Error in initializing/fetching subnets: %v", err)
+		return fmt.Errorf("error in initializing/fetching subnets: %v", err)
 	}
 	for _, sub := range subnets.Items {
 		subnetIP, _, _ := net.ParseCIDR(sub.Subnet)
 		if subnetIP == nil {
-			errList = append(errList, fmt.Errorf("Failed to parse network address: %s", sub.Subnet))
+			errList = append(errList, fmt.Errorf("failed to parse network address: %s", sub.Subnet))
 			continue
 		}
 		if !ni.ClusterNetwork.Contains(subnetIP) {
-			errList = append(errList, fmt.Errorf("Error: Existing node subnet: %s is not part of cluster network: %s", sub.Subnet, ni.ClusterNetwork.String()))
+			errList = append(errList, fmt.Errorf("existing node subnet: %s is not part of cluster network: %s", sub.Subnet, ni.ClusterNetwork.String()))
 		}
 	}
 
 	// Ensure each service is within the services network
-	services, err := master.kClient.Core().Services(kapi.NamespaceAll).List(kapi.ListOptions{})
+	services, err := master.kClient.Core().Services(metav1.NamespaceAll).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	for _, svc := range services.Items {
-		if !ni.ServiceNetwork.Contains(net.ParseIP(svc.Spec.ClusterIP)) {
-			errList = append(errList, fmt.Errorf("Error: Existing service with IP: %s is not part of service network: %s", svc.Spec.ClusterIP, ni.ServiceNetwork.String()))
+		svcIP := net.ParseIP(svc.Spec.ClusterIP)
+		if svcIP != nil && !ni.ServiceNetwork.Contains(svcIP) {
+			errList = append(errList, fmt.Errorf("existing service with IP: %s is not part of service network: %s", svc.Spec.ClusterIP, ni.ServiceNetwork.String()))
 		}
 	}
 

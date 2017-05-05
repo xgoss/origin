@@ -9,13 +9,15 @@ import (
 	"github.com/docker/distribution/reference"
 	"github.com/golang/glog"
 
+	"k8s.io/apimachinery/pkg/api/validation/path"
+	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/api/validation/path"
-	"k8s.io/kubernetes/pkg/util/diff"
-	"k8s.io/kubernetes/pkg/util/validation/field"
 
+	serverapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/image/api"
+	stringsutil "github.com/openshift/origin/pkg/util/strings"
 )
 
 // RepositoryNameComponentRegexp restricts registry path component names to
@@ -295,6 +297,37 @@ func ValidateImageStreamTagUpdate(newIST, oldIST *api.ImageStreamTag) field.Erro
 	}
 
 	return result
+}
+
+func ValidateRegistryAllowedForImport(path *field.Path, name, registryHost, registryPort string, allowedRegistries *serverapi.AllowedRegistries) field.ErrorList {
+	errs := field.ErrorList{}
+	if allowedRegistries == nil {
+		return errs
+	}
+	allowedRegistriesForHumans := []string{}
+	for _, registry := range *allowedRegistries {
+		allowedRegistryHost, allowedRegistryPort := "", ""
+		parts := strings.Split(registry.DomainName, ":")
+		switch len(parts) {
+		case 1:
+			allowedRegistryHost = parts[0]
+			if registry.Insecure {
+				allowedRegistryPort = "80"
+			} else {
+				allowedRegistryPort = "443"
+			}
+		case 2:
+			allowedRegistryHost, allowedRegistryPort = parts[0], parts[1]
+		default:
+			continue
+		}
+		if stringsutil.IsWildcardMatch(registryHost, allowedRegistryHost) && stringsutil.IsWildcardMatch(registryPort, allowedRegistryPort) {
+			return errs
+		}
+		allowedRegistriesForHumans = append(allowedRegistriesForHumans, registry.DomainName)
+	}
+	return append(errs, field.Invalid(path, name,
+		fmt.Sprintf("importing images from registry %q is forbidden, only images from %q are allowed", registryHost+":"+registryPort, strings.Join(allowedRegistriesForHumans, ","))))
 }
 
 func ValidateImageStreamImport(isi *api.ImageStreamImport) field.ErrorList {

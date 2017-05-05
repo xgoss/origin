@@ -5,6 +5,7 @@ import (
 
 	"github.com/golang/glog"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kapi "k8s.io/kubernetes/pkg/api"
 
 	osapi "github.com/openshift/origin/pkg/sdn/api"
@@ -35,7 +36,7 @@ func (mp *multiTenantPlugin) Start(node *OsdnNode) error {
 		return err
 	}
 
-	otx := node.ovs.NewTransaction()
+	otx := node.oc.NewTransaction()
 	otx.AddFlow("table=80, priority=200, reg0=0, actions=output:NXM_NX_REG2[]")
 	otx.AddFlow("table=80, priority=200, reg1=0, actions=output:NXM_NX_REG2[]")
 	if err := otx.EndTransaction(); err != nil {
@@ -58,7 +59,7 @@ func (mp *multiTenantPlugin) updatePodNetwork(namespace string, oldNetID, netID 
 	if err != nil {
 		glog.Errorf("Could not get list of local pods in namespace %q: %v", namespace, err)
 	}
-	services, err := mp.node.kClient.Core().Services(namespace).List(kapi.ListOptions{})
+	services, err := mp.node.kClient.Core().Services(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		glog.Errorf("Could not get list of services in namespace %q: %v", namespace, err)
 		services = &kapi.ServiceList{}
@@ -138,7 +139,7 @@ func (mp *multiTenantPlugin) RefVNID(vnid uint32) {
 	}
 	glog.V(5).Infof("RefVNID %d adding rule", vnid)
 
-	otx := mp.node.ovs.NewTransaction()
+	otx := mp.node.oc.NewTransaction()
 	otx.AddFlow("table=80, priority=100, reg0=%d, reg1=%d, actions=output:NXM_NX_REG2[]", vnid, vnid)
 	if err := otx.EndTransaction(); err != nil {
 		glog.Errorf("Error adding OVS flow for VNID: %v", err)
@@ -162,7 +163,7 @@ func (mp *multiTenantPlugin) UnrefVNID(vnid uint32) {
 	}
 	glog.V(5).Infof("UnrefVNID %d removing rule", vnid)
 
-	otx := mp.node.ovs.NewTransaction()
+	otx := mp.node.oc.NewTransaction()
 	otx.DeleteFlows("table=80, reg0=%d, reg1=%d", vnid, vnid)
 	if err := otx.EndTransaction(); err != nil {
 		glog.Errorf("Error deleting OVS flow for VNID: %v", err)
@@ -175,7 +176,7 @@ func (mp *multiTenantPlugin) moveVNIDRefs(num int, oldVNID, newVNID uint32) {
 	mp.vnidRefsLock.Lock()
 	defer mp.vnidRefsLock.Unlock()
 
-	otx := mp.node.ovs.NewTransaction()
+	otx := mp.node.oc.NewTransaction()
 	if mp.vnidRefs[oldVNID] <= num {
 		otx.DeleteFlows("table=80, reg0=%d, reg1=%d", oldVNID, oldVNID)
 	}

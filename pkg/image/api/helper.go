@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/blang/semver"
 	"github.com/docker/distribution/digest"
@@ -34,6 +35,10 @@ const (
 
 	// TagReferenceAnnotationTagHidden indicates that a given TagReference is hidden from search results
 	TagReferenceAnnotationTagHidden = "hidden"
+
+	// ImportRegistryNotAllowed indicates that the image tag was not imported due to
+	// untrusted registry.
+	ImportRegistryNotAllowed = "registry is not allowed for import"
 )
 
 // DefaultRegistry returns the default Docker registry (host or host:port), or false if it is not available.
@@ -166,6 +171,21 @@ func (r DockerImageReference) RepositoryName() string {
 	r.ID = ""
 	r.Registry = ""
 	return r.Exact()
+}
+
+// RegistryHostPort returns the registry hostname and the port.
+// If the port is not specified in the registry hostname we default to 443.
+// This will also default to Docker client defaults if the registry hostname is empty.
+func (r DockerImageReference) RegistryHostPort(insecure bool) (string, string) {
+	registryHost := r.AsV2().DockerClientDefaults().Registry
+	if strings.Contains(registryHost, ":") {
+		hostname, port, _ := net.SplitHostPort(registryHost)
+		return hostname, port
+	}
+	if insecure {
+		return registryHost, "80"
+	}
+	return registryHost, "443"
 }
 
 // RepositoryName returns the registry relative name
@@ -455,9 +475,12 @@ func ImageWithMetadata(image *Image) error {
 	case 2:
 		image.DockerImageManifestMediaType = schema2.MediaTypeManifest
 
+		if len(image.DockerImageConfig) == 0 {
+			return fmt.Errorf("dockerImageConfig must not be empty for manifest schema 2")
+		}
 		config := DockerImageConfig{}
 		if err := json.Unmarshal([]byte(image.DockerImageConfig), &config); err != nil {
-			return err
+			return fmt.Errorf("failed to parse dockerImageConfig: %v", err)
 		}
 
 		image.DockerImageLayers = make([]ImageLayer, len(manifest.Layers))
@@ -553,10 +576,8 @@ func LatestImageTagEvent(stream *ImageStream, imageID string) (string, *TagEvent
 			continue
 		}
 		for i, event := range events.Items {
-			if event.Image != imageID {
-				continue
-			}
-			if latestTagEvent == nil || (latestTagEvent != nil && event.Created.After(latestTagEvent.Created.Time)) {
+			if digestOrImageMatch(event.Image, imageID) &&
+				(latestTagEvent == nil || latestTagEvent != nil && event.Created.After(latestTagEvent.Created.Time)) {
 				latestTagEvent = &events.Items[i]
 				latestTag = tag
 			}
@@ -845,6 +866,13 @@ func UpdateTrackingTags(stream *ImageStream, updatedTag string, updatedImage Tag
 	return updated
 }
 
+func digestOrImageMatch(image, imageID string) bool {
+	if d, err := digest.ParseDigest(image); err == nil {
+		return strings.HasPrefix(d.Hex(), imageID) || strings.HasPrefix(image, imageID)
+	}
+	return strings.HasPrefix(image, imageID)
+}
+
 // ResolveImageID returns latest TagEvent for specified imageID and an error if
 // there's more than one image matching the ID or when one does not exist.
 func ResolveImageID(stream *ImageStream, imageID string) (*TagEvent, error) {
@@ -853,14 +881,7 @@ func ResolveImageID(stream *ImageStream, imageID string) (*TagEvent, error) {
 	for _, history := range stream.Status.Tags {
 		for i := range history.Items {
 			tagging := &history.Items[i]
-			if d, err := digest.ParseDigest(tagging.Image); err == nil {
-				if strings.HasPrefix(d.Hex(), imageID) || strings.HasPrefix(tagging.Image, imageID) {
-					event = tagging
-					set.Insert(tagging.Image)
-				}
-				continue
-			}
-			if strings.HasPrefix(tagging.Image, imageID) {
+			if digestOrImageMatch(tagging.Image, imageID) {
 				event = tagging
 				set.Insert(tagging.Image)
 			}
@@ -869,7 +890,7 @@ func ResolveImageID(stream *ImageStream, imageID string) (*TagEvent, error) {
 	switch len(set) {
 	case 1:
 		return &TagEvent{
-			Created:              unversioned.Now(),
+			Created:              metav1.Now(),
 			DockerImageReference: event.DockerImageReference,
 			Image:                event.Image,
 		}, nil

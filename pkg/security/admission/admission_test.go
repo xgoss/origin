@@ -6,21 +6,22 @@ import (
 	"strings"
 	"testing"
 
-	kadmission "k8s.io/kubernetes/pkg/admission"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/diff"
+	kadmission "k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/client-go/tools/cache"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/client/cache"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	"k8s.io/kubernetes/pkg/util/diff"
+	kcorelisters "k8s.io/kubernetes/pkg/client/listers/core/internalversion"
 
-	oscache "github.com/openshift/origin/pkg/client/cache"
 	allocator "github.com/openshift/origin/pkg/security"
 	admissiontesting "github.com/openshift/origin/pkg/security/admission/testing"
 	oscc "github.com/openshift/origin/pkg/security/scc"
 )
 
-func NewTestAdmission(lister *oscache.IndexerToSecurityContextConstraintsLister, kclient clientset.Interface) kadmission.Interface {
+func NewTestAdmission(lister kcorelisters.SecurityContextConstraintsLister, kclient clientset.Interface) kadmission.Interface {
 	return &constraint{
 		Handler:   kadmission.NewHandler(kadmission.Create),
 		client:    kclient,
@@ -48,6 +49,10 @@ func TestAdmitCaps(t *testing.T) {
 	requiresFooToBeDropped := restrictiveSCC()
 	requiresFooToBeDropped.Name = "requireDrop"
 	requiresFooToBeDropped.RequiredDropCapabilities = []kapi.Capability{"foo"}
+
+	allowAllInAllowed := restrictiveSCC()
+	allowAllInAllowed.Name = "allowAllCapsInAllowed"
+	allowAllInAllowed.AllowedCapabilities = []kapi.Capability{kapi.CapabilityAll}
 
 	tc := map[string]struct {
 		pod                  *kapi.Pod
@@ -108,6 +113,12 @@ func TestAdmitCaps(t *testing.T) {
 				Drop: []kapi.Capability{"foo"},
 			},
 		},
+		// UC 8: using '*' in allowed caps
+		"should accept cap add when all caps are allowed": {
+			pod:        createPodWithCaps(&kapi.Capabilities{Add: []kapi.Capability{"foo"}}),
+			sccs:       []*kapi.SecurityContextConstraints{restricted, allowAllInAllowed},
+			shouldPass: true,
+		},
 	}
 
 	for i := 0; i < 2; i++ {
@@ -133,12 +144,10 @@ func testSCCAdmit(testCaseName string, sccs []*kapi.SecurityContextConstraints, 
 	namespace := admissiontesting.CreateNamespaceForTest()
 	serviceAccount := admissiontesting.CreateSAForTest()
 	tc := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
-	cache := &oscache.IndexerToSecurityContextConstraintsLister{
-		Indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc,
-			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}),
-	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	cache := kcorelisters.NewSecurityContextConstraintsLister(indexer)
 	for _, scc := range sccs {
-		cache.Add(scc)
+		indexer.Add(scc)
 	}
 
 	plugin := NewTestAdmission(cache, tc)
@@ -166,7 +175,7 @@ func TestAdmit(t *testing.T) {
 
 	// create scc that requires allocation retrieval
 	saSCC := &kapi.SecurityContextConstraints{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "scc-sa",
 		},
 		RunAsUser: kapi.RunAsUserStrategyOptions{
@@ -189,7 +198,7 @@ func TestAdmit(t *testing.T) {
 	// validate the requests so we should try scc-sa.
 	var exactUID int64 = 999
 	saExactSCC := &kapi.SecurityContextConstraints{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "scc-sa-exact",
 		},
 		RunAsUser: kapi.RunAsUserStrategyOptions{
@@ -216,12 +225,12 @@ func TestAdmit(t *testing.T) {
 		},
 		Groups: []string{"system:serviceaccounts"},
 	}
-	cache := &oscache.IndexerToSecurityContextConstraintsLister{
-		Indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc,
-			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}),
-	}
-	cache.Add(saExactSCC)
-	cache.Add(saSCC)
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	cache := kcorelisters.NewSecurityContextConstraintsLister(indexer)
+
+	indexer.Add(saExactSCC)
+	indexer.Add(saSCC)
 
 	// create the admission plugin
 	p := NewTestAdmission(cache, tc)
@@ -442,7 +451,7 @@ func TestAdmit(t *testing.T) {
 	// now add an escalated scc to the group and re-run the cases that expected failure, they should
 	// now pass by validating against the escalated scc.
 	adminSCC := &kapi.SecurityContextConstraints{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "scc-admin",
 		},
 		AllowPrivilegedContainer: true,
@@ -465,7 +474,7 @@ func TestAdmit(t *testing.T) {
 		Groups: []string{"system:serviceaccounts"},
 	}
 
-	cache.Add(adminSCC)
+	indexer.Add(adminSCC)
 
 	for i := 0; i < 2; i++ {
 		for k, v := range testCases {
@@ -500,7 +509,7 @@ func hasSupGroup(group int64, groups []int64) bool {
 
 func TestCreateProvidersFromConstraints(t *testing.T) {
 	namespaceValid := &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 			Annotations: map[string]string{
 				allocator.UIDRangeAnnotation:           "1/3",
@@ -510,7 +519,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		},
 	}
 	namespaceNoUID := &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 			Annotations: map[string]string{
 				allocator.MCSAnnotation:                "s0:c1,c0",
@@ -519,7 +528,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		},
 	}
 	namespaceNoMCS := &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 			Annotations: map[string]string{
 				allocator.UIDRangeAnnotation:           "1/3",
@@ -529,7 +538,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 	}
 
 	namespaceNoSupplementalGroupsFallbackToUID := &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 			Annotations: map[string]string{
 				allocator.UIDRangeAnnotation: "1/3",
@@ -539,7 +548,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 	}
 
 	namespaceBadSupGroups := &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 			Annotations: map[string]string{
 				allocator.UIDRangeAnnotation:           "1/3",
@@ -558,7 +567,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"valid non-preallocated scc": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "valid non-preallocated scc",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -580,7 +589,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"valid pre-allocated scc": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "valid pre-allocated scc",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -603,7 +612,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"pre-allocated no uid annotation": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "pre-allocated no uid annotation",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -626,7 +635,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"pre-allocated no mcs annotation": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "pre-allocated no mcs annotation",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -649,7 +658,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"pre-allocated group falls back to UID annotation": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "pre-allocated no sup group annotation",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -671,7 +680,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"pre-allocated group bad value fails": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "pre-allocated no sup group annotation",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -694,7 +703,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"bad scc strategy options": {
 			scc: func() *kapi.SecurityContextConstraints {
 				return &kapi.SecurityContextConstraints{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "bad scc user options",
 					},
 					SELinuxContext: kapi.SELinuxContextStrategyOptions{
@@ -750,25 +759,23 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 func TestMatchingSecurityContextConstraints(t *testing.T) {
 	sccs := []*kapi.SecurityContextConstraints{
 		{
-			ObjectMeta: kapi.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Name: "match group",
 			},
 			Groups: []string{"group"},
 		},
 		{
-			ObjectMeta: kapi.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Name: "match user",
 			},
 			Users: []string{"user"},
 		},
 	}
 
-	cache := &oscache.IndexerToSecurityContextConstraintsLister{
-		Indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc,
-			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}),
-	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	cache := kcorelisters.NewSecurityContextConstraintsLister(indexer)
 	for _, scc := range sccs {
-		cache.Add(scc)
+		indexer.Add(scc)
 	}
 
 	// single match cases
@@ -904,12 +911,11 @@ func TestAdmitWithPrioritizedSCC(t *testing.T) {
 	serviceAccount.Namespace = namespace.Name
 	tc := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
 
-	cache := &oscache.IndexerToSecurityContextConstraintsLister{
-		Indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc,
-			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}),
-	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	cache := kcorelisters.NewSecurityContextConstraintsLister(indexer)
+
 	for _, scc := range sccsToSort {
-		err := cache.Add(scc)
+		err := indexer.Add(scc)
 		if err != nil {
 			t.Fatalf("error adding sccs to store: %v", err)
 		}
@@ -1062,7 +1068,7 @@ func testSCCAdmission(pod *kapi.Pod, plugin kadmission.Interface, expectedSCC st
 
 func laxSCC() *kapi.SecurityContextConstraints {
 	return &kapi.SecurityContextConstraints{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "lax",
 		},
 		RunAsUser: kapi.RunAsUserStrategyOptions{
@@ -1084,7 +1090,7 @@ func laxSCC() *kapi.SecurityContextConstraints {
 func restrictiveSCC() *kapi.SecurityContextConstraints {
 	var exactUID int64 = 999
 	return &kapi.SecurityContextConstraints{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "restrictive",
 		},
 		RunAsUser: kapi.RunAsUserStrategyOptions{
@@ -1118,7 +1124,7 @@ func restrictiveSCC() *kapi.SecurityContextConstraints {
 // SCC when defaults are filled in.
 func goodPod() *kapi.Pod {
 	return &kapi.Pod{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 		},
 		Spec: kapi.PodSpec{

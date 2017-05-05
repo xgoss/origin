@@ -15,8 +15,8 @@ import (
 	"github.com/docker/distribution/digest"
 	"github.com/docker/distribution/manifest/schema1"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 
 	"github.com/openshift/origin/pkg/cmd/dockerregistry"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
@@ -217,7 +217,7 @@ func TestPullThroughInsecure(t *testing.T) {
 	srvurl, _ := url.Parse(server.URL)
 
 	stream := imageapi.ImageStreamImport{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testutil.Namespace(),
 			Name:      "myimagestream",
 			Annotations: map[string]string{
@@ -247,7 +247,7 @@ func TestPullThroughInsecure(t *testing.T) {
 		t.Fatalf("imported unexpected number of images (%d != 1)", len(isi.Status.Images))
 	}
 	for i, image := range isi.Status.Images {
-		if image.Status.Status != unversioned.StatusSuccess {
+		if image.Status.Status != metav1.StatusSuccess {
 			t.Fatalf("unexpected status %d: %#v", i, image.Status)
 		}
 
@@ -261,7 +261,7 @@ func TestPullThroughInsecure(t *testing.T) {
 		}
 	}
 
-	istream, err := adminClient.ImageStreams(stream.Namespace).Get(stream.Name)
+	istream, err := adminClient.ImageStreams(stream.Namespace).Get(stream.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,14 +291,14 @@ func TestPullThroughInsecure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("Run testPullThroughStatBlob (%s == true)...", imageapi.InsecureRepositoryAnnotation)
+	t.Logf("Run testPullThroughStatBlob (%s == true, spec.tags[%q].importPolicy.insecure == true)...", imageapi.InsecureRepositoryAnnotation, repotag)
 	for digest := range descriptors {
 		if err := testPullThroughStatBlob(&stream, user, token, digest); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	istream, err = adminClient.ImageStreams(stream.Namespace).Get(stream.Name)
+	istream, err = adminClient.ImageStreams(stream.Namespace).Get(stream.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,10 +309,31 @@ func TestPullThroughInsecure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("Run testPullThroughStatBlob (%s == false)...", imageapi.InsecureRepositoryAnnotation)
+	t.Logf("Run testPullThroughStatBlob (%s == false, spec.tags[%q].importPolicy.insecure == true)...", imageapi.InsecureRepositoryAnnotation, repotag)
+	for digest := range descriptors {
+		if err := testPullThroughStatBlob(&stream, user, token, digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	istream, err = adminClient.ImageStreams(stream.Namespace).Get(stream.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagRef := istream.Spec.Tags[repotag]
+	tagRef.ImportPolicy.Insecure = false
+	istream.Spec.Tags[repotag] = tagRef
+	_, err = adminClient.ImageStreams(istream.Namespace).Update(istream)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("Run testPullThroughStatBlob (%s == false, spec.tags[%q].importPolicy.insecure == false)...", imageapi.InsecureRepositoryAnnotation, repotag)
 	for digest := range descriptors {
 		if err := testPullThroughStatBlob(&stream, user, token, digest); err == nil {
 			t.Fatal("unexpexted access to insecure blobs")
+		} else {
+			t.Logf("%#+v", err)
 		}
 	}
 }

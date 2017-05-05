@@ -8,12 +8,12 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
-	kapi "k8s.io/kubernetes/pkg/api"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util/sets"
 
 	oclient "github.com/openshift/origin/pkg/client"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
@@ -56,6 +56,8 @@ type RouterSelection struct {
 	DisableNamespaceOwnershipCheck bool
 
 	EnableIngress bool
+
+	ListenAddr string
 }
 
 // Bind sets the appropriate labels
@@ -73,6 +75,7 @@ func (o *RouterSelection) Bind(flag *pflag.FlagSet) {
 	flag.BoolVar(&o.AllowWildcardRoutes, "allow-wildcard-routes", cmdutil.Env("ROUTER_ALLOW_WILDCARD_ROUTES", "") == "true", "Allow wildcard host names for routes")
 	flag.BoolVar(&o.DisableNamespaceOwnershipCheck, "disable-namespace-ownership-check", cmdutil.Env("ROUTER_DISABLE_NAMESPACE_OWNERSHIP_CHECK", "") == "true", "Disables the namespace ownership checks for a route host with different paths or for overlapping host names in the case of wildcard routes. Please be aware that if namespace ownership checks are disabled, routes in a different namespace can use this mechanism to 'steal' sub-paths for existing domains. This is only safe if route creation privileges are restricted, or if all the users can be trusted.")
 	flag.BoolVar(&o.EnableIngress, "enable-ingress", cmdutil.Env("ROUTER_ENABLE_INGRESS", "") == "true", "Enable configuration via ingress resources")
+	flag.StringVar(&o.ListenAddr, "listen-addr", cmdutil.Env("ROUTER_LISTEN_ADDR", ""), "The name of an interface to listen on to expose metrics and health checking. If not specified, will not listen.")
 }
 
 // RouteSelectionFunc returns a func that identifies the host for a route.
@@ -245,7 +248,7 @@ type projectNames struct {
 }
 
 func (n projectNames) NamespaceNames() (sets.String, error) {
-	all, err := n.client.List(kapi.ListOptions{LabelSelector: n.selector})
+	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +266,7 @@ type namespaceNames struct {
 }
 
 func (n namespaceNames) NamespaceNames() (sets.String, error) {
-	all, err := n.client.List(kapi.ListOptions{LabelSelector: n.selector})
+	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
 	if err != nil {
 		return nil, err
 	}

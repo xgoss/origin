@@ -17,7 +17,6 @@ import (
 	"github.com/docker/distribution/configuration"
 	"github.com/docker/distribution/context"
 	"github.com/docker/distribution/health"
-	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/auth"
 	"github.com/docker/distribution/registry/handlers"
 	"github.com/docker/distribution/uuid"
@@ -36,47 +35,68 @@ import (
 	_ "github.com/docker/distribution/registry/storage/driver/s3-aws"
 	_ "github.com/docker/distribution/registry/storage/driver/swift"
 
+	"strings"
+
 	"github.com/openshift/origin/pkg/cmd/server/crypto"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/openshift/origin/pkg/dockerregistry/server"
+	"github.com/openshift/origin/pkg/dockerregistry/server/api"
 	"github.com/openshift/origin/pkg/dockerregistry/server/audit"
+	registryconfig "github.com/openshift/origin/pkg/dockerregistry/server/configuration"
 )
 
 // Execute runs the Docker registry.
 func Execute(configFile io.Reader) {
-	config, err := configuration.Parse(configFile)
+	dockerConfig, extraConfig, err := registryconfig.Parse(configFile)
 	if err != nil {
 		log.Fatalf("error parsing configuration file: %s", err)
 	}
-	setDefaultMiddleware(config)
-	setDefaultLogParameters(config)
+	setDefaultMiddleware(dockerConfig)
+	setDefaultLogParameters(dockerConfig)
 
 	ctx := context.Background()
-	ctx, err = configureLogging(ctx, config)
+	ctx = server.WithConfiguration(ctx, extraConfig)
+	ctx, err = configureLogging(ctx, dockerConfig)
 	if err != nil {
 		log.Fatalf("error configuring logger: %v", err)
 	}
+
+	registryClient := server.NewRegistryClient(clientcmd.NewConfig().BindToFile())
+	ctx = server.WithRegistryClient(ctx, registryClient)
+
 	log.Infof("version=%s", version.Version)
 	// inject a logger into the uuid library. warns us if there is a problem
 	// with uuid generation under low entropy.
 	uuid.Loggerf = context.GetLogger(ctx).Warnf
 
-	app := handlers.NewApp(ctx, config)
+	// add parameters for the auth middleware
+	if dockerConfig.Auth.Type() == server.OpenShiftAuth {
+		if dockerConfig.Auth[server.OpenShiftAuth] == nil {
+			dockerConfig.Auth[server.OpenShiftAuth] = make(configuration.Parameters)
+		}
+		dockerConfig.Auth[server.OpenShiftAuth][server.AccessControllerOptionParams] = server.AccessControllerParams{
+			Logger:           context.GetLogger(ctx),
+			SafeClientConfig: registryClient.SafeClientConfig(),
+		}
+	}
+
+	app := handlers.NewApp(ctx, dockerConfig)
 
 	// Add a token handling endpoint
-	if options, usingOpenShiftAuth := config.Auth[server.OpenShiftAuth]; usingOpenShiftAuth {
+	if options, usingOpenShiftAuth := dockerConfig.Auth[server.OpenShiftAuth]; usingOpenShiftAuth {
 		tokenRealm, err := server.TokenRealm(options)
 		if err != nil {
-			log.Fatalf("error setting up token auth: %s", err)
+			context.GetLogger(app).Fatalf("error setting up token auth: %s", err)
 		}
-		err = app.NewRoute().Methods("GET").PathPrefix(tokenRealm.Path).Handler(server.NewTokenHandler(ctx, server.DefaultRegistryClient)).GetError()
+		err = app.NewRoute().Methods("GET").PathPrefix(tokenRealm.Path).Handler(server.NewTokenHandler(ctx, registryClient)).GetError()
 		if err != nil {
-			log.Fatalf("error setting up token endpoint at %q: %v", tokenRealm.Path, err)
+			context.GetLogger(app).Fatalf("error setting up token endpoint at %q: %v", tokenRealm.Path, err)
 		}
-		log.Debugf("configured token endpoint at %q", tokenRealm.String())
+		context.GetLogger(app).Debugf("configured token endpoint at %q", tokenRealm.String())
 	}
 
 	// TODO add https scheme
-	adminRouter := app.NewRoute().PathPrefix("/admin/").Subrouter()
+	adminRouter := app.NewRoute().PathPrefix(api.AdminPrefix).Subrouter()
 	pruneAccessRecords := func(*http.Request) []auth.Access {
 		return []auth.Access{
 			{
@@ -90,7 +110,7 @@ func Execute(configFile io.Reader) {
 
 	app.RegisterRoute(
 		// DELETE /admin/blobs/<digest>
-		adminRouter.Path("/blobs/{digest:"+reference.DigestRegexp.String()+"}").Methods("DELETE"),
+		adminRouter.Path(api.AdminPath).Methods("DELETE"),
 		// handler
 		server.BlobDispatcher,
 		// repo name not required in url
@@ -102,6 +122,11 @@ func Execute(configFile io.Reader) {
 	// Registry extensions endpoint provides extra functionality to handle the image
 	// signatures.
 	server.RegisterSignatureHandler(app)
+
+	// Registry extensions endpoint provides prometheus metrics.
+	if extraConfig.Metrics.Enabled {
+		server.RegisterMetricHandler(app)
+	}
 
 	// Advertise features supported by OpenShift
 	if app.Config.HTTP.Headers == nil {
@@ -117,18 +142,42 @@ func Execute(configFile io.Reader) {
 	handler = panicHandler(handler)
 	handler = gorillahandlers.CombinedLoggingHandler(os.Stdout, handler)
 
-	if config.HTTP.TLS.Certificate == "" {
-		context.GetLogger(app).Infof("listening on %v", config.HTTP.Addr)
-		if err := http.ListenAndServe(config.HTTP.Addr, handler); err != nil {
+	if dockerConfig.HTTP.TLS.Certificate == "" {
+		context.GetLogger(app).Infof("listening on %v", dockerConfig.HTTP.Addr)
+		if err := http.ListenAndServe(dockerConfig.HTTP.Addr, handler); err != nil {
 			context.GetLogger(app).Fatalln(err)
 		}
 	} else {
-		tlsConf := crypto.SecureTLSConfig(&tls.Config{ClientAuth: tls.NoClientCert})
+		var (
+			minVersion   uint16
+			cipherSuites []uint16
+		)
+		if s := os.Getenv("REGISTRY_HTTP_TLS_MINVERSION"); len(s) > 0 {
+			minVersion, err = crypto.TLSVersion(s)
+			if err != nil {
+				context.GetLogger(app).Fatalln(fmt.Errorf("invalid TLS version %q specified in REGISTRY_HTTP_TLS_MINVERSION: %v (valid values are %q)", s, err, crypto.ValidTLSVersions()))
+			}
+		}
+		if s := os.Getenv("REGISTRY_HTTP_TLS_CIPHERSUITES"); len(s) > 0 {
+			for _, cipher := range strings.Split(s, ",") {
+				cipherSuite, err := crypto.CipherSuite(cipher)
+				if err != nil {
+					context.GetLogger(app).Fatalln(fmt.Errorf("invalid cipher suite %q specified in REGISTRY_HTTP_TLS_CIPHERSUITES: %v (valid suites are %q)", s, err, crypto.ValidCipherSuites()))
+				}
+				cipherSuites = append(cipherSuites, cipherSuite)
+			}
+		}
 
-		if len(config.HTTP.TLS.ClientCAs) != 0 {
+		tlsConf := crypto.SecureTLSConfig(&tls.Config{
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   minVersion,
+			CipherSuites: cipherSuites,
+		})
+
+		if len(dockerConfig.HTTP.TLS.ClientCAs) != 0 {
 			pool := x509.NewCertPool()
 
-			for _, ca := range config.HTTP.TLS.ClientCAs {
+			for _, ca := range dockerConfig.HTTP.TLS.ClientCAs {
 				caPem, err := ioutil.ReadFile(ca)
 				if err != nil {
 					context.GetLogger(app).Fatalln(err)
@@ -147,14 +196,14 @@ func Execute(configFile io.Reader) {
 			tlsConf.ClientCAs = pool
 		}
 
-		context.GetLogger(app).Infof("listening on %v, tls", config.HTTP.Addr)
+		context.GetLogger(app).Infof("listening on %v, tls", dockerConfig.HTTP.Addr)
 		server := &http.Server{
-			Addr:      config.HTTP.Addr,
+			Addr:      dockerConfig.HTTP.Addr,
 			Handler:   handler,
 			TLSConfig: tlsConf,
 		}
 
-		if err := server.ListenAndServeTLS(config.HTTP.TLS.Certificate, config.HTTP.TLS.Key); err != nil {
+		if err := server.ListenAndServeTLS(dockerConfig.HTTP.TLS.Certificate, dockerConfig.HTTP.TLS.Key); err != nil {
 			context.GetLogger(app).Fatalln(err)
 		}
 	}

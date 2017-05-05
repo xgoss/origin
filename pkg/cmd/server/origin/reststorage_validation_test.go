@@ -5,13 +5,16 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/apiserver/pkg/storage/storagebackend"
 	extapi "k8s.io/kubernetes/pkg/apis/extensions"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	"k8s.io/kubernetes/pkg/controller/informers"
+	kclientsetexternal "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	fakeexternal "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/fake"
+	kclientsetinternal "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	fakeinternal "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	kinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions"
+	kinternalinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
-	"k8s.io/kubernetes/pkg/storage/storagebackend"
 
 	_ "github.com/openshift/origin/pkg/api/install"
 	"github.com/openshift/origin/pkg/api/validation"
@@ -37,50 +40,53 @@ func TestValidationRegistration(t *testing.T) {
 	config := fakeMasterConfig()
 
 	storageMap := config.GetRestStorage()
-	for key, storage := range storageMap {
-		obj := storage.New()
-		kindType := reflect.TypeOf(obj)
+	for key, resourceStorage := range storageMap {
+		for resource, storage := range resourceStorage {
+			obj := storage.New()
+			kindType := reflect.TypeOf(obj)
 
-		validationInfo, validatorExists := validation.Validator.GetInfo(obj)
+			validationInfo, validatorExists := validation.Validator.GetInfo(obj)
 
-		if _, ok := storage.(rest.Creater); ok {
-			// if we're a creater, then we must have a validate method registered
-			if !validatorExists {
-				t.Errorf("No validator registered for %v (used by %v).  Register in pkg/api/validation/register.go.", kindType, key)
-			}
-		}
-
-		if _, ok := storage.(rest.Updater); ok {
-			exempted := false
-			for _, t := range KnownUpdateValidationExceptions {
-				if t == kindType {
-					exempted = true
-					break
+			if _, ok := storage.(rest.Creater); ok {
+				// if we're a creater, then we must have a validate method registered
+				if !validatorExists {
+					t.Errorf("No validator registered for %v (used by %s/%s).  Register in pkg/api/validation/register.go.", kindType, resource, key)
 				}
 			}
 
-			// if we're an updater, then we must have a validateUpdate method registered
-			if !validatorExists && !exempted {
-				t.Errorf("No validator registered for %v (used by %v).  Register in pkg/api/validation/register.go.", kindType, key)
-			}
+			if _, ok := storage.(rest.Updater); ok {
+				exempted := false
+				for _, t := range KnownUpdateValidationExceptions {
+					if t == kindType {
+						exempted = true
+						break
+					}
+				}
 
-			if !validationInfo.UpdateAllowed && !exempted {
-				t.Errorf("No validateUpdate method registered for %v (used by %v).  Register in pkg/api/validation/register.go.", kindType, key)
+				// if we're an updater, then we must have a validateUpdate method registered
+				if !validatorExists && !exempted {
+					t.Errorf("No validator registered for %v (used by %s/%s).  Register in pkg/api/validation/register.go.", kindType, resource, key)
+				}
+
+				if !validationInfo.UpdateAllowed && !exempted {
+					t.Errorf("No validateUpdate method registered for %v (used by %s/%s).  Register in pkg/api/validation/register.go.", kindType, resource, key)
+				}
 			}
 		}
-
 	}
 }
 
 // fakeMasterConfig creates a new fake master config with an empty kubelet config and dummy storage.
 func fakeMasterConfig() *MasterConfig {
-	kubeInformerFactory := informers.NewSharedInformerFactory(fake.NewSimpleClientset(), 1*time.Second)
-	informerFactory := shared.NewInformerFactory(kubeInformerFactory, fake.NewSimpleClientset(), testclient.NewSimpleFake(), shared.DefaultListerWatcherOverrides{}, 1*time.Second)
+	internalkubeInformerFactory := kinternalinformers.NewSharedInformerFactory(fakeinternal.NewSimpleClientset(), 1*time.Second)
+	externalKubeInformerFactory := kinformers.NewSharedInformerFactory(fakeexternal.NewSimpleClientset(), 1*time.Second)
+	informerFactory := shared.NewInformerFactory(internalkubeInformerFactory, externalKubeInformerFactory, fakeinternal.NewSimpleClientset(), testclient.NewSimpleFake(), shared.DefaultListerWatcherOverrides{}, 1*time.Second)
 	return &MasterConfig{
-		KubeletClientConfig:                   &kubeletclient.KubeletClientConfig{},
-		RESTOptionsGetter:                     restoptions.NewSimpleGetter(&storagebackend.Config{ServerList: []string{"localhost"}}),
-		Informers:                             informerFactory,
-		ClusterQuotaMappingController:         clusterquotamapping.NewClusterQuotaMappingController(kubeInformerFactory.Namespaces(), informerFactory.ClusterResourceQuotas()),
-		PrivilegedLoopbackKubernetesClientset: &kclientset.Clientset{},
+		KubeletClientConfig:                           &kubeletclient.KubeletClientConfig{},
+		RESTOptionsGetter:                             restoptions.NewSimpleGetter(&storagebackend.Config{ServerList: []string{"localhost"}}),
+		Informers:                                     informerFactory,
+		ClusterQuotaMappingController:                 clusterquotamapping.NewClusterQuotaMappingController(internalkubeInformerFactory.Core().InternalVersion().Namespaces(), informerFactory.ClusterResourceQuotas()),
+		PrivilegedLoopbackKubernetesClientsetInternal: &kclientsetinternal.Clientset{},
+		PrivilegedLoopbackKubernetesClientsetExternal: &kclientsetexternal.Clientset{},
 	}
 }

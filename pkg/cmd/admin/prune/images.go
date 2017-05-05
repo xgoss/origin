@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	knet "k8s.io/apimachinery/pkg/util/net"
+	restclient "k8s.io/client-go/rest"
 	kapi "k8s.io/kubernetes/pkg/api"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/restclient"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	knet "k8s.io/kubernetes/pkg/util/net"
 
 	"github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
@@ -37,18 +38,18 @@ var (
 		Remove image stream tags, images, and image layers by age or usage
 
 		This command removes historical image stream tags, unused images, and unreferenced image
-		layers from the integrated registry. It prefers images that have been directly pushed to
-		the registry, but you may specify --all to include images that were imported (if registry
-		mirroring is enabled).
+		layers from the integrated registry. By default, all images are considered as candidates.
+		The command can be instructed to consider only images that have been directly pushed to the
+		registry by supplying --all=false flag.
 
 		By default, the prune operation performs a dry run making no changes to internal registry. A
 		--confirm flag is needed for changes to be effective.
 
-		Only a user with a cluster role %s or higher who is logged-in will be able to actually delete the
-		images.`)
+		Only a user with a cluster role %s or higher who is logged-in will be able to actually
+		delete the images.`)
 
 	imagesExample = templates.Examples(`
-		# See, what the prune command would delete if only images more than an hour old and obsoleted
+	  # See, what the prune command would delete if only images more than an hour old and obsoleted
 	  # by 3 newer revisions under the same tag were considered.
 	  %[1]s %[2]s --keep-tag-revisions=3 --keep-younger-than=60m
 
@@ -88,7 +89,7 @@ type PruneImagesOptions struct {
 
 // NewCmdPruneImages implements the OpenShift cli prune images command.
 func NewCmdPruneImages(f *clientcmd.Factory, parentName, name string, out io.Writer) *cobra.Command {
-	allImages := false
+	allImages := true
 	opts := &PruneImagesOptions{
 		Confirm:            false,
 		KeepYoungerThan:    &defaultKeepYoungerThan,
@@ -112,7 +113,7 @@ func NewCmdPruneImages(f *clientcmd.Factory, parentName, name string, out io.Wri
 	}
 
 	cmd.Flags().BoolVar(&opts.Confirm, "confirm", opts.Confirm, "If true, specify that image pruning should proceed. Defaults to false, displaying what would be deleted but not actually deleting anything.")
-	cmd.Flags().BoolVar(opts.AllImages, "all", *opts.AllImages, "Include images that were not pushed to the registry but have been mirrored by pullthrough. Requires --registry-url")
+	cmd.Flags().BoolVar(opts.AllImages, "all", *opts.AllImages, "Include images that were not pushed to the registry but have been mirrored by pullthrough.")
 	cmd.Flags().DurationVar(opts.KeepYoungerThan, "keep-younger-than", *opts.KeepYoungerThan, "Specify the minimum age of an image for it to be considered a candidate for pruning.")
 	cmd.Flags().IntVar(opts.KeepTagRevisions, "keep-tag-revisions", *opts.KeepTagRevisions, "Specify the number of image revisions for a tag in an image stream that will be preserved.")
 	cmd.Flags().BoolVar(opts.PruneOverSizeLimit, "prune-over-size-limit", *opts.PruneOverSizeLimit, "Specify if images which are exceeding LimitRanges (see 'openshift.io/Image'), specified in the same namespace, should be considered for pruning. This flag cannot be combined with --keep-younger-than nor --keep-tag-revisions.")
@@ -139,12 +140,8 @@ func (o *PruneImagesOptions) Complete(f *clientcmd.Factory, cmd *cobra.Command, 
 			o.KeepTagRevisions = nil
 		}
 	}
-	if *o.AllImages {
-		if len(o.RegistryUrlOverride) == 0 {
-			return kcmdutil.UsageError(cmd, "--registry-url must be specified when --all is true")
-		}
-	}
-	o.Namespace = kapi.NamespaceAll
+
+	o.Namespace = metav1.NamespaceAll
 	if cmd.Flags().Lookup("namespace").Changed {
 		var err error
 		o.Namespace, _, err = f.DefaultNamespace()
@@ -184,46 +181,46 @@ func (o PruneImagesOptions) Validate() error {
 
 // Run contains all the necessary functionality for the OpenShift cli prune images command.
 func (o PruneImagesOptions) Run() error {
-	allImages, err := o.OSClient.Images().List(kapi.ListOptions{})
+	allImages, err := o.OSClient.Images().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	allStreams, err := o.OSClient.ImageStreams(o.Namespace).List(kapi.ListOptions{})
+	allStreams, err := o.OSClient.ImageStreams(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	allPods, err := o.KClient.Core().Pods(o.Namespace).List(kapi.ListOptions{})
+	allPods, err := o.KClient.Core().Pods(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	allRCs, err := o.KClient.Core().ReplicationControllers(o.Namespace).List(kapi.ListOptions{})
+	allRCs, err := o.KClient.Core().ReplicationControllers(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	allBCs, err := o.OSClient.BuildConfigs(o.Namespace).List(kapi.ListOptions{})
+	allBCs, err := o.OSClient.BuildConfigs(o.Namespace).List(metav1.ListOptions{})
 	// We need to tolerate 'not found' errors for buildConfigs since they may be disabled in Atomic
 	err = oserrors.TolerateNotFoundError(err)
 	if err != nil {
 		return err
 	}
 
-	allBuilds, err := o.OSClient.Builds(o.Namespace).List(kapi.ListOptions{})
+	allBuilds, err := o.OSClient.Builds(o.Namespace).List(metav1.ListOptions{})
 	// We need to tolerate 'not found' errors for builds since they may be disabled in Atomic
 	err = oserrors.TolerateNotFoundError(err)
 	if err != nil {
 		return err
 	}
 
-	allDCs, err := o.OSClient.DeploymentConfigs(o.Namespace).List(kapi.ListOptions{})
+	allDCs, err := o.OSClient.DeploymentConfigs(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
-	limitRangesList, err := o.KClient.Core().LimitRanges(o.Namespace).List(kapi.ListOptions{})
+	limitRangesList, err := o.KClient.Core().LimitRanges(o.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -255,7 +252,7 @@ func (o PruneImagesOptions) Run() error {
 		RegistryClient:     o.RegistryClient,
 		RegistryURL:        o.RegistryUrlOverride,
 	}
-	if o.Namespace != kapi.NamespaceAll {
+	if o.Namespace != metav1.NamespaceAll {
 		options.Namespace = o.Namespace
 	}
 	pruner := prune.NewPruner(options)
@@ -488,7 +485,7 @@ func getClients(f *clientcmd.Factory, caBundle string) (*client.Client, kclients
 
 	// if the user specified a CA on the command line, add it to the
 	// client config's CA roots
-	if len(caBundle) > 0 {
+	if tlsConfig != nil && len(caBundle) > 0 {
 		data, err := ioutil.ReadFile(caBundle)
 		if err != nil {
 			return nil, nil, nil, err

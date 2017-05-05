@@ -50,7 +50,8 @@ func (EgressNetworkPolicyList) SwaggerDoc() map[string]string {
 
 var map_EgressNetworkPolicyPeer = map[string]string{
 	"":             "EgressNetworkPolicyPeer specifies a target to apply egress network policy to",
-	"cidrSelector": "cidrSelector is the CIDR range to allow/deny traffic to",
+	"cidrSelector": "cidrSelector is the CIDR range to allow/deny traffic to. If this is set, dnsName must be unset",
+	"dnsName":      "dnsName is the domain name to allow/deny traffic to. If this is set, cidrSelector must be unset",
 }
 
 func (EgressNetworkPolicyPeer) SwaggerDoc() map[string]string {
@@ -79,7 +80,7 @@ func (EgressNetworkPolicySpec) SwaggerDoc() map[string]string {
 var map_HostSubnet = map[string]string{
 	"":         "HostSubnet describes the container subnet network on a node. The HostSubnet object must have the same name as the Node object it corresponds to.",
 	"metadata": "Standard object's metadata.",
-	"host":     "Host is the name of the node. (This is redundant with the object's name, and this field is not actually used any more.)",
+	"host":     "Host is the name of the node. (This is the same as the object's name, but both fields must be set.)",
 	"hostIP":   "HostIP is the IP address to be used as a VTEP by other nodes in the overlay network",
 	"subnet":   "Subnet is the CIDR range of the overlay network assigned to the node for its pods",
 }

@@ -10,7 +10,14 @@ os::log::info "Starting containerized end-to-end test"
 unset KUBECONFIG
 
 os::util::environment::use_sudo
-os::util::environment::setup_all_server_vars "test-end-to-end-docker/"
+os::cleanup::tmpdir
+os::util::environment::setup_all_server_vars
+export HOME="${FAKE_HOME_DIR}"
+
+# Allow setting $JUNIT_REPORT to toggle output behavior
+if [[ -n "${JUNIT_REPORT:-}" ]]; then
+	export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
+fi
 
 function cleanup()
 {
@@ -33,18 +40,11 @@ function cleanup()
 	os::cleanup::dump_etcd
 
 	if [[ -z "${SKIP_TEARDOWN-}" ]]; then
-		os::log::info "remove the openshift container"
-		docker stop origin
-		docker rm origin
-
 		os::cleanup::containers
-		set -u
 	fi
 
-	journalctl --unit docker.service --since -15minutes > "${LOG_DIR}/docker.log"
-
-	delete_empty_logs
 	truncate_large_logs
+	os::test::junit::generate_oscmd_report
 	set -e
 
 	os::log::info "Exiting"
@@ -55,13 +55,6 @@ function cleanup()
 trap "cleanup" EXIT INT TERM
 
 os::log::system::start
-
-out=$(
-	set +e
-	docker stop origin 2>&1
-	docker rm origin 2>&1
-	set -e
-)
 
 # Setup
 os::log::info "openshift version: `openshift version`"

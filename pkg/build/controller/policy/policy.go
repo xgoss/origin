@@ -6,8 +6,8 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pborman/uuid"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	buildclient "github.com/openshift/origin/pkg/build/client"
@@ -142,17 +142,21 @@ func handleComplete(lister buildclient.BuildLister, updater buildclient.BuildUpd
 	}
 	for _, build := range nextBuilds {
 		// TODO: replace with informer notification requeueing in the future
-		build.Annotations[buildapi.BuildAcceptedAnnotation] = uuid.NewRandom().String()
-		err := wait.Poll(500*time.Millisecond, 5*time.Second, func() (bool, error) {
-			err := updater.Update(build.Namespace, build)
-			if err != nil && errors.IsConflict(err) {
-				glog.V(5).Infof("Error updating build %s/%s: %v (will retry)", build.Namespace, build.Name, err)
-				return false, nil
+
+		// only set the annotation once.
+		if _, ok := build.Annotations[buildapi.BuildAcceptedAnnotation]; !ok {
+			build.Annotations[buildapi.BuildAcceptedAnnotation] = uuid.NewRandom().String()
+			err := wait.Poll(500*time.Millisecond, 5*time.Second, func() (bool, error) {
+				err := updater.Update(build.Namespace, build)
+				if err != nil && errors.IsConflict(err) {
+					glog.V(5).Infof("Error updating build %s/%s: %v (will retry)", build.Namespace, build.Name, err)
+					return false, nil
+				}
+				return true, err
+			})
+			if err != nil {
+				return err
 			}
-			return true, err
-		})
-		if err != nil {
-			return err
 		}
 	}
 	return nil

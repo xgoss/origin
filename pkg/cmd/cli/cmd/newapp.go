@@ -15,18 +15,19 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 
+	kapierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	restclient "k8s.io/client-go/rest"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kapierrors "k8s.io/kubernetes/pkg/api/errors"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	"k8s.io/kubernetes/pkg/client/restclient"
 	ctl "k8s.io/kubernetes/pkg/kubectl"
 	kcmd "k8s.io/kubernetes/pkg/kubectl/cmd"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/errors"
-	"k8s.io/kubernetes/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/util/wait"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	"github.com/openshift/origin/pkg/cmd/templates"
@@ -258,7 +259,7 @@ func (o *NewAppOptions) RunNewApp() error {
 	if config.Querying() {
 		result, err := config.RunQuery()
 		if err != nil {
-			return handleRunError(err, o.BaseName, o.CommandName, o.CommandPath)
+			return handleError(err, o.BaseName, o.CommandName, o.CommandPath, config, transformRunError)
 		}
 
 		if o.Action.ShouldPrint() {
@@ -271,7 +272,7 @@ func (o *NewAppOptions) RunNewApp() error {
 	checkGitInstalled(out)
 
 	result, err := config.Run()
-	if err := handleRunError(err, o.BaseName, o.CommandName, o.CommandPath); err != nil {
+	if err := handleError(err, o.BaseName, o.CommandName, o.CommandPath, config, transformRunError); err != nil {
 		return err
 	}
 
@@ -294,7 +295,6 @@ func (o *NewAppOptions) RunNewApp() error {
 			}
 		}
 	}
-
 	if err := setAnnotations(map[string]string{newcmd.GeneratedByNamespace: newcmd.GeneratedByNewApp}, result); err != nil {
 		return err
 	}
@@ -388,7 +388,7 @@ func followInstallation(config *newcmd.AppConfig, input string, pod *kapi.Pod, l
 		LogsForObject: logsForObjectFn,
 		Out:           config.Out,
 	}
-	_, logErr := opts.RunLogs()
+	logErr := opts.RunLogs()
 
 	// status of the pod may take tens of seconds to propagate
 	if err := wait.PollImmediate(500*time.Millisecond, 30*time.Second, installationComplete(podClient, pod.Name, config.Out)); err != nil {
@@ -408,7 +408,7 @@ func followInstallation(config *newcmd.AppConfig, input string, pod *kapi.Pod, l
 
 func installationStarted(c kcoreclient.PodInterface, name string, s kcoreclient.SecretInterface) wait.ConditionFunc {
 	return func() (bool, error) {
-		pod, err := c.Get(name)
+		pod, err := c.Get(name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -416,7 +416,7 @@ func installationStarted(c kcoreclient.PodInterface, name string, s kcoreclient.
 			return false, nil
 		}
 		// delete a secret named the same as the pod if it exists
-		if secret, err := s.Get(name); err == nil {
+		if secret, err := s.Get(name, metav1.GetOptions{}); err == nil {
 			if secret.Annotations[newcmd.GeneratedForJob] == "true" &&
 				secret.Annotations[newcmd.GeneratedForJobFor] == pod.Annotations[newcmd.GeneratedForJobFor] {
 				if err := s.Delete(name, nil); err != nil {
@@ -430,7 +430,7 @@ func installationStarted(c kcoreclient.PodInterface, name string, s kcoreclient.
 
 func installationComplete(c kcoreclient.PodInterface, name string, out io.Writer) wait.ConditionFunc {
 	return func() (bool, error) {
-		pod, err := c.Get(name)
+		pod, err := c.Get(name, metav1.GetOptions{})
 		if err != nil {
 			if kapierrors.IsNotFound(err) {
 				return false, fmt.Errorf("installation pod was deleted; unable to determine whether it completed successfully")
@@ -532,6 +532,10 @@ func CompleteAppConfig(config *newcmd.AppConfig, f *clientcmd.Factory, c *cobra.
 	if config.BinaryBuild && config.Strategy == generate.StrategyPipeline {
 		return kcmdutil.UsageError(c, "specifying binary builds and the pipeline strategy at the same time is not allowed.")
 	}
+
+	if len(config.BuildArgs) > 0 && config.Strategy != generate.StrategyUnspecified && config.Strategy != generate.StrategyDocker {
+		return kcmdutil.UsageError(c, "Cannot use '--build-arg' without a Docker build")
+	}
 	return nil
 }
 
@@ -539,7 +543,7 @@ func setAnnotations(annotations map[string]string, result *newcmd.AppResult) err
 	for _, object := range result.List.Items {
 		err := util.AddObjectAnnotations(object, annotations)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to add annotation to object of type %q, this resource type is probably unsupported by your client version.", object.GetObjectKind().GroupVersionKind())
 		}
 	}
 	return nil
@@ -549,7 +553,7 @@ func setLabels(labels map[string]string, result *newcmd.AppResult) error {
 	for _, object := range result.List.Items {
 		err := util.AddObjectLabels(object, labels)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to add annotation to object of type %q, this resource type is probably unsupported by your client version.", object.GetObjectKind().GroupVersionKind())
 		}
 	}
 	return nil
@@ -589,11 +593,13 @@ func isInvalidTriggerError(err error) bool {
 // type that is not in the whitelist for an older server.
 func retryBuildConfig(info *resource.Info, err error) runtime.Object {
 	triggerTypeWhiteList := map[buildapi.BuildTriggerType]struct{}{
-		buildapi.GitHubWebHookBuildTriggerType:  {},
-		buildapi.GenericWebHookBuildTriggerType: {},
-		buildapi.ImageChangeBuildTriggerType:    {},
+		buildapi.GitHubWebHookBuildTriggerType:    {},
+		buildapi.GenericWebHookBuildTriggerType:   {},
+		buildapi.ImageChangeBuildTriggerType:      {},
+		buildapi.GitLabWebHookBuildTriggerType:    {},
+		buildapi.BitbucketWebHookBuildTriggerType: {},
 	}
-	if info.Mapping.GroupVersionKind.GroupKind() == buildapi.Kind("BuildConfig") && isInvalidTriggerError(err) {
+	if buildapi.IsKindOrLegacy("BuildConfig", info.Mapping.GroupVersionKind.GroupKind()) && isInvalidTriggerError(err) {
 		bc, ok := info.Object.(*buildapi.BuildConfig)
 		if !ok {
 			return nil
@@ -610,7 +616,7 @@ func retryBuildConfig(info *resource.Info, err error) runtime.Object {
 	return nil
 }
 
-func handleRunError(err error, baseName, commandName, commandPath string) error {
+func handleError(err error, baseName, commandName, commandPath string, config *newcmd.AppConfig, transformError func(err error, baseName, commandName, commandPath string, groups errorGroups)) error {
 	if err == nil {
 		return nil
 	}
@@ -623,6 +629,17 @@ func handleRunError(err error, baseName, commandName, commandPath string) error 
 		transformError(err, baseName, commandName, commandPath, groups)
 	}
 	buf := &bytes.Buffer{}
+	if len(config.ArgumentClassificationErrors) > 0 {
+		fmt.Fprintf(buf, "Errors occurred while determining argument types:\n")
+		for _, classErr := range config.ArgumentClassificationErrors {
+			fmt.Fprintf(buf, fmt.Sprintf("\n%s:  %v\n", classErr.Key, classErr.Value))
+		}
+		fmt.Fprint(buf, "\n")
+		// this print serves as a header for the printing of the errorGroups, but
+		// only print it if we precede with classification errors, to help distinguish
+		// between the two
+		fmt.Fprintln(buf, "Errors occurred during resource creation:")
+	}
 	for _, group := range groups {
 		fmt.Fprint(buf, kcmdutil.MultipleErrors("error: ", group.errs))
 		if len(group.suggestion) > 0 {
@@ -647,7 +664,7 @@ func (g errorGroups) Add(group string, suggestion string, err error, errs ...err
 	g[group] = all
 }
 
-func transformError(err error, baseName, commandName, commandPath string, groups errorGroups) {
+func transformRunError(err error, baseName, commandName, commandPath string, groups errorGroups) {
 	switch t := err.(type) {
 	case newcmd.ErrRequiresExplicitAccess:
 		if t.Input.Token != nil && t.Input.Token.ServiceAccount {

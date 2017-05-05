@@ -6,11 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/admission"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apiserver/pkg/admission"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/validation"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	_ "github.com/openshift/origin/pkg/build/api/install"
@@ -44,7 +45,7 @@ var nodeSelector = map[string]string{"node": "mynode"}
 func testSTICreateBuildPod(t *testing.T, rootAllowed bool) {
 	strategy := &SourceBuildStrategy{
 		Image:            "sti-test-image",
-		Codec:            kapi.Codecs.LegacyCodec(buildapi.SchemeGroupVersion),
+		Codec:            kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 		AdmissionControl: &FakeAdmissionControl{admit: rootAllowed},
 	}
 
@@ -144,7 +145,7 @@ func testSTICreateBuildPod(t *testing.T, rootAllowed bool) {
 	if !foundDropCaps && !rootAllowed {
 		t.Fatalf("Expected %s when root is not allowed", buildapi.DropCapabilities)
 	}
-	buildJSON, _ := runtime.Encode(kapi.Codecs.LegacyCodec(buildapi.SchemeGroupVersion), build)
+	buildJSON, _ := runtime.Encode(kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion), build)
 	errorCases := map[int][]string{
 		0: {"BUILD", string(buildJSON)},
 	}
@@ -158,7 +159,7 @@ func testSTICreateBuildPod(t *testing.T, rootAllowed bool) {
 func TestS2IBuildLongName(t *testing.T) {
 	strategy := &SourceBuildStrategy{
 		Image:            "sti-test-image",
-		Codec:            kapi.Codecs.LegacyCodec(buildapi.SchemeGroupVersion),
+		Codec:            kapi.Codecs.LegacyCodec(buildapi.LegacySchemeGroupVersion),
 		AdmissionControl: &FakeAdmissionControl{admit: true},
 	}
 	build := mockSTIBuild()
@@ -175,7 +176,7 @@ func TestS2IBuildLongName(t *testing.T) {
 func mockSTIBuild() *buildapi.Build {
 	timeout := int64(60)
 	return &buildapi.Build{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "stiBuild",
 			Labels: map[string]string{
 				"name": "stiBuild",

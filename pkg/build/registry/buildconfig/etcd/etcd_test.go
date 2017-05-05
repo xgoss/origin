@@ -3,11 +3,13 @@ package etcd
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	etcdtesting "k8s.io/apiserver/pkg/storage/etcd/testing"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
-	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
 
 	"github.com/openshift/origin/pkg/build/api"
 	_ "github.com/openshift/origin/pkg/build/api/install"
@@ -31,7 +33,7 @@ func TestStorage(t *testing.T) {
 
 func validBuildConfig() *api.BuildConfig {
 	return &api.BuildConfig{
-		ObjectMeta: kapi.ObjectMeta{Name: "configid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "configid"},
 		Spec: api.BuildConfigSpec{
 			RunPolicy: api.BuildRunPolicySerial,
 			CommonSpec: api.CommonSpec{
@@ -66,6 +68,28 @@ func TestCreate(t *testing.T) {
 		valid,
 		// invalid
 		&api.BuildConfig{},
+	)
+}
+
+func TestUpdate(t *testing.T) {
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	defer storage.Store.DestroyFunc()
+	test := registrytest.New(t, storage.Store)
+	test.TestUpdate(
+		validBuildConfig(),
+		// updateFunc
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*api.BuildConfig)
+			object.Spec.CommonSpec.Source.Git.URI = "http://github.com/my/otherrepo"
+			return object
+		},
+		// invalid updateFunc
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*api.BuildConfig)
+			object.Spec.CommonSpec.Source.Git.URI = ""
+			return object
+		},
 	)
 }
 

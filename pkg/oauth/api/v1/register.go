@@ -1,16 +1,24 @@
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-const GroupName = ""
+const (
+	GroupName       = "oauth.openshift.io"
+	LegacyGroupName = ""
+)
 
 // SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
-
 var (
+	SchemeGroupVersion       = schema.GroupVersion{Group: GroupName, Version: "v1"}
+	LegacySchemeGroupVersion = schema.GroupVersion{Group: LegacyGroupName, Version: "v1"}
+
+	LegacySchemeBuilder    = runtime.NewSchemeBuilder(addLegacyKnownTypes, addConversionFuncs, addDefaultingFuncs)
+	AddToSchemeInCoreGroup = LegacySchemeBuilder.AddToScheme
+
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes, addConversionFuncs, addDefaultingFuncs)
 	AddToScheme   = SchemeBuilder.AddToScheme
 )
@@ -28,15 +36,22 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&OAuthClientAuthorizationList{},
 		&OAuthRedirectReference{},
 	)
+	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
 }
 
-func (obj *OAuthClientAuthorizationList) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }
-func (obj *OAuthClientAuthorization) GetObjectKind() unversioned.ObjectKind     { return &obj.TypeMeta }
-func (obj *OAuthClientList) GetObjectKind() unversioned.ObjectKind              { return &obj.TypeMeta }
-func (obj *OAuthClient) GetObjectKind() unversioned.ObjectKind                  { return &obj.TypeMeta }
-func (obj *OAuthAuthorizeTokenList) GetObjectKind() unversioned.ObjectKind      { return &obj.TypeMeta }
-func (obj *OAuthAuthorizeToken) GetObjectKind() unversioned.ObjectKind          { return &obj.TypeMeta }
-func (obj *OAuthAccessTokenList) GetObjectKind() unversioned.ObjectKind         { return &obj.TypeMeta }
-func (obj *OAuthAccessToken) GetObjectKind() unversioned.ObjectKind             { return &obj.TypeMeta }
-func (obj *OAuthRedirectReference) GetObjectKind() unversioned.ObjectKind       { return &obj.TypeMeta }
+func addLegacyKnownTypes(scheme *runtime.Scheme) error {
+	types := []runtime.Object{
+		&OAuthAccessToken{},
+		&OAuthAccessTokenList{},
+		&OAuthAuthorizeToken{},
+		&OAuthAuthorizeTokenList{},
+		&OAuthClient{},
+		&OAuthClientList{},
+		&OAuthClientAuthorization{},
+		&OAuthClientAuthorizationList{},
+		&OAuthRedirectReference{},
+	}
+	scheme.AddKnownTypes(LegacySchemeGroupVersion, types...)
+	return nil
+}
