@@ -280,6 +280,8 @@ objects:
           - "10"
           - --cors-allowed-origins
           - ${CORS_ALLOWED_ORIGIN}
+          - --feature-gates
+          - OriginatingIdentity=true
           image: ${SERVICE_CATALOG_IMAGE}
           imagePullPolicy: IfNotPresent
           name: apiserver
