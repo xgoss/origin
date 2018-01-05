@@ -12,12 +12,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/admission"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kadmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 
 	"github.com/openshift/origin/pkg/api/latest"
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	"github.com/openshift/origin/pkg/project/cache"
 	projectutil "github.com/openshift/origin/pkg/project/util"
@@ -25,10 +25,11 @@ import (
 
 // TODO: modify the upstream plug-in so this can be collapsed
 // need ability to specify a RESTMapper on upstream version
-func init() {
-	admission.RegisterPlugin("OriginNamespaceLifecycle", func(config io.Reader) (admission.Interface, error) {
-		return NewLifecycle(recommendedCreatableResources)
-	})
+func Register(plugins *admission.Plugins) {
+	plugins.Register("OriginNamespaceLifecycle",
+		func(config io.Reader) (admission.Interface, error) {
+			return NewLifecycle(recommendedCreatableResources)
+		})
 }
 
 type lifecycle struct {
@@ -71,7 +72,7 @@ func (e *lifecycle) Admit(a admission.Attributes) (err error) {
 		return nil
 	}
 
-	groupMeta, err := kapi.Registry.Group(a.GetKind().Group)
+	groupMeta, err := legacyscheme.Registry.Group(a.GetKind().Group)
 	if err != nil {
 		return err
 	}
@@ -133,7 +134,7 @@ func (q *lifecycle) SetInternalKubeClientSet(c kclientset.Interface) {
 	q.client = c
 }
 
-func (e *lifecycle) Validate() error {
+func (e *lifecycle) ValidateInitialization() error {
 	if e.cache == nil {
 		return fmt.Errorf("project lifecycle plugin needs a project cache")
 	}

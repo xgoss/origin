@@ -14,12 +14,10 @@ import (
 	"k8s.io/apimachinery/pkg/apimachinery"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 )
-
-// ErrExit is a marker interface for cli commands indicating that the response has been processed
-var ErrExit = fmt.Errorf("exit directly")
 
 var commaSepVarsPattern = regexp.MustCompile(".*=.*,.*=.*")
 
@@ -80,7 +78,7 @@ func convertItemsForDisplay(objs []runtime.Object, preferredVersions ...schema.G
 
 	for i := range objs {
 		obj := objs[i]
-		kinds, _, err := kapi.Scheme.ObjectKinds(obj)
+		kinds, _, err := legacyscheme.Scheme.ObjectKinds(obj)
 		if err != nil {
 			return nil, err
 		}
@@ -88,11 +86,27 @@ func convertItemsForDisplay(objs []runtime.Object, preferredVersions ...schema.G
 		// Gather all groups where the object kind is known.
 		groups := []*apimachinery.GroupMeta{}
 		for _, kind := range kinds {
-			groupMeta, err := kapi.Registry.Group(kind.Group)
+			groupMeta, err := legacyscheme.Registry.Group(kind.Group)
 			if err != nil {
 				return nil, err
 			}
 			groups = append(groups, groupMeta)
+		}
+
+		// if no preferred versions given, pass all group versions found.
+		if len(preferredVersions) == 0 {
+			defaultGroupVersions := []runtime.GroupVersioner{}
+			for _, group := range groups {
+				defaultGroupVersions = append(defaultGroupVersions, group.GroupVersion)
+			}
+
+			defaultGroupVersioners := runtime.GroupVersioners(defaultGroupVersions)
+			convertedObject, err := legacyscheme.Scheme.ConvertToVersion(obj, defaultGroupVersioners)
+			if err != nil {
+				return nil, err
+			}
+			ret = append(ret, convertedObject)
+			continue
 		}
 
 		actualOutputVersion := schema.GroupVersion{}
@@ -121,7 +135,24 @@ func convertItemsForDisplay(objs []runtime.Object, preferredVersions ...schema.G
 			}
 		}
 
-		convertedObject, err := kapi.Scheme.ConvertToVersion(obj, actualOutputVersion)
+		// if no preferred version found in the list of given GroupVersions,
+		// attempt to convert to first GroupVersion that satisfies a preferred version
+		if len(actualOutputVersion.Version) == 0 {
+			preferredVersioners := []runtime.GroupVersioner{}
+			for _, gv := range preferredVersions {
+				preferredVersions = append(preferredVersions, gv)
+			}
+			preferredVersioner := runtime.GroupVersioners(preferredVersioners)
+			convertedObject, err := legacyscheme.Scheme.ConvertToVersion(obj, preferredVersioner)
+			if err != nil {
+				return nil, err
+			}
+
+			ret = append(ret, convertedObject)
+			continue
+		}
+
+		convertedObject, err := legacyscheme.Scheme.ConvertToVersion(obj, actualOutputVersion)
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +169,10 @@ func convertItemsForDisplay(objs []runtime.Object, preferredVersions ...schema.G
 func convertItemsForDisplayFromDefaultCommand(cmd *cobra.Command, objs []runtime.Object) ([]runtime.Object, error) {
 	requested := kcmdutil.GetFlagString(cmd, "output-version")
 	versions := []schema.GroupVersion{}
+	if len(requested) == 0 {
+		return convertItemsForDisplay(objs, versions...)
+	}
+
 	for _, v := range strings.Split(requested, ",") {
 		version, err := schema.ParseGroupVersion(v)
 		if err != nil {
@@ -151,7 +186,7 @@ func convertItemsForDisplayFromDefaultCommand(cmd *cobra.Command, objs []runtime
 
 // VersionedPrintObject handles printing an object in the appropriate version by looking at 'output-version'
 // on the command
-func VersionedPrintObject(fn func(*cobra.Command, meta.RESTMapper, runtime.Object, io.Writer) error, c *cobra.Command, mapper meta.RESTMapper, out io.Writer) func(runtime.Object) error {
+func VersionedPrintObject(fn func(*cobra.Command, bool, meta.RESTMapper, runtime.Object, io.Writer) error, c *cobra.Command, mapper meta.RESTMapper, out io.Writer) func(runtime.Object) error {
 	return func(obj runtime.Object) error {
 		// TODO: fold into the core printer functionality (preferred output version)
 		if list, ok := obj.(*kapi.List); ok {
@@ -166,7 +201,7 @@ func VersionedPrintObject(fn func(*cobra.Command, meta.RESTMapper, runtime.Objec
 			}
 			obj = result[0]
 		}
-		return fn(c, mapper, obj, out)
+		return fn(c, false, mapper, obj, out)
 	}
 }
 

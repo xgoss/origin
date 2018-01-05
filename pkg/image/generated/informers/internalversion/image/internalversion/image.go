@@ -3,7 +3,7 @@
 package internalversion
 
 import (
-	api "github.com/openshift/origin/pkg/image/api"
+	image "github.com/openshift/origin/pkg/image/apis/image"
 	internalinterfaces "github.com/openshift/origin/pkg/image/generated/informers/internalversion/internalinterfaces"
 	internalclientset "github.com/openshift/origin/pkg/image/generated/internalclientset"
 	internalversion "github.com/openshift/origin/pkg/image/generated/listers/image/internalversion"
@@ -22,29 +22,48 @@ type ImageInformer interface {
 }
 
 type imageInformer struct {
-	factory internalinterfaces.SharedInformerFactory
+	factory          internalinterfaces.SharedInformerFactory
+	tweakListOptions internalinterfaces.TweakListOptionsFunc
 }
 
-func newImageInformer(client internalclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	sharedIndexInformer := cache.NewSharedIndexInformer(
+// NewImageInformer constructs a new informer for Image type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewImageInformer(client internalclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredImageInformer(client, resyncPeriod, indexers, nil)
+}
+
+// NewFilteredImageInformer constructs a new informer for Image type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewFilteredImageInformer(client internalclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
+	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
 				return client.Image().Images().List(options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
 				return client.Image().Images().Watch(options)
 			},
 		},
-		&api.Image{},
+		&image.Image{},
 		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		indexers,
 	)
+}
 
-	return sharedIndexInformer
+func (f *imageInformer) defaultInformer(client internalclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	return NewFilteredImageInformer(client, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
 func (f *imageInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&api.Image{}, newImageInformer)
+	return f.factory.InformerFor(&image.Image{}, f.defaultInformer)
 }
 
 func (f *imageInformer) Lister() internalversion.ImageLister {

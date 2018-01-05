@@ -66,13 +66,13 @@ func (l *ldapClientConfig) Connect() (ldap.Client, error) {
 	// Ensure tlsConfig specifies the server we're connecting to
 	if tlsConfig != nil && !tlsConfig.InsecureSkipVerify && len(tlsConfig.ServerName) == 0 {
 		// Add to a copy of the tlsConfig to avoid mutating the original
-		c := *tlsConfig
+		c := tlsConfig.Clone()
 		if host, _, err := net.SplitHostPort(l.host); err == nil {
 			c.ServerName = host
 		} else {
 			c.ServerName = l.host
 		}
-		tlsConfig = &c
+		tlsConfig = c
 	}
 
 	switch l.scheme {

@@ -1,21 +1,16 @@
 package oauthaccesstoken
 
 import (
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kstorage "k8s.io/apiserver/pkg/storage"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
 	scopeauthorizer "github.com/openshift/origin/pkg/authorization/authorizer/scope"
-	"github.com/openshift/origin/pkg/oauth/api"
-	"github.com/openshift/origin/pkg/oauth/api/validation"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	"github.com/openshift/origin/pkg/oauth/apis/oauth/validation"
 	"github.com/openshift/origin/pkg/oauth/registry/oauthclient"
 )
 
@@ -28,9 +23,14 @@ type strategy struct {
 
 var _ rest.RESTCreateStrategy = strategy{}
 var _ rest.RESTUpdateStrategy = strategy{}
+var _ rest.GarbageCollectionDeleteStrategy = strategy{}
 
 func NewStrategy(clientGetter oauthclient.Getter) strategy {
-	return strategy{ObjectTyper: kapi.Scheme, clientGetter: clientGetter}
+	return strategy{ObjectTyper: legacyscheme.Scheme, clientGetter: clientGetter}
+}
+
+func (strategy) DefaultGarbageCollectionPolicy(ctx apirequest.Context) rest.GarbageCollectionPolicy {
+	return rest.Unsupported
 }
 
 func (strategy) PrepareForUpdate(ctx apirequest.Context, obj, old runtime.Object) {}
@@ -49,10 +49,10 @@ func (strategy) PrepareForCreate(ctx apirequest.Context, obj runtime.Object) {
 
 // Validate validates a new token
 func (s strategy) Validate(ctx apirequest.Context, obj runtime.Object) field.ErrorList {
-	token := obj.(*api.OAuthAccessToken)
+	token := obj.(*oauthapi.OAuthAccessToken)
 	validationErrors := validation.ValidateAccessToken(token)
 
-	client, err := s.clientGetter.GetClient(ctx, token.ClientName, &metav1.GetOptions{})
+	client, err := s.clientGetter.Get(token.ClientName, metav1.GetOptions{})
 	if err != nil {
 		return append(validationErrors, field.InternalError(field.NewPath("clientName"), err))
 	}
@@ -65,8 +65,8 @@ func (s strategy) Validate(ctx apirequest.Context, obj runtime.Object) field.Err
 
 // ValidateUpdate validates an update
 func (s strategy) ValidateUpdate(ctx apirequest.Context, obj, old runtime.Object) field.ErrorList {
-	oldToken := old.(*api.OAuthAccessToken)
-	newToken := obj.(*api.OAuthAccessToken)
+	oldToken := old.(*oauthapi.OAuthAccessToken)
+	newToken := obj.(*oauthapi.OAuthAccessToken)
 	return validation.ValidateAccessTokenUpdate(newToken, oldToken)
 }
 
@@ -81,27 +81,4 @@ func (strategy) AllowUnconditionalUpdate() bool {
 
 // Canonicalize normalizes the object after validation.
 func (strategy) Canonicalize(obj runtime.Object) {
-}
-
-// GetAttrs returns labels and fields of a given object for filtering purposes
-func GetAttrs(o runtime.Object) (labels.Set, fields.Set, error) {
-	obj, ok := o.(*api.OAuthAccessToken)
-	if !ok {
-		return nil, nil, fmt.Errorf("not an OAuthAccessToken")
-	}
-	return labels.Set(obj.Labels), SelectableFields(obj), nil
-}
-
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) kstorage.SelectionPredicate {
-	return kstorage.SelectionPredicate{
-		Label:    label,
-		Field:    field,
-		GetAttrs: GetAttrs,
-	}
-}
-
-// SelectableFields returns a field set that can be used for filter selection
-func SelectableFields(obj *api.OAuthAccessToken) fields.Set {
-	return api.OAuthAccessTokenToSelectableFields(obj)
 }

@@ -7,9 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-
-	"github.com/openshift/origin/pkg/cmd/templates"
 )
 
 var (
@@ -27,7 +26,7 @@ func NewCommandRecycle(name string, out io.Writer) *cobra.Command {
 		Long:  recyclerLong,
 		Run: func(c *cobra.Command, args []string) {
 			if len(args) != 1 {
-				kcmdutil.CheckErr(kcmdutil.UsageError(c, "a directory to recycle is required as the only argument"))
+				kcmdutil.CheckErr(kcmdutil.UsageErrorf(c, "a directory to recycle is required as the only argument"))
 			}
 			if err := Recycle(args[0]); err != nil {
 				kcmdutil.CheckErr(fmt.Errorf("recycle failed: %v", err))

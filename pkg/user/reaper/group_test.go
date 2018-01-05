@@ -4,25 +4,29 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	"github.com/davecgh/go-spew/spew"
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/client/testclient"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	authfake "github.com/openshift/origin/pkg/authorization/generated/internalclientset/fake"
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
+	securityfake "github.com/openshift/origin/pkg/security/generated/internalclientset/fake"
+	userfake "github.com/openshift/origin/pkg/user/generated/internalclientset/fake"
 
 	// install all APIs
 	_ "github.com/openshift/origin/pkg/api/install"
 )
 
 var (
-	groupsResource              = schema.GroupVersionResource{Group: "", Version: "", Resource: "groups"}
-	clusterRoleBindingsResource = schema.GroupVersionResource{Group: "", Version: "", Resource: "clusterrolebindings"}
-	roleBindingsResource        = schema.GroupVersionResource{Group: "", Version: "", Resource: "rolebindings"}
+	groupsResource              = schema.GroupVersionResource{Group: "user.openshift.io", Version: "", Resource: "groups"}
+	clusterRoleBindingsResource = schema.GroupVersionResource{Group: "authorization.openshift.io", Version: "", Resource: "clusterrolebindings"}
+	roleBindingsResource        = schema.GroupVersionResource{Group: "authorization.openshift.io", Version: "", Resource: "rolebindings"}
+	sccResource                 = schema.GroupVersionResource{Group: "security.openshift.io", Version: "", Resource: "securitycontextconstraints"}
 )
 
 func TestGroupReaper(t *testing.T) {
@@ -30,6 +34,7 @@ func TestGroupReaper(t *testing.T) {
 		name     string
 		group    string
 		objects  []runtime.Object
+		sccs     []runtime.Object
 		expected []interface{}
 	}{
 		{
@@ -101,23 +106,23 @@ func TestGroupReaper(t *testing.T) {
 		{
 			name:  "sccs",
 			group: "mygroup",
-			objects: []runtime.Object{
-				&kapi.SecurityContextConstraints{
+			sccs: []runtime.Object{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-no-subjects"},
 					Groups:     []string{},
 				},
-				&kapi.SecurityContextConstraints{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-one-subject"},
 					Groups:     []string{"mygroup"},
 				},
-				&kapi.SecurityContextConstraints{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-mismatched-subjects"},
 					Users:      []string{"mygroup"},
 					Groups:     []string{"mygroup2"},
 				},
 			},
 			expected: []interface{}{
-				clientgotesting.UpdateActionImpl{ActionImpl: clientgotesting.ActionImpl{Verb: "update", Resource: schema.GroupVersionResource{Resource: "securitycontextconstraints"}}, Object: &kapi.SecurityContextConstraints{
+				clientgotesting.UpdateActionImpl{ActionImpl: clientgotesting.ActionImpl{Verb: "update", Resource: sccResource}, Object: &securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-one-subject"},
 					Groups:     []string{},
 				}},
@@ -127,8 +132,9 @@ func TestGroupReaper(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		tc := testclient.NewSimpleFake(testclient.OriginObjects(test.objects)...)
-		ktc := fake.NewSimpleClientset(testclient.UpstreamObjects(test.objects)...)
+		authFake := authfake.NewSimpleClientset(test.objects...)
+		userFake := userfake.NewSimpleClientset()
+		securityFake := securityfake.NewSimpleClientset(test.sccs...)
 
 		actual := []interface{}{}
 		oreactor := func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -140,12 +146,14 @@ func TestGroupReaper(t *testing.T) {
 			return false, nil, nil
 		}
 
-		tc.PrependReactor("update", "*", oreactor)
-		tc.PrependReactor("delete", "*", oreactor)
-		ktc.PrependReactor("update", "*", kreactor)
-		ktc.PrependReactor("delete", "*", kreactor)
+		authFake.PrependReactor("update", "*", oreactor)
+		userFake.PrependReactor("update", "*", oreactor)
+		authFake.PrependReactor("delete", "*", oreactor)
+		userFake.PrependReactor("delete", "*", oreactor)
+		securityFake.Fake.PrependReactor("update", "*", kreactor)
+		securityFake.Fake.PrependReactor("delete", "*", kreactor)
 
-		reaper := NewGroupReaper(tc, tc, tc, ktc.Core())
+		reaper := NewGroupReaper(userFake, authFake, authFake, securityFake.Security().SecurityContextConstraints())
 		err := reaper.Stop("", test.group, 0, nil)
 		if err != nil {
 			t.Errorf("%s: unexpected error: %v", test.name, err)

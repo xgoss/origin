@@ -1,21 +1,21 @@
 package app
 
 import (
-	"net/url"
 	"os"
 	"reflect"
 	"testing"
 
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/generate"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	"github.com/openshift/source-to-image/pkg/scm/git"
 )
 
 func TestBuildConfigOutput(t *testing.T) {
-	url, err := url.Parse("https://github.com/openshift/origin.git")
+	url, err := git.Parse("https://github.com/openshift/origin.git")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSimpleDeploymentConfig(t *testing.T) {
 		t.Errorf("unexpected value: %#v", config)
 	}
 	for _, trigger := range config.Spec.Triggers {
-		if trigger.Type == deployapi.DeploymentTriggerOnImageChange {
+		if trigger.Type == appsapi.DeploymentTriggerOnImageChange {
 			from := trigger.ImageChangeParams.From
 			if from.Kind != "ImageStreamTag" {
 				t.Errorf("unexpected from.kind in image change trigger: %s", from.Kind)

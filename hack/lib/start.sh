@@ -38,7 +38,6 @@ function os::start::configure_server() {
 
 	os::start::internal::create_master_certs     "${version}"
 	os::start::internal::configure_node          "${version}"
-	os::start::internal::create_bootstrap_policy "${version}"
 	os::start::internal::configure_master        "${version}"
 
 	# fix up owner after creating initial config
@@ -62,11 +61,9 @@ readonly -f os::start::configure_server
 function os::start::internal::create_master_certs() {
 	local version="${1:-}"
 	local openshift_volumes=( "${MASTER_CONFIG_DIR}" )
-	local openshift_executable
-	openshift_executable="$(os::start::internal::openshift_executable "${version}")"
 
 	os::log::debug "Creating certificates for the OpenShift server"
-	${openshift_executable} admin ca create-master-certs                                \
+	oc adm ca create-master-certs                                \
 	                        --overwrite=false                                           \
 	                        --master="${MASTER_ADDR}"                                   \
 	                        --cert-dir="${MASTER_CONFIG_DIR}"                           \
@@ -90,11 +87,9 @@ readonly -f os::start::internal::create_master_certs
 function os::start::internal::configure_node() {
 	local version="${1:-}"
 	local openshift_volumes=( "${MASTER_CONFIG_DIR}" "${NODE_CONFIG_DIR}" )
-	local openshift_executable
-	openshift_executable="$(os::start::internal::openshift_executable "${version}")"
 
 	os::log::debug "Creating node configuration for the OpenShift server"
-	${openshift_executable} admin create-node-config                                          \
+	oc adm create-node-config                                          \
 	                        --node-dir="${NODE_CONFIG_DIR}"                                   \
 	                        --node="${KUBELET_HOST}"                                          \
 	                        --hostnames="${KUBELET_HOST}"                                     \
@@ -107,23 +102,6 @@ function os::start::internal::configure_node() {
 	                        --listen="${KUBELET_SCHEME}://${KUBELET_BIND_HOST}:${KUBELET_PORT}"
 }
 readonly -f os::start::internal::configure_node
-
-# os::start::internal::create_bootstrap_policy creates bootstrap policy files
-#
-# Globals:
-#  - MASTER_CONFIG_DIR
-# Arguments:
-#  1 - alternate version for the config
-function os::start::internal::create_bootstrap_policy() {
-	local version="${1:-}"
-	local openshift_volumes=( "${MASTER_CONFIG_DIR}" )
-	local openshift_executable
-	openshift_executable="$(os::start::internal::openshift_executable "${version}")"
-
-	os::log::debug "Creating boostrap policy files for the OpenShift server"
-	${openshift_executable} admin create-bootstrap-policy-file --filename="${MASTER_CONFIG_DIR}/policy.json"
-}
-readonly -f os::start::internal::create_bootstrap_policy
 
 # os::start::internal::configure_master creates the configuration for the OpenShift master
 #
@@ -140,6 +118,7 @@ readonly -f os::start::internal::create_bootstrap_policy
 #  - API_BIND_HOST
 #  - API_PORT
 #  - PUBLIC_MASTER_HOST
+#  - NETWORK_PLUGIN
 # Arguments
 #  1 - alternate version for the config
 #  - MASTER_CONFIG_DIR
@@ -158,6 +137,7 @@ function os::start::internal::configure_master() {
 	                        --hostname="${KUBELET_HOST}"                            \
 	                        --volume-dir="${VOLUME_DIR}"                            \
 	                        --etcd-dir="${ETCD_DATA_DIR}"                           \
+	                        --network-plugin="${NETWORK_PLUGIN:-}"                  \
 	                        --write-config="${SERVER_CONFIG_DIR}"                   \
 	                        --listen="${API_SCHEME}://${API_BIND_HOST}:${API_PORT}" \
 	                        --public-master="${API_SCHEME}://${PUBLIC_MASTER_HOST}:${API_PORT}"
@@ -181,12 +161,14 @@ readonly -f os::start::internal::configure_master
 function os::start::internal::patch_master_config() {
 	local sudo=${USE_SUDO:+sudo}
 	cp "${SERVER_CONFIG_DIR}/master/master-config.yaml" "${SERVER_CONFIG_DIR}/master/master-config.orig.yaml"
-	openshift ex config patch "${SERVER_CONFIG_DIR}/master/master-config.orig.yaml" --patch="{\"etcdConfig\": {\"address\": \"${API_HOST}:${ETCD_PORT}\"}}" | \
-	openshift ex config patch - --patch="{\"etcdConfig\": {\"servingInfo\": {\"bindAddress\": \"${API_HOST}:${ETCD_PORT}\"}}}" | \
-	openshift ex config patch - --type json --patch="[{\"op\": \"replace\", \"path\": \"/etcdClientInfo/urls\", \"value\": [\"${API_SCHEME}://${API_HOST}:${ETCD_PORT}\"]}]" | \
-	openshift ex config patch - --patch="{\"etcdConfig\": {\"peerAddress\": \"${API_HOST}:${ETCD_PEER_PORT}\"}}" | \
-	openshift ex config patch - --patch="{\"etcdConfig\": {\"peerServingInfo\": {\"bindAddress\": \"${API_HOST}:${ETCD_PEER_PORT}\"}}}" | \
-	openshift ex config patch - --patch="{\"imagePolicyConfig\": {\"maxImagesBulkImportedPerRepository\": ${MAX_IMAGES_BULK_IMPORTED_PER_REPOSITORY:-5}}}" > "${SERVER_CONFIG_DIR}/master/master-config.yaml"
+	oc ex config patch "${SERVER_CONFIG_DIR}/master/master-config.orig.yaml" --patch="{\"etcdConfig\": {\"address\": \"${API_HOST}:${ETCD_PORT}\"}}" | \
+	oc ex config patch - --patch="{\"admissionConfig\": {\"pluginConfig\": {\"openshift.io/ImagePolicy\": {\"configuration\": {\"apiVersion\": \"v1\", \"executionRules\": [{\"matchImageAnnotations\": [{\"key\": \"images.openshift.io/deny-execution\", \"value\": \"true\"}], \"name\": \"execution-denied\", \"onResources\": [{\"resource\": \"pods\"}, {\"resource\": \"builds\"}], \"reject\": true, \"skipOnResolutionFailure\": true }], \"kind\": \"ImagePolicyConfig\" }, \"location\": \"\"}}}}" | \
+	oc ex config patch - --patch="{\"etcdConfig\": {\"servingInfo\": {\"bindAddress\": \"${API_HOST}:${ETCD_PORT}\"}}}" | \
+	oc ex config patch - --type json --patch="[{\"op\": \"replace\", \"path\": \"/etcdClientInfo/urls\", \"value\": [\"${API_SCHEME}://${API_HOST}:${ETCD_PORT}\"]}]" | \
+	oc ex config patch - --patch="{\"etcdConfig\": {\"peerAddress\": \"${API_HOST}:${ETCD_PEER_PORT}\"}}" | \
+	oc ex config patch - --patch="{\"etcdConfig\": {\"peerServingInfo\": {\"bindAddress\": \"${API_HOST}:${ETCD_PEER_PORT}\"}}}" | \
+	oc ex config patch - --patch="{\"auditConfig\": {\"enabled\": true}}" | \
+	oc ex config patch - --patch="{\"imagePolicyConfig\": {\"maxImagesBulkImportedPerRepository\": ${MAX_IMAGES_BULK_IMPORTED_PER_REPOSITORY:-5}}}" > "${SERVER_CONFIG_DIR}/master/master-config.yaml"
 
 	# Make oc use ${MASTER_CONFIG_DIR}/admin.kubeconfig, and ignore anything in the running user's $HOME dir
 	export ADMIN_KUBECONFIG="${MASTER_CONFIG_DIR}/admin.kubeconfig"
@@ -282,19 +264,20 @@ function os::start::master() {
 	os::log::debug "$( ps -ef | grep openshift )"
 
 	os::log::debug "Starting OpenShift server"
-	local openshift_env=( "OPENSHIFT_PROFILE=web" "OPENSHIFT_ON_PANIC=crash" )
-	$(os::start::internal::openshift_executable) start master \
-		--config="${MASTER_CONFIG_DIR}/master-config.yaml" \
-		--loglevel=4 --logspec='*importer=5' \
-	&>"${LOG_DIR}/openshift.log" &
+	local openshift_env=( "OPENSHIFT_PROFILE=${OPENSHIFT_PROFILE:-web}" "OPENSHIFT_ON_PANIC=crash" )
+	$(os::start::internal::openshift_executable) start master                                       \
+	                                             --loglevel=4                                       \
+	                                             --logspec='*importer=5'                            \
+	                                             --config="${MASTER_CONFIG_DIR}/master-config.yaml" \
+	                                             &>"${LOG_DIR}/openshift.log" &
 	export OS_PID=$!
 
 	os::log::debug "OpenShift server start at: $( date )"
 
 	os::test::junit::declare_suite_start "setup/start-master"
-	os::cmd::try_until_text "oc get --raw /healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 160 * second )) 0.25
-	os::cmd::try_until_text "oc get --raw /healthz/ready --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 160 * second )) 0.25
-	os::cmd::try_until_success "oc get service kubernetes --namespace default --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" $(( 160 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw /healthz --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 160 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw /healthz/ready --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 160 * second )) 0.25
+	os::cmd::try_until_success "oc get service kubernetes --namespace default --config='${ADMIN_KUBECONFIG}'" $(( 160 * second )) 0.25
 	os::test::junit::declare_suite_end
 
 	os::log::debug "OpenShift server health checks done at: $( date )"
@@ -331,26 +314,26 @@ function os::start::all_in_one() {
 	fi
 
 	os::log::debug "Starting OpenShift server"
-	local openshift_env=( "OPENSHIFT_PROFILE=web" "OPENSHIFT_ON_PANIC=crash" )
+	local openshift_env=( "OPENSHIFT_PROFILE=${OPENSHIFT_PROFILE:-web}" "OPENSHIFT_ON_PANIC=crash" )
 	local openshift_executable
 	openshift_executable="$(os::start::internal::openshift_executable)"
-	${openshift_executable} start                                                       \
-		                      --loglevel=4                                              \
-		                      --logspec='*importer=5'                                   \
-		                      --latest-images="${use_latest_images}"                    \
-		                      --node-config="${NODE_CONFIG_DIR}/node-config.yaml"       \
-		                      --master-config="${MASTER_CONFIG_DIR}/master-config.yaml" \
-		                      &>"${LOG_DIR}/openshift.log" &
+	${openshift_executable} start                                                     \
+	                        --loglevel=4                                              \
+	                        --logspec='*importer=5'                                   \
+	                        --latest-images="${use_latest_images}"                    \
+	                        --node-config="${NODE_CONFIG_DIR}/node-config.yaml"       \
+	                        --master-config="${MASTER_CONFIG_DIR}/master-config.yaml" \
+	                        &>"${LOG_DIR}/openshift.log" &
 	export OS_PID=$!
 
 	os::log::debug "OpenShift server start at: $( date )"
 
 	os::test::junit::declare_suite_start "setup/start-all_in_one"
-	os::cmd::try_until_text "oc get --raw /healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
-	os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 2 * minute )) 0.5
-	os::cmd::try_until_text "oc get --raw /healthz/ready --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
-	os::cmd::try_until_success "oc get service kubernetes --namespace default --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" $(( 160 * second )) 0.25
-	os::cmd::try_until_success "oc get --raw /api/v1/nodes/${KUBELET_HOST} --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" $(( 80 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw /healthz --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 80 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 2 * minute )) 0.5
+	os::cmd::try_until_text "oc get --raw /healthz/ready --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 80 * second )) 0.25
+	os::cmd::try_until_success "oc get service kubernetes --namespace default --config='${ADMIN_KUBECONFIG}'" $(( 160 * second )) 0.25
+	os::cmd::try_until_success "oc get --raw /api/v1/nodes/${KUBELET_HOST} --config='${ADMIN_KUBECONFIG}'" $(( 80 * second )) 0.25
 	os::test::junit::declare_suite_end
 
 	os::log::debug "OpenShift server health checks done at: $( date )"
@@ -407,7 +390,7 @@ readonly -f os::start::etcd
 function os::start::api_server() {
 	local api_server_version=${1:-}
 	local openshift_volumes=( "${MASTER_CONFIG_DIR}" )
-	local openshift_env=( "OPENSHIFT_PROFILE=web" "OPENSHIFT_ON_PANIC=crash" )
+	local openshift_env=( "OPENSHIFT_PROFILE=${OPENSHIFT_PROFILE:-web}" "OPENSHIFT_ON_PANIC=crash" )
 	local openshift_executable
 	openshift_executable="$(os::start::internal::openshift_executable "${api_server_version}")"
 
@@ -420,8 +403,8 @@ function os::start::api_server() {
 	os::log::debug "OpenShift API server start at: $( date )"
 
 	os::test::junit::declare_suite_start "setup/start-api_server"
-	os::cmd::try_until_text "oc get --raw /healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
-	os::cmd::try_until_text "oc get --raw /healthz/ready --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 160 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw /healthz --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 80 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw /healthz/ready --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 160 * second )) 0.25
 	os::test::junit::declare_suite_end
 
 	os::log::debug "OpenShift API server health checks done at: $( date )"
@@ -490,7 +473,7 @@ function os::start::internal::start_node() {
 	os::log::debug "OpenShift node start at: $( date )"
 
 	os::test::junit::declare_suite_start "setup/start-node"
-	os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
+	os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --as system:unauthenticated --config='${ADMIN_KUBECONFIG}'" 'ok' $(( 80 * second )) 0.25
 	os::test::junit::declare_suite_end
 
 	os::log::debug "OpenShift node health checks done at: $( date )"
@@ -603,11 +586,11 @@ function os::start::internal::print_server_info() {
 #  None
 function os::start::router() {
 	os::log::debug "Installing the router"
-	oadm policy add-scc-to-user privileged --serviceaccount='router' --config="${ADMIN_KUBECONFIG}"
+	oc adm policy add-scc-to-user privileged --serviceaccount='router' --config="${ADMIN_KUBECONFIG}"
 	# Create a TLS certificate for the router
 	if [[ -n "${CREATE_ROUTER_CERT:-}" ]]; then
 		os::log::debug "Generating router TLS certificate"
-		oadm ca create-server-cert --hostnames="*.${API_HOST}.nip.io"          \
+		oc adm ca create-server-cert --hostnames="*.${API_HOST}.nip.io"        \
 		                           --key="${MASTER_CONFIG_DIR}/router.key"     \
 		                           --cert="${MASTER_CONFIG_DIR}/router.crt"    \
 		                           --signer-key="${MASTER_CONFIG_DIR}/ca.key"  \
@@ -616,9 +599,9 @@ function os::start::router() {
 		cat "${MASTER_CONFIG_DIR}/router.crt" \
 		    "${MASTER_CONFIG_DIR}/router.key" \
 			"${MASTER_CONFIG_DIR}/ca.crt" > "${MASTER_CONFIG_DIR}/router.pem"
-		openshift admin router --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --service-account=router --default-cert="${MASTER_CONFIG_DIR}/router.pem"
+		oc adm router --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --service-account=router --default-cert="${MASTER_CONFIG_DIR}/router.pem"
 	else
-		openshift admin router --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --service-account=router
+		oc adm router --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --service-account=router
 	fi
 
 	# Set the SYN eater to make router reloads more robust
@@ -645,8 +628,8 @@ function os::start::registry() {
 	os::log::debug "Installing the registry"
 	# For testing purposes, ensure the quota objects are always up to date in the registry by
 	# disabling project cache.
-	openshift admin registry --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --enforce-quota -o json | \
-		oc env -f - --output json "REGISTRY_MIDDLEWARE_REPOSITORY_OPENSHIFT_PROJECTCACHETTL=0" | \
-		oc create -f -
+	oc adm registry --config="${ADMIN_KUBECONFIG}" --images="${USE_IMAGES}" --enforce-quota -o json | \
+		oc env --config="${ADMIN_KUBECONFIG}" -f - --output json "REGISTRY_MIDDLEWARE_REPOSITORY_OPENSHIFT_PROJECTCACHETTL=0" | \
+		oc create --config="${ADMIN_KUBECONFIG}" -f -
 }
 readonly -f os::start::registry

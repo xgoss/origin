@@ -10,34 +10,36 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	"github.com/openshift/origin/pkg/client"
+	userclient "github.com/openshift/client-go/user/clientset/versioned"
+	usertypedclient "github.com/openshift/client-go/user/clientset/versioned/typed/user/v1"
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	configlatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
 	requestlimitapi "github.com/openshift/origin/pkg/project/admission/requestlimit/api"
 	requestlimitapivalidation "github.com/openshift/origin/pkg/project/admission/requestlimit/api/validation"
-	projectapi "github.com/openshift/origin/pkg/project/api"
+	projectapi "github.com/openshift/origin/pkg/project/apis/project"
 	projectcache "github.com/openshift/origin/pkg/project/cache"
-	uservalidation "github.com/openshift/origin/pkg/user/api/validation"
+	uservalidation "github.com/openshift/origin/pkg/user/apis/user/validation"
 )
 
 // allowedTerminatingProjects is the number of projects that are owned by a user, are in terminating state,
 // and do not count towards the user's limit.
 const allowedTerminatingProjects = 2
 
-func init() {
-	admission.RegisterPlugin("ProjectRequestLimit", func(config io.Reader) (admission.Interface, error) {
-		pluginConfig, err := readConfig(config)
-		if err != nil {
-			return nil, err
-		}
-		if pluginConfig == nil {
-			glog.Infof("Admission plugin %q is not configured so it will be disabled.", "ProjectRequestLimit")
-			return nil, nil
-		}
-		return NewProjectRequestLimit(pluginConfig)
-	})
+func Register(plugins *admission.Plugins) {
+	plugins.Register("ProjectRequestLimit",
+		func(config io.Reader) (admission.Interface, error) {
+			pluginConfig, err := readConfig(config)
+			if err != nil {
+				return nil, err
+			}
+			if pluginConfig == nil {
+				glog.Infof("Admission plugin %q is not configured so it will be disabled.", "ProjectRequestLimit")
+				return nil, nil
+			}
+			return NewProjectRequestLimit(pluginConfig)
+		})
 }
 
 func readConfig(reader io.Reader) (*requestlimitapi.ProjectRequestLimitConfig, error) {
@@ -61,14 +63,14 @@ func readConfig(reader io.Reader) (*requestlimitapi.ProjectRequestLimitConfig, e
 
 type projectRequestLimit struct {
 	*admission.Handler
-	client client.Interface
-	config *requestlimitapi.ProjectRequestLimitConfig
-	cache  *projectcache.ProjectCache
+	userClient usertypedclient.UsersGetter
+	config     *requestlimitapi.ProjectRequestLimitConfig
+	cache      *projectcache.ProjectCache
 }
 
 // ensure that the required Openshift admission interfaces are implemented
 var _ = oadmission.WantsProjectCache(&projectRequestLimit{})
-var _ = oadmission.WantsOpenshiftClient(&projectRequestLimit{})
+var _ = oadmission.WantsOpenshiftInternalUserClient(&projectRequestLimit{})
 
 // Admit ensures that only a configured number of projects can be requested by a particular user.
 func (o *projectRequestLimit) Admit(a admission.Attributes) (err error) {
@@ -122,7 +124,7 @@ func (o *projectRequestLimit) maxProjectsByRequester(userName string) (int, bool
 		return 0, false, nil
 	}
 
-	user, err := o.client.Users().Get(userName, metav1.GetOptions{})
+	user, err := o.userClient.Users().Get(userName, metav1.GetOptions{})
 	if err != nil {
 		return 0, false, err
 	}
@@ -165,16 +167,16 @@ func (o *projectRequestLimit) projectCountByRequester(userName string) (int, err
 	return count, nil
 }
 
-func (o *projectRequestLimit) SetOpenshiftClient(client client.Interface) {
-	o.client = client
+func (o *projectRequestLimit) SetOpenshiftInternalUserClient(client userclient.Interface) {
+	o.userClient = client.User()
 }
 
 func (o *projectRequestLimit) SetProjectCache(cache *projectcache.ProjectCache) {
 	o.cache = cache
 }
 
-func (o *projectRequestLimit) Validate() error {
-	if o.client == nil {
+func (o *projectRequestLimit) ValidateInitialization() error {
+	if o.userClient == nil {
 		return fmt.Errorf("ProjectRequestLimit plugin requires an Openshift client")
 	}
 	if o.cache == nil {
@@ -188,8 +190,4 @@ func NewProjectRequestLimit(config *requestlimitapi.ProjectRequestLimitConfig) (
 		config:  config,
 		Handler: admission.NewHandler(admission.Create),
 	}, nil
-}
-
-func projectRequester(ns *kapi.Namespace) string {
-	return ns.Annotations[projectapi.ProjectRequester]
 }

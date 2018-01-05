@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/image/admission/imagepolicy/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 type ImagePolicyAttributes struct {
@@ -16,16 +16,17 @@ type ImagePolicyAttributes struct {
 	Image              *imageapi.Image
 	ExcludedRules      sets.String
 	IntegratedRegistry bool
+	LocalRewrite       bool
 }
 
 type RegistryMatcher interface {
 	Matches(name string) bool
 }
 
-type RegistryNameMatcher imageapi.DefaultRegistryFunc
+type RegistryNameMatcher func() (string, bool)
 
 func (m RegistryNameMatcher) Matches(name string) bool {
-	current, ok := imageapi.DefaultRegistryFunc(m)()
+	current, ok := m()
 	if !ok {
 		return false
 	}
@@ -48,12 +49,6 @@ func NewRegistryMatcher(names []string) RegistryMatcher {
 }
 
 type resourceSet map[schema.GroupResource]struct{}
-
-func (s resourceSet) addAll(other resourceSet) {
-	for k := range other {
-		s[k] = struct{}{}
-	}
-}
 
 func imageConditionInfo(rule *api.ImageCondition) (covers resourceSet, selectors []labels.Selector, err error) {
 	covers = make(resourceSet)

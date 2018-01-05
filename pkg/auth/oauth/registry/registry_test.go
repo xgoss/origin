@@ -9,19 +9,22 @@ import (
 
 	"github.com/RangelReale/osin"
 	"github.com/RangelReale/osincli"
+
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authentication/user"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/openshift/origin/pkg/auth/api"
 	"github.com/openshift/origin/pkg/auth/oauth/handlers"
 	"github.com/openshift/origin/pkg/auth/userregistry/identitymapper"
-	oapi "github.com/openshift/origin/pkg/oauth/api"
-	"github.com/openshift/origin/pkg/oauth/registry/test"
+	oapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	oauthfake "github.com/openshift/origin/pkg/oauth/generated/internalclientset/fake"
 	"github.com/openshift/origin/pkg/oauth/server/osinserver"
 	"github.com/openshift/origin/pkg/oauth/server/osinserver/registrystorage"
-	userapi "github.com/openshift/origin/pkg/user/api"
+	userapi "github.com/openshift/origin/pkg/user/apis/user"
 	usertest "github.com/openshift/origin/pkg/user/registry/test"
-	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 type testHandlers struct {
@@ -127,6 +130,7 @@ func TestRegistryAndServer(t *testing.T) {
 			AuthSuccess: true,
 			AuthUser: &user.DefaultInfo{
 				Name: "user",
+				UID:  "1",
 			},
 			Check: func(h *testHandlers, _ *http.Request) {
 				if h.AuthNeed || !h.GrantNeed || h.AuthErr != nil || h.GrantErr != nil || h.HandleAuthorizeReq.Authorized {
@@ -165,9 +169,12 @@ func TestRegistryAndServer(t *testing.T) {
 			AuthSuccess: true,
 			AuthUser: &user.DefaultInfo{
 				Name: "user",
+				UID:  "1",
 			},
 			ClientAuth: &oapi.OAuthClientAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Name: "user:test"},
 				UserName:   "user",
+				UserUID:    "1",
 				ClientName: "test",
 				Scopes:     []string{"user:info"},
 			},
@@ -183,9 +190,12 @@ func TestRegistryAndServer(t *testing.T) {
 			AuthSuccess: true,
 			AuthUser: &user.DefaultInfo{
 				Name: "user",
+				UID:  "1",
 			},
 			ClientAuth: &oapi.OAuthClientAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Name: "user:test"},
 				UserName:   "user",
+				UserUID:    "1",
 				ClientName: "test",
 				Scopes:     []string{"user:info", "user:check-access"},
 			},
@@ -201,9 +211,12 @@ func TestRegistryAndServer(t *testing.T) {
 			AuthSuccess: true,
 			AuthUser: &user.DefaultInfo{
 				Name: "user",
+				UID:  "1",
 			},
 			ClientAuth: &oapi.OAuthClientAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Name: "user:test"},
 				UserName:   "user",
+				UserUID:    "1",
 				ClientName: "test",
 				Scopes:     []string{"user:full"},
 			},
@@ -221,26 +234,60 @@ func TestRegistryAndServer(t *testing.T) {
 				}
 			},
 		},
+		"has auth with no UID, mimics impersonation": {
+			Client:      validClient,
+			AuthSuccess: true,
+			AuthUser: &user.DefaultInfo{
+				Name: "user",
+			},
+			ClientAuth: &oapi.OAuthClientAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Name: "user:test"},
+				UserName:   "user",
+				UserUID:    "2",
+				ClientName: "test",
+				Scopes:     []string{"user:full"},
+			},
+			Check: func(h *testHandlers, r *http.Request) {
+				if h.AuthNeed || h.GrantNeed || h.AuthErr != nil || h.GrantErr != nil || h.HandleAuthorizeReq.Authorized || h.HandleAuthorizeResp.ErrorId != "server_error" {
+					t.Errorf("expected server_error error: %#v, %#v, %#v", h, h.HandleAuthorizeReq, h.HandleAuthorizeResp)
+				}
+			},
+		},
+		"has auth and grant with different UIDs": {
+			Client:      validClient,
+			AuthSuccess: true,
+			AuthUser: &user.DefaultInfo{
+				Name: "user",
+				UID:  "1",
+			},
+			ClientAuth: &oapi.OAuthClientAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Name: "user:test"},
+				UserName:   "user",
+				UserUID:    "2",
+				ClientName: "test",
+				Scopes:     []string{"user:full"},
+			},
+			Check: func(h *testHandlers, _ *http.Request) {
+				if h.AuthNeed || !h.GrantNeed || h.AuthErr != nil || h.GrantErr != nil || h.HandleAuthorizeReq.Authorized {
+					t.Errorf("expected request to need to grant access due to UID mismatch: %#v", h)
+				}
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
 		h := &testHandlers{}
 		h.Authenticate = testCase.AuthSuccess
 		h.User = testCase.AuthUser
-		access, authorize := &test.AccessTokenRegistry{}, &test.AuthorizeTokenRegistry{}
-		client := &test.ClientRegistry{
-			Client: testCase.Client,
+		objs := []runtime.Object{}
+		if testCase.Client != nil {
+			objs = append(objs, testCase.Client)
 		}
-		if testCase.Client == nil {
-			client.Err = apierrs.NewNotFound(oapi.Resource("OAuthClient"), "unknown")
+		if testCase.ClientAuth != nil {
+			objs = append(objs, testCase.ClientAuth)
 		}
-		grant := &test.ClientAuthorizationRegistry{
-			ClientAuthorization: testCase.ClientAuth,
-		}
-		if testCase.ClientAuth == nil {
-			grant.GetErr = apierrs.NewNotFound(oapi.Resource("OAuthClientAuthorization"), "test:test")
-		}
-		storage := registrystorage.New(access, authorize, client, NewUserConversion())
+		fakeOAuthClient := oauthfake.NewSimpleClientset(objs...)
+		storage := registrystorage.New(fakeOAuthClient.Oauth().OAuthAccessTokens(), fakeOAuthClient.Oauth().OAuthAuthorizeTokens(), fakeOAuthClient.Oauth().OAuthClients(), NewUserConversion())
 		config := osinserver.NewDefaultServerConfig()
 
 		h.AuthorizeHandler = osinserver.AuthorizeHandlers{
@@ -250,7 +297,7 @@ func TestRegistryAndServer(t *testing.T) {
 				h,
 			),
 			handlers.NewGrantCheck(
-				NewClientAuthorizationGrantChecker(grant),
+				NewClientAuthorizationGrantChecker(fakeOAuthClient.Oauth().OAuthClientAuthorizations()),
 				h,
 				h,
 			),
@@ -299,9 +346,9 @@ func TestRegistryAndServer(t *testing.T) {
 }
 
 func TestAuthenticateTokenNotFound(t *testing.T) {
-	tokenRegistry := &test.AccessTokenRegistry{Err: apierrs.NewNotFound(oapi.Resource("OAuthAccessToken"), "token")}
+	fakeOAuthClient := oauthfake.NewSimpleClientset()
 	userRegistry := usertest.NewUserRegistry()
-	tokenAuthenticator := NewTokenAuthenticator(tokenRegistry, userRegistry, identitymapper.NoopGroupMapper{})
+	tokenAuthenticator := NewTokenAuthenticator(fakeOAuthClient.Oauth().OAuthAccessTokens(), userRegistry, identitymapper.NoopGroupMapper{})
 
 	userInfo, found, err := tokenAuthenticator.AuthenticateToken("token")
 	if found {
@@ -317,10 +364,14 @@ func TestAuthenticateTokenNotFound(t *testing.T) {
 		t.Errorf("Unexpected user: %v", userInfo)
 	}
 }
+
 func TestAuthenticateTokenOtherGetError(t *testing.T) {
-	tokenRegistry := &test.AccessTokenRegistry{Err: errors.New("get error")}
+	fakeOAuthClient := oauthfake.NewSimpleClientset()
+	fakeOAuthClient.PrependReactor("get", "oauthaccesstokens", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, errors.New("get error")
+	})
 	userRegistry := usertest.NewUserRegistry()
-	tokenAuthenticator := NewTokenAuthenticator(tokenRegistry, userRegistry, identitymapper.NoopGroupMapper{})
+	tokenAuthenticator := NewTokenAuthenticator(fakeOAuthClient.Oauth().OAuthAccessTokens(), userRegistry, identitymapper.NoopGroupMapper{})
 
 	userInfo, found, err := tokenAuthenticator.AuthenticateToken("token")
 	if found {
@@ -329,49 +380,87 @@ func TestAuthenticateTokenOtherGetError(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error is missing!")
 	}
-	if err.Error() != tokenRegistry.Err.Error() {
-		t.Errorf("Expected error %v, but got error %v", tokenRegistry.Err, err)
+	if err.Error() != "get error" {
+		t.Errorf("Expected error %v, but got error %v", "get error", err)
 	}
 	if userInfo != nil {
 		t.Errorf("Unexpected user: %v", userInfo)
 	}
 }
+
 func TestAuthenticateTokenExpired(t *testing.T) {
-	tokenRegistry := &test.AccessTokenRegistry{
-		Err: nil,
-		AccessToken: &oapi.OAuthAccessToken{
-			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Time{Time: time.Now().Add(-1 * time.Hour)}},
-			ExpiresIn:  600, // 10 minutes
+	fakeOAuthClient := oauthfake.NewSimpleClientset(
+		// expired token that had a lifetime of 10 minutes
+		&oapi.OAuthAccessToken{
+			ObjectMeta: metav1.ObjectMeta{Name: "token1", CreationTimestamp: metav1.Time{Time: time.Now().Add(-1 * time.Hour)}},
+			ExpiresIn:  600,
+			UserName:   "foo",
 		},
-	}
+		// non-expired token that has a lifetime of 10 minutes, but has a non-nil deletion timestamp
+		&oapi.OAuthAccessToken{
+			ObjectMeta: metav1.ObjectMeta{Name: "token2", CreationTimestamp: metav1.Time{Time: time.Now()}, DeletionTimestamp: &metav1.Time{}},
+			ExpiresIn:  600,
+			UserName:   "foo",
+		},
+	)
 	userRegistry := usertest.NewUserRegistry()
-	tokenAuthenticator := NewTokenAuthenticator(tokenRegistry, userRegistry, identitymapper.NoopGroupMapper{})
+	userRegistry.GetUsers["foo"] = &userapi.User{ObjectMeta: metav1.ObjectMeta{UID: "bar"}}
+
+	tokenAuthenticator := NewTokenAuthenticator(fakeOAuthClient.Oauth().OAuthAccessTokens(), userRegistry, identitymapper.NoopGroupMapper{}, NewExpirationValidator())
+
+	for _, tokenName := range []string{"token1", "token2"} {
+		userInfo, found, err := tokenAuthenticator.AuthenticateToken(tokenName)
+		if found {
+			t.Error("Found token, but it should be missing!")
+		}
+		if err != errExpired {
+			t.Errorf("Unexpected error: %v", err)
+		}
+		if userInfo != nil {
+			t.Errorf("Unexpected user: %v", userInfo)
+		}
+	}
+}
+
+func TestAuthenticateTokenInvalidUID(t *testing.T) {
+	fakeOAuthClient := oauthfake.NewSimpleClientset(
+		&oapi.OAuthAccessToken{
+			ObjectMeta: metav1.ObjectMeta{Name: "token", CreationTimestamp: metav1.Time{Time: time.Now()}},
+			ExpiresIn:  600, // 10 minutes
+			UserName:   "foo",
+			UserUID:    string("bar1"),
+		},
+	)
+	userRegistry := usertest.NewUserRegistry()
+	userRegistry.GetUsers["foo"] = &userapi.User{ObjectMeta: metav1.ObjectMeta{UID: "bar2"}}
+
+	tokenAuthenticator := NewTokenAuthenticator(fakeOAuthClient.Oauth().OAuthAccessTokens(), userRegistry, identitymapper.NoopGroupMapper{}, NewUIDValidator())
 
 	userInfo, found, err := tokenAuthenticator.AuthenticateToken("token")
 	if found {
 		t.Error("Found token, but it should be missing!")
 	}
-	if err != ErrExpired {
+	if err.Error() != "user.UID (bar2) does not match token.userUID (bar1)" {
 		t.Errorf("Unexpected error: %v", err)
 	}
 	if userInfo != nil {
 		t.Errorf("Unexpected user: %v", userInfo)
 	}
 }
+
 func TestAuthenticateTokenValidated(t *testing.T) {
-	tokenRegistry := &test.AccessTokenRegistry{
-		Err: nil,
-		AccessToken: &oapi.OAuthAccessToken{
-			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Time{Time: time.Now()}},
+	fakeOAuthClient := oauthfake.NewSimpleClientset(
+		&oapi.OAuthAccessToken{
+			ObjectMeta: metav1.ObjectMeta{Name: "token", CreationTimestamp: metav1.Time{Time: time.Now()}},
 			ExpiresIn:  600, // 10 minutes
 			UserName:   "foo",
 			UserUID:    string("bar"),
 		},
-	}
+	)
 	userRegistry := usertest.NewUserRegistry()
-	userRegistry.Get["foo"] = &userapi.User{ObjectMeta: metav1.ObjectMeta{UID: "bar"}}
+	userRegistry.GetUsers["foo"] = &userapi.User{ObjectMeta: metav1.ObjectMeta{UID: "bar"}}
 
-	tokenAuthenticator := NewTokenAuthenticator(tokenRegistry, userRegistry, identitymapper.NoopGroupMapper{})
+	tokenAuthenticator := NewTokenAuthenticator(fakeOAuthClient.Oauth().OAuthAccessTokens(), userRegistry, identitymapper.NoopGroupMapper{}, NewExpirationValidator(), NewUIDValidator())
 
 	userInfo, found, err := tokenAuthenticator.AuthenticateToken("token")
 	if !found {

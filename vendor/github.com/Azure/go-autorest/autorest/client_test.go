@@ -1,5 +1,19 @@
 package autorest
 
+// Copyright 2017 Microsoft Corporation
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
 import (
 	"bytes"
 	"fmt"
@@ -111,10 +125,37 @@ func TestLoggingInspectorByInspectingRestoresBody(t *testing.T) {
 func TestNewClientWithUserAgent(t *testing.T) {
 	ua := "UserAgent"
 	c := NewClientWithUserAgent(ua)
+	completeUA := fmt.Sprintf("%s %s", defaultUserAgent, ua)
 
-	if c.UserAgent != ua {
+	if c.UserAgent != completeUA {
 		t.Fatalf("autorest: NewClientWithUserAgent failed to set the UserAgent -- expected %s, received %s",
-			ua, c.UserAgent)
+			completeUA, c.UserAgent)
+	}
+}
+
+func TestAddToUserAgent(t *testing.T) {
+	ua := "UserAgent"
+	c := NewClientWithUserAgent(ua)
+	ext := "extension"
+	err := c.AddToUserAgent(ext)
+	if err != nil {
+		t.Fatalf("autorest: AddToUserAgent returned error -- expected nil, received %s", err)
+	}
+	completeUA := fmt.Sprintf("%s %s %s", defaultUserAgent, ua, ext)
+
+	if c.UserAgent != completeUA {
+		t.Fatalf("autorest: AddToUserAgent failed to add an extension to the UserAgent -- expected %s, received %s",
+			completeUA, c.UserAgent)
+	}
+
+	err = c.AddToUserAgent("")
+	if err == nil {
+		t.Fatalf("autorest: AddToUserAgent didn't return error -- expected %s, received nil",
+			fmt.Errorf("Extension was empty, User Agent stayed as %s", c.UserAgent))
+	}
+	if c.UserAgent != completeUA {
+		t.Fatalf("autorest: AddToUserAgent failed to not add an empty extension to the UserAgent -- expected %s, received %s",
+			completeUA, c.UserAgent)
 	}
 }
 

@@ -7,9 +7,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	routeapi "github.com/openshift/origin/pkg/route/api"
+	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	"github.com/openshift/origin/pkg/router/controller"
 	"github.com/openshift/origin/pkg/util/netutils"
 )
@@ -508,6 +508,28 @@ func (p *F5Plugin) deleteRoute(routename string) error {
 					routename, err)
 				// Don't continue if we could not clean up the passthrough route.
 				return err
+			}
+		}
+	} else {
+		reencryptRouteExists, err := p.F5Client.ReencryptRouteExists(routename)
+		if err != nil {
+			glog.V(4).Infof("F5Client.ReencryptRouteExists failed: %v", err)
+			return err
+		}
+
+		if reencryptRouteExists {
+			err = p.F5Client.DeleteReencryptRoute(routename)
+			if err != nil {
+				f5err, ok := err.(F5Error)
+				if ok && f5err.httpStatusCode == 404 {
+					glog.V(4).Infof("Reencrypt route %s does not exist.",
+						routename)
+				} else {
+					glog.V(4).Infof("Error deleting reencrypt route %s: %v",
+						routename, err)
+					// Don't continue if we could not clean up the reencrypt route.
+					return err
+				}
 			}
 		}
 	}

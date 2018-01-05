@@ -9,18 +9,13 @@ os::util::environment::use_sudo
 os::cleanup::tmpdir
 os::util::environment::setup_all_server_vars
 
-function cleanup()
-{
-	out=$?
-	cleanup_openshift
-
-	os::test::junit::generate_oscmd_report
-
-	os::log::info "Exiting"
-	exit $out
+function cleanup() {
+	return_code=$?
+	os::test::junit::generate_report
+	os::cleanup::all
+	os::util::describe_return_code "${return_code}"
+	exit "${return_code}"
 }
-
-trap "exit" INT TERM
 trap "cleanup" EXIT
 
 os::log::info "Starting server as distinct processes"
@@ -34,11 +29,6 @@ os::log::info "Volumes dir is:            ${VOLUME_DIR}"
 os::log::info "Config dir is:             ${SERVER_CONFIG_DIR}"
 os::log::info "Using images:              ${USE_IMAGES}"
 os::log::info "MasterIP is:               ${MASTER_ADDR}"
-
-# Allow setting $JUNIT_REPORT to toggle output behavior
-if [[ -n "${JUNIT_REPORT:-}" ]]; then
-	export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
-fi
 
 mkdir -p ${LOG_DIR}
 
@@ -59,8 +49,8 @@ sudo env "PATH=${PATH}" OPENSHIFT_PROFILE=web OPENSHIFT_ON_PANIC=crash openshift
  --loglevel=4 \
 &>"${LOG_DIR}/os-apiserver.log" &
 
-os::cmd::try_until_text "oc get --raw /healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
-os::cmd::try_until_text "oc get --raw /healthz/ready --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
+os::cmd::try_until_text "oc get --raw /healthz --as system:unauthenticated --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
+os::cmd::try_until_text "oc get --raw /healthz/ready --as system:unauthenticated --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' $(( 80 * second )) 0.25
 os::log::info "OpenShift API server up at: "
 date
 
@@ -141,7 +131,7 @@ export OS_PID=$!
 os::log::info "OpenShift server start at: "
 date
 
-os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' minute 0.5
+os::cmd::try_until_text "oc get --raw ${KUBELET_SCHEME}://${KUBELET_HOST}:${KUBELET_PORT}/healthz --as system:unauthenticated --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" 'ok' minute 0.5
 os::cmd::try_until_success "oc get --raw /api/v1/nodes/${KUBELET_HOST} --config='${MASTER_CONFIG_DIR}/admin.kubeconfig'" $(( 80 * second )) 0.25
 os::log::info "OpenShift node health checks done at: "
 date
@@ -152,12 +142,12 @@ export KUBECONFIG="${ADMIN_KUBECONFIG}"
 # TODO this is copy/paste from hack/test-end-to-end.sh. We need to DRY
 if [[ -n "${USE_IMAGES:-}" ]]; then
   readonly JQSETPULLPOLICY='(.items[] | select(.kind == "DeploymentConfig") | .spec.template.spec.containers[0].imagePullPolicy) |= "IfNotPresent"'
-  os::cmd::expect_success "oadm registry --dry-run -o json --images='$USE_IMAGES' | jq '$JQSETPULLPOLICY' | oc create -f -"
+  os::cmd::expect_success "oc adm registry --dry-run -o json --images='$USE_IMAGES' | jq '$JQSETPULLPOLICY' | oc create -f -"
 else
-  os::cmd::expect_success "oadm registry"
+  os::cmd::expect_success "oc adm registry"
 fi
-os::cmd::expect_success 'oadm policy add-scc-to-user hostnetwork -z router'
-os::cmd::expect_success 'oadm router'
+os::cmd::expect_success 'oc adm policy add-scc-to-user hostnetwork -z router'
+os::cmd::expect_success 'oc adm router'
 
 os::test::junit::declare_suite_end
 

@@ -4,6 +4,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/registry/rest"
+
+	"github.com/openshift/origin/pkg/apps/registry/deployconfig"
+	deploymentconfigetcd "github.com/openshift/origin/pkg/apps/registry/deployconfig/etcd"
+	buildconfig "github.com/openshift/origin/pkg/build/registry/buildconfig"
+	buildconfigetcd "github.com/openshift/origin/pkg/build/registry/buildconfig/etcd"
+	routeregistry "github.com/openshift/origin/pkg/route/registry/route"
+	routeetcd "github.com/openshift/origin/pkg/route/registry/route/etcd"
 )
 
 var (
@@ -186,7 +193,33 @@ func LegacyStorage(storage map[schema.GroupVersion]map[string]rest.Storage) map[
 	for _, gvStorage := range storage {
 		for resource, s := range gvStorage {
 			if OriginLegacyResources.Has(resource) || OriginLegacySubresources.Has(resource) {
-				legacyStorage[resource] = s
+				// We want *some* our legacy resources to orphan by default instead of garbage collecting.
+				// Kube only did this for a select few resources which were controller managed and established links
+				// via a workload controller.  In openshift, these will all conform to registry.Store so we
+				// can actually wrap the "normal" storage here.
+				switch resource {
+				case "buildConfigs":
+					restStorage := s.(*buildconfigetcd.REST)
+					store := *restStorage.Store
+					store.DeleteStrategy = buildconfig.LegacyStrategy
+					store.CreateStrategy = buildconfig.LegacyStrategy
+					legacyStorage[resource] = &buildconfigetcd.REST{Store: &store}
+				case "deploymentConfigs":
+					restStorage := s.(*deploymentconfigetcd.REST)
+					store := *restStorage.Store
+					store.CreateStrategy = deployconfig.LegacyStrategy
+					store.DeleteStrategy = deployconfig.LegacyStrategy
+					legacyStorage[resource] = &deploymentconfigetcd.REST{Store: &store}
+				case "routes":
+					restStorage := s.(*routeetcd.REST)
+					store := *restStorage.Store
+					store.Decorator = routeregistry.DecorateLegacyRouteWithEmptyDestinationCACertificates
+					legacyStorage[resource] = &routeetcd.REST{Store: &store}
+
+				default:
+					legacyStorage[resource] = s
+				}
+
 			}
 		}
 	}

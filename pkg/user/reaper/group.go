@@ -6,18 +6,19 @@ import (
 	"github.com/golang/glog"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl"
 
-	"github.com/openshift/origin/pkg/client"
+	authclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
+	securitytypedclient "github.com/openshift/origin/pkg/security/generated/internalclientset/typed/security/internalversion"
+	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset"
 )
 
 func NewGroupReaper(
-	groupClient client.GroupsInterface,
-	clusterBindingClient client.ClusterRoleBindingsInterface,
-	bindingClient client.RoleBindingsNamespacer,
-	sccClient kcoreclient.SecurityContextConstraintsGetter,
+	groupClient userclient.Interface,
+	clusterBindingClient authclient.Interface,
+	bindingClient authclient.Interface,
+	sccClient securitytypedclient.SecurityContextConstraintsInterface,
 ) kubectl.Reaper {
 	return &GroupReaper{
 		groupClient:          groupClient,
@@ -28,10 +29,10 @@ func NewGroupReaper(
 }
 
 type GroupReaper struct {
-	groupClient          client.GroupsInterface
-	clusterBindingClient client.ClusterRoleBindingsInterface
-	bindingClient        client.RoleBindingsNamespacer
-	sccClient            kcoreclient.SecurityContextConstraintsGetter
+	groupClient          userclient.Interface
+	clusterBindingClient authclient.Interface
+	bindingClient        authclient.Interface
+	sccClient            securitytypedclient.SecurityContextConstraintsInterface
 }
 
 // Stop on a reaper is actually used for deletion.  In this case, we'll delete referencing identities, clusterBindings, and bindings,
@@ -48,7 +49,7 @@ func (r *GroupReaper) Stop(namespace, name string, timeout time.Duration, graceP
 	}
 
 	// Remove the group from sccs
-	sccs, err := r.sccClient.SecurityContextConstraints().List(metav1.ListOptions{})
+	sccs, err := r.sccClient.List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -62,14 +63,14 @@ func (r *GroupReaper) Stop(namespace, name string, timeout time.Duration, graceP
 		if len(retainedGroups) != len(scc.Groups) {
 			updatedSCC := scc
 			updatedSCC.Groups = retainedGroups
-			if _, err := r.sccClient.SecurityContextConstraints().Update(&updatedSCC); err != nil && !kerrors.IsNotFound(err) {
+			if _, err := r.sccClient.Update(&updatedSCC); err != nil && !kerrors.IsNotFound(err) {
 				glog.Infof("Cannot update scc/%s: %v", scc.Name, err)
 			}
 		}
 	}
 
 	// Remove the group
-	if err := r.groupClient.Groups().Delete(name); err != nil && !kerrors.IsNotFound(err) {
+	if err := r.groupClient.User().Groups().Delete(name, &metav1.DeleteOptions{}); err != nil && !kerrors.IsNotFound(err) {
 		return err
 	}
 

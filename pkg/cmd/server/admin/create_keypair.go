@@ -16,9 +16,8 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-
-	"github.com/openshift/origin/pkg/cmd/templates"
 )
 
 const CreateKeyPairCommandName = "create-key-pair"
@@ -49,7 +48,7 @@ func NewCommandCreateKeyPair(commandName string, fullName string, out io.Writer)
 		Long:  fmt.Sprintf(createKeyPairLong, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Validate(args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
 			}
 
 			err := options.CreateKeyPair()

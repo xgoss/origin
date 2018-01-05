@@ -24,9 +24,9 @@ import (
 )
 
 type notRegisteredErr struct {
-	gvk schema.GroupVersionKind
+	gvk    schema.GroupVersionKind
 	target GroupVersioner
-	t   reflect.Type
+	t      reflect.Type
 }
 
 func NewNotRegisteredErrForKind(gvk schema.GroupVersionKind) error {
@@ -94,8 +94,6 @@ type missingVersionErr struct {
 	data string
 }
 
-// IsMissingVersion returns true if the error indicates that the provided object
-// is missing a 'Version' field.
 func NewMissingVersionErr(data string) error {
 	return &missingVersionErr{data}
 }
@@ -104,6 +102,8 @@ func (k *missingVersionErr) Error() string {
 	return fmt.Sprintf("Object 'apiVersion' is missing in '%s'", k.data)
 }
 
+// IsMissingVersion returns true if the error indicates that the provided object
+// is missing a 'Version' field.
 func IsMissingVersion(err error) bool {
 	if err == nil {
 		return false

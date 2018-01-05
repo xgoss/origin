@@ -7,14 +7,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	"k8s.io/kubernetes/pkg/client/listers/core/internalversion"
 
 	admissionttesting "github.com/openshift/origin/pkg/security/admission/testing"
-	securityapi "github.com/openshift/origin/pkg/security/api"
-	oscc "github.com/openshift/origin/pkg/security/scc"
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
+	securitylisters "github.com/openshift/origin/pkg/security/generated/listers/security/internalversion"
+	oscc "github.com/openshift/origin/pkg/security/securitycontextconstraints"
+
+	_ "github.com/openshift/origin/pkg/api/install"
 )
 
 func validPodTemplateSpec() kapi.PodTemplateSpec {
@@ -47,11 +50,11 @@ func validPodTemplateSpec() kapi.PodTemplateSpec {
 
 func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 	testcases := map[string]struct {
-		sccs  []*kapi.SecurityContextConstraints
+		sccs  []*securityapi.SecurityContextConstraints
 		check func(p *securityapi.PodSecurityPolicySelfSubjectReview) (bool, string)
 	}{
 		"user foo": {
-			sccs: []*kapi.SecurityContextConstraints{
+			sccs: []*securityapi.SecurityContextConstraints{
 				admissionttesting.UserScc("bar"),
 				admissionttesting.UserScc("foo"),
 			},
@@ -61,7 +64,7 @@ func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 			},
 		},
 		"user bar ": {
-			sccs: []*kapi.SecurityContextConstraints{
+			sccs: []*securityapi.SecurityContextConstraints{
 				admissionttesting.UserScc("bar"),
 			},
 			check: func(p *securityapi.PodSecurityPolicySelfSubjectReview) (bool, string) {
@@ -95,7 +98,7 @@ func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 		}
 
 		sccIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-		sccCache := internalversion.NewSecurityContextConstraintsLister(sccIndexer)
+		sccCache := securitylisters.NewSecurityContextConstraintsLister(sccIndexer)
 
 		for _, scc := range testcase.sccs {
 			if err := sccIndexer.Add(scc); err != nil {
@@ -106,7 +109,7 @@ func TestPodSecurityPolicySelfSubjectReview(t *testing.T) {
 		csf := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
 		storage := REST{oscc.NewDefaultSCCMatcher(sccCache), csf}
 		ctx := apirequest.WithUser(apirequest.WithNamespace(apirequest.NewContext(), metav1.NamespaceAll), &user.DefaultInfo{Name: "foo", Groups: []string{"bar", "baz"}})
-		obj, err := storage.Create(ctx, reviewRequest)
+		obj, err := storage.Create(ctx, reviewRequest, rest.ValidateAllObjectFunc, false)
 		if err != nil {
 			t.Errorf("%s - Unexpected error", testName)
 		}

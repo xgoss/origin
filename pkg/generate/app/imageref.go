@@ -8,17 +8,17 @@ import (
 	"strings"
 
 	"github.com/docker/docker/builder/dockerfile/parser"
-	"github.com/fsouza/go-dockerclient"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	"github.com/openshift/origin/pkg/api/apihelpers"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/util/docker/dockerfile"
-	"github.com/openshift/origin/pkg/util/namer"
+	"github.com/openshift/origin/pkg/util/portutils"
 )
 
 // ImageRefGenerator is an interface for generating ImageRefs
@@ -95,7 +95,7 @@ func (g *imageRefGenerator) FromDockerfile(name string, dir string, context stri
 	if err != nil {
 		return nil, err
 	}
-	ports := dockerfile.LastExposedPorts(node)
+	ports := dockerfile.LastExposedPorts(node.AST)
 
 	return g.FromNameAndPorts(name, ports)
 }
@@ -325,17 +325,41 @@ func (r *ImageRef) ImageStream() (*imageapi.ImageStream, error) {
 	return stream, nil
 }
 
+// ImageStreamTag returns an ImageStreamTag from an image reference
+func (r *ImageRef) ImageStreamTag() (*imageapi.ImageStreamTag, error) {
+	name, ok := r.SuggestName()
+	if !ok {
+		return nil, fmt.Errorf("unable to suggest an ImageStream name for %q", r.Reference.String())
+	}
+	istname := imageapi.JoinImageStreamTag(name, r.Reference.Tag)
+	ist := &imageapi.ImageStreamTag{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        istname,
+			Annotations: map[string]string{"openshift.io/imported-from": r.Reference.Exact()},
+		},
+		Tag: &imageapi.TagReference{
+			Name: r.InternalTag(),
+			From: &kapi.ObjectReference{
+				Kind: "DockerImage",
+				Name: r.PullSpec(),
+			},
+			ImportPolicy: imageapi.TagImportPolicy{Insecure: r.Insecure},
+		},
+	}
+	return ist, nil
+}
+
 // DeployableContainer sets up a container for the image ready for deployment
-func (r *ImageRef) DeployableContainer() (container *kapi.Container, triggers []deployapi.DeploymentTriggerPolicy, err error) {
+func (r *ImageRef) DeployableContainer() (container *kapi.Container, triggers []appsapi.DeploymentTriggerPolicy, err error) {
 	name, ok := r.SuggestName()
 	if !ok {
 		return nil, nil, fmt.Errorf("unable to suggest a container name for the image %q", r.Reference.String())
 	}
 	if r.AsImageStream {
-		triggers = []deployapi.DeploymentTriggerPolicy{
+		triggers = []appsapi.DeploymentTriggerPolicy{
 			{
-				Type: deployapi.DeploymentTriggerOnImageChange,
-				ImageChangeParams: &deployapi.DeploymentTriggerImageChangeParams{
+				Type: appsapi.DeploymentTriggerOnImageChange,
+				ImageChangeParams: &appsapi.DeploymentTriggerImageChangeParams{
 					Automatic:      true,
 					ContainerNames: []string{name},
 					From:           r.ObjectReference(),
@@ -363,22 +387,21 @@ func (r *ImageRef) DeployableContainer() (container *kapi.Container, triggers []
 			ports = append(ports, strings.Split(exposed, " ")...)
 		}
 
-		for _, sp := range ports {
-			p := docker.Port(sp)
-			port, err := strconv.Atoi(p.Port())
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to parse port %q: %v", p.Port(), err)
-			}
-
+		dockerPorts, errs := portutils.SplitPortAndProtocolArray(ports)
+		if len(errs) > 0 {
+			return nil, nil, fmt.Errorf("failed to parse port(s): %v", errs)
+		}
+		for _, dp := range dockerPorts {
+			intPort, _ := strconv.Atoi(dp.Port())
 			container.Ports = append(container.Ports, kapi.ContainerPort{
-				ContainerPort: int32(port),
-				Protocol:      kapi.Protocol(strings.ToUpper(p.Proto())),
+				ContainerPort: int32(intPort),
+				Protocol:      kapi.Protocol(strings.ToUpper(dp.Proto())),
 			})
 		}
 
 		// Create volume mounts with names based on container name
 		maxDigits := len(fmt.Sprintf("%d", len(r.Info.Config.Volumes)))
-		baseName := namer.GetName(container.Name, volumeNameInfix, kvalidation.LabelValueMaxLength-maxDigits-1)
+		baseName := apihelpers.GetName(container.Name, volumeNameInfix, kvalidation.LabelValueMaxLength-maxDigits-1)
 		i := 1
 		for volume := range r.Info.Config.Volumes {
 			r.HasEmptyDir = true

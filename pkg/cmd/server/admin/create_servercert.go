@@ -9,10 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	"github.com/openshift/origin/pkg/cmd/server/crypto"
-	"github.com/openshift/origin/pkg/cmd/templates"
 )
 
 const CreateServerCertCommandName = "create-server-cert"
@@ -60,7 +60,7 @@ func NewCommandCreateServerCert(commandName string, fullName string, out io.Writ
 		Long:  fmt.Sprintf(createServerLong, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := options.Validate(args); err != nil {
-				kcmdutil.CheckErr(kcmdutil.UsageError(cmd, err.Error()))
+				kcmdutil.CheckErr(kcmdutil.UsageErrorf(cmd, err.Error()))
 			}
 
 			if _, err := options.CreateServerCert(); err != nil {

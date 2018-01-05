@@ -3,7 +3,7 @@
 package internalversion
 
 import (
-	api "github.com/openshift/origin/pkg/oauth/api"
+	oauth "github.com/openshift/origin/pkg/oauth/apis/oauth"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
@@ -12,9 +12,9 @@ import (
 // OAuthClientLister helps list OAuthClients.
 type OAuthClientLister interface {
 	// List lists all OAuthClients in the indexer.
-	List(selector labels.Selector) (ret []*api.OAuthClient, err error)
-	// OAuthClients returns an object that can list and get OAuthClients.
-	OAuthClients(namespace string) OAuthClientNamespaceLister
+	List(selector labels.Selector) (ret []*oauth.OAuthClient, err error)
+	// Get retrieves the OAuthClient from the index for a given name.
+	Get(name string) (*oauth.OAuthClient, error)
 	OAuthClientListerExpansion
 }
 
@@ -29,50 +29,21 @@ func NewOAuthClientLister(indexer cache.Indexer) OAuthClientLister {
 }
 
 // List lists all OAuthClients in the indexer.
-func (s *oAuthClientLister) List(selector labels.Selector) (ret []*api.OAuthClient, err error) {
+func (s *oAuthClientLister) List(selector labels.Selector) (ret []*oauth.OAuthClient, err error) {
 	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*api.OAuthClient))
+		ret = append(ret, m.(*oauth.OAuthClient))
 	})
 	return ret, err
 }
 
-// OAuthClients returns an object that can list and get OAuthClients.
-func (s *oAuthClientLister) OAuthClients(namespace string) OAuthClientNamespaceLister {
-	return oAuthClientNamespaceLister{indexer: s.indexer, namespace: namespace}
-}
-
-// OAuthClientNamespaceLister helps list and get OAuthClients.
-type OAuthClientNamespaceLister interface {
-	// List lists all OAuthClients in the indexer for a given namespace.
-	List(selector labels.Selector) (ret []*api.OAuthClient, err error)
-	// Get retrieves the OAuthClient from the indexer for a given namespace and name.
-	Get(name string) (*api.OAuthClient, error)
-	OAuthClientNamespaceListerExpansion
-}
-
-// oAuthClientNamespaceLister implements the OAuthClientNamespaceLister
-// interface.
-type oAuthClientNamespaceLister struct {
-	indexer   cache.Indexer
-	namespace string
-}
-
-// List lists all OAuthClients in the indexer for a given namespace.
-func (s oAuthClientNamespaceLister) List(selector labels.Selector) (ret []*api.OAuthClient, err error) {
-	err = cache.ListAllByNamespace(s.indexer, s.namespace, selector, func(m interface{}) {
-		ret = append(ret, m.(*api.OAuthClient))
-	})
-	return ret, err
-}
-
-// Get retrieves the OAuthClient from the indexer for a given namespace and name.
-func (s oAuthClientNamespaceLister) Get(name string) (*api.OAuthClient, error) {
-	obj, exists, err := s.indexer.GetByKey(s.namespace + "/" + name)
+// Get retrieves the OAuthClient from the index for a given name.
+func (s *oAuthClientLister) Get(name string) (*oauth.OAuthClient, error) {
+	obj, exists, err := s.indexer.GetByKey(name)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
-		return nil, errors.NewNotFound(api.Resource("oauthclient"), name)
+		return nil, errors.NewNotFound(oauth.Resource("oauthclient"), name)
 	}
-	return obj.(*api.OAuthClient), nil
+	return obj.(*oauth.OAuthClient), nil
 }

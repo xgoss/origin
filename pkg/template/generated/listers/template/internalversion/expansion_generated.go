@@ -6,18 +6,10 @@ package internalversion
 // BrokerTemplateInstanceLister.
 type BrokerTemplateInstanceListerExpansion interface{}
 
-// TemplateListerExpansion allows custom methods to be added to
-// TemplateLister.
-type TemplateListerExpansion interface{}
-
-// TemplateNamespaceListerExpansion allows custom methods to be added to
-// TemplateNamespaeLister.
-type TemplateNamespaceListerExpansion interface{}
-
 // TemplateInstanceListerExpansion allows custom methods to be added to
 // TemplateInstanceLister.
 type TemplateInstanceListerExpansion interface{}
 
 // TemplateInstanceNamespaceListerExpansion allows custom methods to be added to
-// TemplateInstanceNamespaeLister.
+// TemplateInstanceNamespaceLister.
 type TemplateInstanceNamespaceListerExpansion interface{}

@@ -5,10 +5,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 
-	"github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/image/registry/image"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
+	"github.com/openshift/origin/pkg/image/util"
 )
 
 // REST implements the RESTStorage interface in terms of an image registry and
@@ -20,6 +22,14 @@ type REST struct {
 	imageStreamRegistry imagestream.Registry
 }
 
+var _ rest.Getter = &REST{}
+var _ rest.ShortNamesProvider = &REST{}
+
+// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
+func (r *REST) ShortNames() []string {
+	return []string{"isimage"}
+}
+
 // NewREST returns a new REST.
 func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Registry) *REST {
 	return &REST{imageRegistry, imageStreamRegistry}
@@ -27,13 +37,13 @@ func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Regis
 
 // New is only implemented to make REST implement RESTStorage
 func (r *REST) New() runtime.Object {
-	return &api.ImageStreamImage{}
+	return &imageapi.ImageStreamImage{}
 }
 
 // parseNameAndID splits a string into its name component and ID component, and returns an error
 // if the string is not in the right form.
 func parseNameAndID(input string) (name string, id string, err error) {
-	name, id, err = api.ParseImageStreamImageName(input)
+	name, id, err = imageapi.ParseImageStreamImageName(input)
 	if err != nil {
 		err = errors.NewBadRequest("ImageStreamImages must be retrieved with <name>@<id>")
 	}
@@ -54,10 +64,10 @@ func (r *REST) Get(ctx apirequest.Context, id string, options *metav1.GetOptions
 	}
 
 	if repo.Status.Tags == nil {
-		return nil, errors.NewNotFound(api.Resource("imagestreamimage"), id)
+		return nil, errors.NewNotFound(imageapi.Resource("imagestreamimage"), id)
 	}
 
-	event, err := api.ResolveImageID(repo, imageID)
+	event, err := imageapi.ResolveImageID(repo, imageID)
 	if err != nil {
 		return nil, err
 	}
@@ -67,16 +77,16 @@ func (r *REST) Get(ctx apirequest.Context, id string, options *metav1.GetOptions
 	if err != nil {
 		return nil, err
 	}
-	if err := api.ImageWithMetadata(image); err != nil {
+	if err := util.ImageWithMetadata(image); err != nil {
 		return nil, err
 	}
 	image.DockerImageManifest = ""
 	image.DockerImageConfig = ""
 
-	isi := api.ImageStreamImage{
+	isi := imageapi.ImageStreamImage{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:         apirequest.NamespaceValue(ctx),
-			Name:              api.MakeImageStreamImageName(name, imageID),
+			Name:              imageapi.JoinImageStreamImage(name, imageID),
 			CreationTimestamp: image.ObjectMeta.CreationTimestamp,
 			Annotations:       repo.Annotations,
 		},

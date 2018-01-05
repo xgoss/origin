@@ -19,7 +19,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Conformance][networking][router] weighted openshift router", func() {
+var _ = g.Describe("[Conformance][Area:Networking][Feature:Router] weighted openshift router", func() {
 	defer g.GinkgoRecover()
 	var (
 		configPath = exutil.FixturePath("testdata", "weighted-router.yaml")
@@ -27,13 +27,13 @@ var _ = g.Describe("[Conformance][networking][router] weighted openshift router"
 	)
 
 	g.BeforeEach(func() {
-		image := os.Getenv("OPENSHIFT_ROUTER_IMAGE")
-		if len(image) == 0 {
-			g.Skip("Skipping HAProxy router tests, OPENSHIFT_ROUTER_IMAGE is unset")
+		imagePrefix := os.Getenv("OS_IMAGE_PREFIX")
+		if len(imagePrefix) == 0 {
+			imagePrefix = "openshift/origin"
 		}
 		err := oc.AsAdmin().Run("adm").Args("policy", "add-cluster-role-to-user", "system:router", oc.Username()).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
-		err = oc.Run("new-app").Args("-f", configPath, "-p", "IMAGE="+image).Execute()
+		err = oc.Run("new-app").Args("-f", configPath, "-p", "IMAGE="+imagePrefix+"-haproxy-router").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 	})
 
@@ -85,7 +85,7 @@ var _ = g.Describe("[Conformance][networking][router] weighted openshift router"
 			err = expectRouteStatusCodeRepeatedExec(ns, execPodName, routerURL, "weighted.example.com", http.StatusOK, times)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
-			g.By(fmt.Sprintf("checking that there are two weighted backends in the router stats"))
+			g.By(fmt.Sprintf("checking that there are three weighted backends in the router stats"))
 			var trafficValues []string
 			err = wait.PollImmediate(100*time.Millisecond, changeTimeoutSeconds*time.Second, func() (bool, error) {
 				statsURL := fmt.Sprintf("http://%s:1936/;csv", routerIP)
@@ -93,7 +93,7 @@ var _ = g.Describe("[Conformance][networking][router] weighted openshift router"
 				o.Expect(err).NotTo(o.HaveOccurred())
 				trafficValues, err = parseStats(stats, "weightedroute", 7)
 				o.Expect(err).NotTo(o.HaveOccurred())
-				return len(trafficValues) == 2, nil
+				return len(trafficValues) == 3, nil
 			})
 			o.Expect(err).NotTo(o.HaveOccurred())
 

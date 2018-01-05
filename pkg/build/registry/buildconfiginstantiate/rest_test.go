@@ -6,13 +6,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	apiserverrest "k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	_ "github.com/openshift/origin/pkg/build/api/install"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	_ "github.com/openshift/origin/pkg/build/apis/build/install"
 	"github.com/openshift/origin/pkg/build/generator"
 	mocks "github.com/openshift/origin/pkg/build/generator/test"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 func TestCreateInstantiate(t *testing.T) {
@@ -25,7 +26,7 @@ func TestCreateInstantiate(t *testing.T) {
 	rest := InstantiateREST{&generator.BuildGenerator{
 		Secrets:         fake.NewSimpleClientset(fakeSecrets...).Core(),
 		ServiceAccounts: mocks.MockBuilderServiceAccount(mocks.MockBuilderSecrets()),
-		Client: generator.Client{
+		Client: generator.TestingClient{
 			GetBuildConfigFunc: func(ctx apirequest.Context, name string, options *metav1.GetOptions) (*buildapi.BuildConfig, error) {
 				return mocks.MockBuildConfig(mocks.MockSource(), mocks.MockSourceStrategyForImageRepository(), mocks.MockOutput()), nil
 			},
@@ -49,7 +50,7 @@ func TestCreateInstantiate(t *testing.T) {
 			},
 		}}}
 
-	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{ObjectMeta: metav1.ObjectMeta{Name: "name"}})
+	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{ObjectMeta: metav1.ObjectMeta{Name: "name"}}, apiserverrest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
@@ -57,7 +58,7 @@ func TestCreateInstantiate(t *testing.T) {
 
 func TestCreateInstantiateValidationError(t *testing.T) {
 	rest := InstantiateREST{&generator.BuildGenerator{}}
-	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{})
+	_, err := rest.Create(apirequest.NewDefaultContext(), &buildapi.BuildRequest{}, apiserverrest.ValidateAllObjectFunc, false)
 	if err == nil {
 		t.Error("Expected object got none!")
 	}

@@ -6,18 +6,19 @@ import (
 
 	"github.com/gonum/graph"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kapi "k8s.io/kubernetes/pkg/api"
-	_ "k8s.io/kubernetes/pkg/api/install"
 	kapps "k8s.io/kubernetes/pkg/apis/apps"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
 
 	osgraph "github.com/openshift/origin/pkg/api/graph"
 	kubegraph "github.com/openshift/origin/pkg/api/kubegraph/nodes"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
-	_ "github.com/openshift/origin/pkg/deploy/api/install"
-	deploygraph "github.com/openshift/origin/pkg/deploy/graph/nodes"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	_ "github.com/openshift/origin/pkg/apps/apis/apps/install"
+	appsgraph "github.com/openshift/origin/pkg/apps/graph/nodes"
 )
 
 type objectifier interface {
@@ -80,11 +81,11 @@ func namespaceFor(node graph.Node) (string, error) {
 	obj := node.(objectifier).Object()
 	switch t := obj.(type) {
 	case runtime.Object:
-		meta, err := metav1.ObjectMetaFor(t)
+		meta, err := meta.Accessor(t)
 		if err != nil {
 			return "", err
 		}
-		return meta.Namespace, nil
+		return meta.GetNamespace(), nil
 	case *kapi.PodSpec:
 		return node.(*kubegraph.PodSpecNode).Namespace, nil
 	case *kapi.ReplicationControllerSpec:
@@ -185,13 +186,13 @@ func TestHPADCEdges(t *testing.T) {
 		},
 	}
 
-	dc := &deployapi.DeploymentConfig{}
+	dc := &appsapi.DeploymentConfig{}
 	dc.Name = "test-dc"
 	dc.Namespace = "test-ns"
 
 	g := osgraph.New()
 	hpaNode := kubegraph.EnsureHorizontalPodAutoscalerNode(g, hpa)
-	dcNode := deploygraph.EnsureDeploymentConfigNode(g, dc)
+	dcNode := appsgraph.EnsureDeploymentConfigNode(g, dc)
 
 	AddHPAScaleRefEdges(g)
 

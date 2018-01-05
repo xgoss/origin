@@ -4,7 +4,7 @@ package internalversion
 
 import (
 	"fmt"
-	api "github.com/openshift/origin/pkg/authorization/api"
+	authorization "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 )
@@ -35,9 +35,25 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=Authorization, Version=InternalVersion
-	case api.SchemeGroupVersion.WithResource("policies"):
+	// Group=authorization.openshift.io, Version=internalVersion
+	case authorization.SchemeGroupVersion.WithResource("clusterpolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().ClusterPolicies().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("clusterpolicybindings"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().ClusterPolicyBindings().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("clusterroles"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().ClusterRoles().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("clusterrolebindings"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().ClusterRoleBindings().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("policies"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().Policies().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("policybindings"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().PolicyBindings().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("roles"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().Roles().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("rolebindings"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().RoleBindings().Informer()}, nil
+	case authorization.SchemeGroupVersion.WithResource("rolebindingrestrictions"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Authorization().InternalVersion().RoleBindingRestrictions().Informer()}, nil
 
 	}
 

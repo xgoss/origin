@@ -3,7 +3,7 @@
 package internalversion
 
 import (
-	api "github.com/openshift/origin/pkg/build/api"
+	build "github.com/openshift/origin/pkg/build/apis/build"
 	internalinterfaces "github.com/openshift/origin/pkg/build/generated/informers/internalversion/internalinterfaces"
 	internalclientset "github.com/openshift/origin/pkg/build/generated/internalclientset"
 	internalversion "github.com/openshift/origin/pkg/build/generated/listers/build/internalversion"
@@ -22,29 +22,49 @@ type BuildInformer interface {
 }
 
 type buildInformer struct {
-	factory internalinterfaces.SharedInformerFactory
+	factory          internalinterfaces.SharedInformerFactory
+	tweakListOptions internalinterfaces.TweakListOptionsFunc
+	namespace        string
 }
 
-func newBuildInformer(client internalclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	sharedIndexInformer := cache.NewSharedIndexInformer(
+// NewBuildInformer constructs a new informer for Build type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewBuildInformer(client internalclientset.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredBuildInformer(client, namespace, resyncPeriod, indexers, nil)
+}
+
+// NewFilteredBuildInformer constructs a new informer for Build type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewFilteredBuildInformer(client internalclientset.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
+	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
-				return client.Build().Builds(v1.NamespaceAll).List(options)
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.Build().Builds(namespace).List(options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
-				return client.Build().Builds(v1.NamespaceAll).Watch(options)
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.Build().Builds(namespace).Watch(options)
 			},
 		},
-		&api.Build{},
+		&build.Build{},
 		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		indexers,
 	)
+}
 
-	return sharedIndexInformer
+func (f *buildInformer) defaultInformer(client internalclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	return NewFilteredBuildInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
 func (f *buildInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&api.Build{}, newBuildInformer)
+	return f.factory.InformerFor(&build.Build{}, f.defaultInformer)
 }
 
 func (f *buildInformer) Lister() internalversion.BuildLister {

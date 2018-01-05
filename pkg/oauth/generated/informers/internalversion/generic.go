@@ -4,7 +4,7 @@ package internalversion
 
 import (
 	"fmt"
-	api "github.com/openshift/origin/pkg/oauth/api"
+	oauth "github.com/openshift/origin/pkg/oauth/apis/oauth"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 )
@@ -35,9 +35,15 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=Oauth, Version=InternalVersion
-	case api.SchemeGroupVersion.WithResource("oauthclients"):
+	// Group=oauth.openshift.io, Version=internalVersion
+	case oauth.SchemeGroupVersion.WithResource("oauthaccesstokens"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Oauth().InternalVersion().OAuthAccessTokens().Informer()}, nil
+	case oauth.SchemeGroupVersion.WithResource("oauthauthorizetokens"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Oauth().InternalVersion().OAuthAuthorizeTokens().Informer()}, nil
+	case oauth.SchemeGroupVersion.WithResource("oauthclients"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Oauth().InternalVersion().OAuthClients().Informer()}, nil
+	case oauth.SchemeGroupVersion.WithResource("oauthclientauthorizations"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Oauth().InternalVersion().OAuthClientAuthorizations().Informer()}, nil
 
 	}
 

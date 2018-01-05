@@ -6,20 +6,21 @@ import (
 
 	"github.com/golang/glog"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/api/core/v1"
+	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
+	informers "k8s.io/client-go/informers/core/v1"
+	kcoreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/controller"
 
 	"github.com/openshift/origin/pkg/cmd/server/crypto"
 	"github.com/openshift/origin/pkg/cmd/server/crypto/extensions"
+	ocontroller "github.com/openshift/origin/pkg/controller"
 )
 
 // ServiceServingCertUpdateController is responsible for synchronizing Service objects stored
@@ -30,17 +31,14 @@ type ServiceServingCertUpdateController struct {
 	// Services that need to be checked
 	queue workqueue.RateLimitingInterface
 
-	serviceCache      cache.Store
-	serviceController cache.Controller
-	serviceHasSynced  informerSynced
+	serviceLister    listers.ServiceLister
+	serviceHasSynced cache.InformerSynced
 
-	secretCache      cache.Store
-	secretController cache.Controller
-	secretHasSynced  informerSynced
+	secretLister    listers.SecretLister
+	secretHasSynced cache.InformerSynced
 
-	ca         *crypto.CA
-	publicCert string
-	dnsSuffix  string
+	ca        *crypto.CA
+	dnsSuffix string
 	// minTimeLeftForCert is how much time is remaining for the serving cert before regenerating it.
 	minTimeLeftForCert time.Duration
 
@@ -50,7 +48,7 @@ type ServiceServingCertUpdateController struct {
 
 // NewServiceServingCertUpdateController creates a new ServiceServingCertUpdateController.
 // TODO this should accept a shared informer
-func NewServiceServingCertUpdateController(serviceClient kcoreclient.ServicesGetter, secretClient kcoreclient.SecretsGetter, ca *crypto.CA, dnsSuffix string, resyncInterval time.Duration) *ServiceServingCertUpdateController {
+func NewServiceServingCertUpdateController(services informers.ServiceInformer, secrets informers.SecretInformer, secretClient kcoreclient.SecretsGetter, ca *crypto.CA, dnsSuffix string, resyncInterval time.Duration) *ServiceServingCertUpdateController {
 	sc := &ServiceServingCertUpdateController{
 		secretClient: secretClient,
 
@@ -62,38 +60,22 @@ func NewServiceServingCertUpdateController(serviceClient kcoreclient.ServicesGet
 		minTimeLeftForCert: 1 * time.Hour,
 	}
 
-	sc.serviceCache, sc.serviceController = cache.NewInformer(
-		&cache.ListWatch{
-			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				return serviceClient.Services(metav1.NamespaceAll).List(options)
-			},
-			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				return serviceClient.Services(metav1.NamespaceAll).Watch(options)
-			},
-		},
-		&kapi.Service{},
-		resyncInterval,
+	sc.serviceLister = services.Lister()
+	services.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{},
-	)
-	sc.serviceHasSynced = sc.serviceController.HasSynced
-
-	sc.secretCache, sc.secretController = cache.NewInformer(
-		&cache.ListWatch{
-			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				return sc.secretClient.Secrets(metav1.NamespaceAll).List(options)
-			},
-			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				return sc.secretClient.Secrets(metav1.NamespaceAll).Watch(options)
-			},
-		},
-		&kapi.Secret{},
 		resyncInterval,
+	)
+	sc.serviceHasSynced = services.Informer().GetController().HasSynced
+
+	sc.secretLister = secrets.Lister()
+	secrets.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    sc.addSecret,
 			UpdateFunc: sc.updateSecret,
 		},
+		resyncInterval,
 	)
-	sc.secretHasSynced = sc.secretController.HasSynced
+	sc.secretHasSynced = secrets.Informer().GetController().HasSynced
 
 	sc.syncHandler = sc.syncSecret
 
@@ -103,50 +85,19 @@ func NewServiceServingCertUpdateController(serviceClient kcoreclient.ServicesGet
 // Run begins watching and syncing.
 func (sc *ServiceServingCertUpdateController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
-	defer glog.Infof("Shutting down service signing cert update controller")
 	defer sc.queue.ShutDown()
 
-	glog.Infof("starting service signing cert update controller")
-	go sc.serviceController.Run(stopCh)
-	go sc.secretController.Run(stopCh)
-
-	if !waitForCacheSync(stopCh, sc.serviceHasSynced, sc.secretHasSynced) {
+	// Wait for the stores to fill
+	if !cache.WaitForCacheSync(stopCh, sc.serviceHasSynced, sc.secretHasSynced) {
 		return
 	}
 
+	glog.V(5).Infof("Starting workers")
 	for i := 0; i < workers; i++ {
 		go wait.Until(sc.runWorker, time.Second, stopCh)
 	}
-
 	<-stopCh
-}
-
-// TODO this is all in the kube library after the 1.5 rebase
-
-// informerSynced is a function that can be used to determine if an informer has synced.  This is useful for determining if caches have synced.
-type informerSynced func() bool
-
-// syncedPollPeriod controls how often you look at the status of your sync funcs
-const syncedPollPeriod = 100 * time.Millisecond
-
-func waitForCacheSync(stopCh <-chan struct{}, cacheSyncs ...informerSynced) bool {
-	err := wait.PollUntil(syncedPollPeriod,
-		func() (bool, error) {
-			for _, syncFunc := range cacheSyncs {
-				if !syncFunc() {
-					return false, nil
-				}
-			}
-			return true, nil
-		},
-		stopCh)
-	if err != nil {
-		glog.V(2).Infof("stop requested")
-		return false
-	}
-
-	glog.V(4).Infof("caches populated")
-	return true
+	glog.V(1).Infof("Shutting down")
 }
 
 func (sc *ServiceServingCertUpdateController) enqueueSecret(obj interface{}) {
@@ -160,7 +111,7 @@ func (sc *ServiceServingCertUpdateController) enqueueSecret(obj interface{}) {
 }
 
 func (sc *ServiceServingCertUpdateController) addSecret(obj interface{}) {
-	secret := obj.(*kapi.Secret)
+	secret := obj.(*v1.Secret)
 	if len(secret.Annotations[ServiceNameAnnotation]) == 0 {
 		return
 	}
@@ -170,10 +121,10 @@ func (sc *ServiceServingCertUpdateController) addSecret(obj interface{}) {
 }
 
 func (sc *ServiceServingCertUpdateController) updateSecret(old, cur interface{}) {
-	secret := cur.(*kapi.Secret)
+	secret := cur.(*v1.Secret)
 	if len(secret.Annotations[ServiceNameAnnotation]) == 0 {
 		// if the current doesn't have a service name, check the old
-		secret = old.(*kapi.Secret)
+		secret = old.(*v1.Secret)
 		if len(secret.Annotations[ServiceNameAnnotation]) == 0 {
 			return
 		}
@@ -211,84 +162,89 @@ func (sc *ServiceServingCertUpdateController) processNextWorkItem() bool {
 // syncSecret will sync the service with the given key.
 // This function is not meant to be invoked concurrently with the same key.
 func (sc *ServiceServingCertUpdateController) syncSecret(key string) error {
-	obj, exists, err := sc.secretCache.GetByKey(key)
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		glog.V(4).Infof("Unable to retrieve service %v from store: %v", key, err)
 		return err
 	}
-	if !exists {
-		glog.V(4).Infof("Secret has been deleted %v", key)
+	sharedSecret, err := sc.secretLister.Secrets(namespace).Get(name)
+	if kapierrors.IsNotFound(err) {
 		return nil
 	}
+	if err != nil {
+		return err
+	}
 
-	regenerate, service := sc.requiresRegeneration(obj.(*kapi.Secret))
+	regenerate, service := sc.requiresRegeneration(sharedSecret)
 	if !regenerate {
 		return nil
 	}
 
 	// make a copy to avoid mutating cache state
-	t, err := kapi.Scheme.DeepCopy(obj)
-	if err != nil {
-		return err
-	}
-	secret := t.(*kapi.Secret)
+	secretCopy := sharedSecret.DeepCopy()
 
-	dnsName := service.Name + "." + secret.Namespace + ".svc"
+	dnsName := service.Name + "." + secretCopy.Namespace + ".svc"
 	fqDNSName := dnsName + "." + sc.dnsSuffix
 	certificateLifetime := 365 * 2 // 2 years
 	servingCert, err := sc.ca.MakeServerCert(
 		sets.NewString(dnsName, fqDNSName),
 		certificateLifetime,
-		extensions.ServiceServerCertificateExtension(service),
+		extensions.ServiceServerCertificateExtensionV1(service),
 	)
 	if err != nil {
 		return err
 	}
-	secret.Annotations[ServingCertExpiryAnnotation] = servingCert.Certs[0].NotAfter.Format(time.RFC3339)
-	secret.Data[kapi.TLSCertKey], secret.Data[kapi.TLSPrivateKeyKey], err = servingCert.GetPEMBytes()
+	secretCopy.Annotations[ServingCertExpiryAnnotation] = servingCert.Certs[0].NotAfter.Format(time.RFC3339)
+	secretCopy.Data[v1.TLSCertKey], secretCopy.Data[v1.TLSPrivateKeyKey], err = servingCert.GetPEMBytes()
 	if err != nil {
 		return err
 	}
+	ocontroller.EnsureOwnerRef(secretCopy, ownerRef(service))
 
-	_, err = sc.secretClient.Secrets(secret.Namespace).Update(secret)
+	_, err = sc.secretClient.Secrets(secretCopy.Namespace).Update(secretCopy)
 	return err
 }
 
-func (sc *ServiceServingCertUpdateController) requiresRegeneration(secret *kapi.Secret) (bool, *kapi.Service) {
+func (sc *ServiceServingCertUpdateController) requiresRegeneration(secret *v1.Secret) (bool, *v1.Service) {
 	serviceName := secret.Annotations[ServiceNameAnnotation]
 	if len(serviceName) == 0 {
 		return false, nil
 	}
 
-	serviceObj, exists, err := sc.serviceCache.GetByKey(secret.Namespace + "/" + serviceName)
-	if err != nil {
+	sharedService, err := sc.serviceLister.Services(secret.Namespace).Get(serviceName)
+	if kapierrors.IsNotFound(err) {
 		return false, nil
 	}
-	if !exists {
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("Unable to get service %s/%s: %v", secret.Namespace, secret.Annotations[ServiceNameAnnotation], err))
 		return false, nil
 	}
 
-	service := serviceObj.(*kapi.Service)
-	if service.Annotations[ServingCertSecretAnnotation] != secret.Name {
+	if sharedService.Annotations[ServingCertSecretAnnotation] != secret.Name {
 		return false, nil
 	}
-	if secret.Annotations[ServiceUIDAnnotation] != string(service.UID) {
+	if secret.Annotations[ServiceUIDAnnotation] != string(sharedService.UID) {
 		return false, nil
+	}
+
+	// if we don't have an ownerref, just go ahead and regenerate.  It's easier than writing a
+	// secondary logic flow.
+	if !ocontroller.HasOwnerRef(secret, ownerRef(sharedService)) {
+		return true, sharedService
 	}
 
 	// if we don't have the annotation for expiry, just go ahead and regenerate.  It's easier than writing a
 	// secondary logic flow that creates the expiry dates
 	expiryString, ok := secret.Annotations[ServingCertExpiryAnnotation]
 	if !ok {
-		return true, service
+		return true, sharedService
 	}
 	expiry, err := time.Parse(time.RFC3339, expiryString)
 	if err != nil {
-		return true, service
+		return true, sharedService
 	}
 
 	if time.Now().Add(sc.minTimeLeftForCert).After(expiry) {
-		return true, service
+		return true, sharedService
 	}
 
 	return false, nil

@@ -1,7 +1,5 @@
 package(default_visibility = ["//visibility:public"])
 
-licenses(["notice"])
-
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_library",
@@ -31,23 +29,26 @@ go_library(
         "replicationcontroller.go",
         "resourcequota.go",
         "secret.go",
-        "securitycontextconstraints.go",
         "service.go",
         "service_expansion.go",
         "serviceaccount.go",
     ],
-    tags = ["automanaged"],
+    importpath = "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion",
     deps = [
-        "//pkg/api:go_default_library",
-        "//pkg/api/v1:go_default_library",
+        "//pkg/api/legacyscheme:go_default_library",
+        "//pkg/api/ref:go_default_library",
+        "//pkg/apis/autoscaling:go_default_library",
+        "//pkg/apis/core:go_default_library",
+        "//pkg/apis/core/v1:go_default_library",
         "//pkg/client/clientset_generated/internalclientset/scheme:go_default_library",
-        "//vendor:k8s.io/apimachinery/pkg/apis/meta/v1",
-        "//vendor:k8s.io/apimachinery/pkg/fields",
-        "//vendor:k8s.io/apimachinery/pkg/runtime",
-        "//vendor:k8s.io/apimachinery/pkg/types",
-        "//vendor:k8s.io/apimachinery/pkg/util/net",
-        "//vendor:k8s.io/apimachinery/pkg/watch",
-        "//vendor:k8s.io/client-go/rest",
+        "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/fields:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/net:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/watch:go_default_library",
+        "//vendor/k8s.io/client-go/rest:go_default_library",
     ],
 )
 

@@ -6,7 +6,7 @@ import (
 
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 )
 
 const DefaultProjectRequestForbidden = "You may not request a new project via this API."
@@ -124,5 +124,5 @@ func newTemplateForbiddenMessageMaker(text string) templateForbiddenMessageMaker
 func (m templateForbiddenMessageMaker) MakeMessage(attrs authorizer.Attributes) (string, error) {
 	buffer := &bytes.Buffer{}
 	err := m.parsedTemplate.Execute(buffer, attrs)
-	return string(buffer.Bytes()), err
+	return buffer.String(), err
 }

@@ -11,14 +11,14 @@ import (
 
 	"github.com/fsouza/go-dockerclient"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/openshift/source-to-image/pkg/tar"
-	s2iutil "github.com/openshift/source-to-image/pkg/util"
+	s2ifs "github.com/openshift/source-to-image/pkg/util/fs"
 
-	"github.com/openshift/origin/pkg/build/api"
-	"github.com/openshift/origin/pkg/build/util/dockerfile"
-	"github.com/openshift/origin/pkg/client/testclient"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
+	"github.com/openshift/origin/pkg/build/builder/util/dockerfile"
+	buildfake "github.com/openshift/origin/pkg/build/generated/internalclientset/fake"
 	"github.com/openshift/origin/pkg/generate/git"
 )
 
@@ -145,24 +145,24 @@ func TestDockerfilePath(t *testing.T) {
 	tests := []struct {
 		contextDir     string
 		dockerfilePath string
-		dockerStrategy *api.DockerBuildStrategy
+		dockerStrategy *buildapi.DockerBuildStrategy
 	}{
 		// default Dockerfile path
 		{
 			dockerfilePath: "Dockerfile",
-			dockerStrategy: &api.DockerBuildStrategy{},
+			dockerStrategy: &buildapi.DockerBuildStrategy{},
 		},
 		// custom Dockerfile path in the root context
 		{
 			dockerfilePath: "mydockerfile",
-			dockerStrategy: &api.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "mydockerfile",
 			},
 		},
 		// custom Dockerfile path in a sub directory
 		{
 			dockerfilePath: "dockerfiles/mydockerfile",
-			dockerStrategy: &api.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "dockerfiles/mydockerfile",
 			},
 		},
@@ -171,7 +171,7 @@ func TestDockerfilePath(t *testing.T) {
 		{
 			contextDir:     "somedir",
 			dockerfilePath: "dockerfiles/mydockerfile",
-			dockerStrategy: &api.DockerBuildStrategy{
+			dockerStrategy: &buildapi.DockerBuildStrategy{
 				DockerfilePath: "dockerfiles/mydockerfile",
 			},
 		},
@@ -217,19 +217,19 @@ func TestDockerfilePath(t *testing.T) {
 			continue
 		}
 
-		build := &api.Build{
-			Spec: api.BuildSpec{
-				CommonSpec: api.CommonSpec{
-					Source: api.BuildSource{
-						Git: &api.GitBuildSource{
+		build := &buildapi.Build{
+			Spec: buildapi.BuildSpec{
+				CommonSpec: buildapi.CommonSpec{
+					Source: buildapi.BuildSource{
+						Git: &buildapi.GitBuildSource{
 							URI: "http://github.com/openshift/origin.git",
 						},
 						ContextDir: test.contextDir,
 					},
-					Strategy: api.BuildStrategy{
+					Strategy: buildapi.BuildStrategy{
 						DockerStrategy: test.dockerStrategy,
 					},
-					Output: api.BuildOutput{
+					Output: buildapi.BuildOutput{
 						To: &kapi.ObjectReference{
 							Kind: "DockerImage",
 							Name: "test/test-result:latest",
@@ -260,13 +260,12 @@ func TestDockerfilePath(t *testing.T) {
 		dockerBuilder := &DockerBuilder{
 			dockerClient: dockerClient,
 			build:        build,
-			gitClient:    git.NewRepository(),
-			tar:          tar.New(s2iutil.NewFileSystem()),
+			tar:          tar.New(s2ifs.NewFileSystem()),
 		}
 
 		// this will validate that the Dockerfile is readable
 		// and append some labels to the Dockerfile
-		if err = dockerBuilder.addBuildParameters(buildDir, sourceInfo); err != nil {
+		if err = addBuildParameters(buildDir, build, sourceInfo); err != nil {
 			t.Errorf("failed to add build parameters: %v", err)
 			continue
 		}
@@ -285,7 +284,7 @@ func TestDockerfilePath(t *testing.T) {
 		}
 
 		// check that the docker client is called with the right Dockerfile parameter
-		if err = dockerBuilder.dockerBuild(buildDir, "", []api.SecretBuildSource{}); err != nil {
+		if err = dockerBuilder.dockerBuild(buildDir, "", []buildapi.SecretBuildSource{}); err != nil {
 			t.Errorf("failed to build: %v", err)
 			continue
 		}
@@ -294,18 +293,18 @@ func TestDockerfilePath(t *testing.T) {
 }
 
 func TestEmptySource(t *testing.T) {
-	build := &api.Build{
+	build := &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "buildid",
 			Namespace: "default",
 		},
-		Spec: api.BuildSpec{
-			CommonSpec: api.CommonSpec{
-				Source: api.BuildSource{},
-				Strategy: api.BuildStrategy{
-					DockerStrategy: &api.DockerBuildStrategy{},
+		Spec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{},
+				Strategy: buildapi.BuildStrategy{
+					DockerStrategy: &buildapi.DockerBuildStrategy{},
 				},
-				Output: api.BuildOutput{
+				Output: buildapi.BuildOutput{
 					To: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "test/test-result:latest",
@@ -315,10 +314,10 @@ func TestEmptySource(t *testing.T) {
 		},
 	}
 
-	client := testclient.Fake{}
+	client := buildfake.Clientset{}
 
 	dockerBuilder := &DockerBuilder{
-		client: client.Builds(""),
+		client: client.Build().Builds(""),
 		build:  build,
 	}
 
@@ -348,19 +347,19 @@ USER 1001`
 		},
 	}
 
-	build := &api.Build{
+	build := &buildapi.Build{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "buildid",
 			Namespace: "default",
 		},
-		Spec: api.BuildSpec{
-			CommonSpec: api.CommonSpec{
-				Source: api.BuildSource{
+		Spec: buildapi.BuildSpec{
+			CommonSpec: buildapi.CommonSpec{
+				Source: buildapi.BuildSource{
 					ContextDir: "",
 					Dockerfile: &dockerFile,
 				},
-				Strategy: api.BuildStrategy{
-					DockerStrategy: &api.DockerBuildStrategy{
+				Strategy: buildapi.BuildStrategy{
+					DockerStrategy: &buildapi.DockerBuildStrategy{
 						DockerfilePath: "",
 						From: &kapi.ObjectReference{
 							Kind: "DockerImage",
@@ -368,7 +367,7 @@ USER 1001`
 						},
 					},
 				},
-				Output: api.BuildOutput{
+				Output: buildapi.BuildOutput{
 					To: &kapi.ObjectReference{
 						Kind: "ImageStreamTag",
 						Name: "scratch",
@@ -378,16 +377,23 @@ USER 1001`
 		},
 	}
 
-	client := testclient.Fake{}
+	client := buildfake.Clientset{}
 
-	dockerBuilder := &DockerBuilder{
-		client:       client.Builds(""),
-		build:        build,
-		dockerClient: dockerClient,
-		gitClient:    git.NewRepository(),
-		tar:          tar.New(s2iutil.NewFileSystem()),
+	buildDir, err := ioutil.TempDir("", "dockerfile-path")
+	if err != nil {
+		t.Errorf("failed to create tmpdir: %v", err)
 	}
 
+	dockerBuilder := &DockerBuilder{
+		client:       client.Build().Builds(""),
+		build:        build,
+		dockerClient: dockerClient,
+		tar:          tar.New(s2ifs.NewFileSystem()),
+		inputDir:     buildDir,
+	}
+	if err := ManageDockerfile(buildDir, build); err != nil {
+		t.Errorf("failed to manage the dockerfile: %v", err)
+	}
 	if err := dockerBuilder.Build(); err != nil {
 		if strings.Contains(err.Error(), "cannot pull scratch") {
 			t.Errorf("Docker build should not have attempted to pull from scratch")

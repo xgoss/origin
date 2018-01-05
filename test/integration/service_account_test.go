@@ -11,42 +11,40 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/client-go/util/retry"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/retry"
 	serviceaccountadmission "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 
-	"github.com/openshift/origin/pkg/cmd/admin/policy"
+	authorizationclient "github.com/openshift/origin/pkg/authorization/generated/internalclientset"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
+	"github.com/openshift/origin/pkg/oc/admin/policy"
+	"github.com/openshift/origin/pkg/serviceaccounts/controllers"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
 func TestServiceAccountAuthorization(t *testing.T) {
-	testutil.RequireEtcd(t)
-	defer testutil.DumpEtcdOnFailure(t)
 	saNamespace := api.NamespaceDefault
 	saName := serviceaccountadmission.DefaultServiceAccountName
 	saUsername := apiserverserviceaccount.MakeUsername(saNamespace, saName)
 
 	// Start one OpenShift master as "cluster1" to play the external kube server
-	_, cluster1AdminConfigFile, err := testserver.StartTestMaster()
+	masterConfig, cluster1AdminConfigFile, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 	cluster1AdminConfig, err := testutil.GetClusterAdminClientConfig(cluster1AdminConfigFile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cluster1AdminKubeClientset, err := testutil.GetClusterAdminKubeClient(cluster1AdminConfigFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	cluster1AdminOSClient, err := testutil.GetClusterAdminClient(cluster1AdminConfigFile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,18 +72,18 @@ func TestServiceAccountAuthorization(t *testing.T) {
 
 	// Make sure the service account doesn't have access
 	failNS := &api.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-fail"}}
-	if _, err := cluster1SAKubeClient.Namespaces().Create(failNS); !errors.IsForbidden(err) {
+	if _, err := cluster1SAKubeClient.Core().Namespaces().Create(failNS); !errors.IsForbidden(err) {
 		t.Fatalf("expected forbidden error, got %v", err)
 	}
 
 	// Make the service account a cluster admin on cluster1
 	addRoleOptions := &policy.RoleModificationOptions{
 		RoleName:            bootstrappolicy.ClusterAdminRoleName,
-		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(cluster1AdminOSClient),
+		RoleBindingAccessor: policy.NewClusterRoleBindingAccessor(authorizationclient.NewForConfigOrDie(cluster1AdminConfig).Authorization()),
 		Users:               []string{saUsername},
 	}
 	if err := addRoleOptions.AddRole(); err != nil {
-		t.Fatalf("could not add role to service account")
+		t.Fatal(err)
 	}
 
 	// Give the policy cache a second to catch its breath
@@ -94,7 +92,7 @@ func TestServiceAccountAuthorization(t *testing.T) {
 	// Make sure the service account now has access
 	// This tests authentication using the etcd-based token getter
 	passNS := &api.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-pass"}}
-	if _, err := cluster1SAKubeClient.Namespaces().Create(passNS); err != nil {
+	if _, err := cluster1SAKubeClient.Core().Namespaces().Create(passNS); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -167,12 +165,11 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	saNamespace := api.NamespaceDefault
 	saName := serviceaccountadmission.DefaultServiceAccountName
 
-	testutil.RequireEtcd(t)
-	defer testutil.DumpEtcdOnFailure(t)
-	_, clusterAdminConfig, err := testserver.StartTestMaster()
+	masterConfig, clusterAdminConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 	clusterAdminKubeClient, err := testutil.GetClusterAdminKubeClient(clusterAdminConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -188,7 +185,7 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	}
 
 	// Get the matching dockercfg secret
-	saPullSecret, err := waitForServiceAccountPullSecret(clusterAdminKubeClient, saNamespace, saName, 20, time.Second)
+	_, saPullSecret, err := waitForServiceAccountPullSecret(clusterAdminKubeClient, saNamespace, saName, 20, time.Second)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -197,41 +194,40 @@ func TestAutomaticCreationOfPullSecrets(t *testing.T) {
 	}
 }
 
-func waitForServiceAccountPullSecret(client kclientset.Interface, ns, name string, attempts int, interval time.Duration) (string, error) {
+func waitForServiceAccountPullSecret(client kclientset.Interface, ns, name string, attempts int, interval time.Duration) (string, string, error) {
 	for i := 0; i <= attempts; i++ {
 		time.Sleep(interval)
-		token, err := getServiceAccountPullSecret(client, ns, name)
+		secretName, token, err := getServiceAccountPullSecret(client, ns, name)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if len(token) > 0 {
-			return token, nil
+			return secretName, token, nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
-func getServiceAccountPullSecret(client kclientset.Interface, ns, name string) (string, error) {
+func getServiceAccountPullSecret(client kclientset.Interface, ns, name string) (string, string, error) {
 	secrets, err := client.Core().Secrets(ns).List(metav1.ListOptions{})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, secret := range secrets.Items {
 		if secret.Type == api.SecretTypeDockercfg && secret.Annotations[api.ServiceAccountNameKey] == name {
-			return string(secret.Data[api.DockerConfigKey]), nil
+			return secret.Name, string(secret.Data[api.DockerConfigKey]), nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 func TestEnforcingServiceAccount(t *testing.T) {
-	testutil.RequireEtcd(t)
-	defer testutil.DumpEtcdOnFailure(t)
 	masterConfig, err := testserver.DefaultMasterOptions()
 	masterConfig.ServiceAccountConfig.LimitSecretReferences = false
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
 	clusterAdminConfig, err := testserver.StartConfiguredMaster(masterConfig)
 	if err != nil {
@@ -318,4 +314,86 @@ func TestEnforcingServiceAccount(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
+}
+
+func TestDockercfgTokenDeletedController(t *testing.T) {
+	masterConfig, clusterAdminConfig, err := testserver.StartTestMaster()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
+	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminConfig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	clusterAdminKubeClient, err := testutil.GetClusterAdminKubeClient(clusterAdminConfig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sa := &api.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa1", Namespace: "ns1"},
+	}
+
+	if _, _, err := testserver.CreateNewProject(clusterAdminClientConfig, sa.Namespace, "ignored"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	secretsWatch, err := clusterAdminKubeClient.Core().Secrets(sa.Namespace).Watch(metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer secretsWatch.Stop()
+
+	if _, err := clusterAdminKubeClient.Core().ServiceAccounts(sa.Namespace).Create(sa); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := testserver.WaitForServiceAccounts(clusterAdminKubeClient, sa.Namespace, []string{sa.Name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Get the service account dockercfg secret's name
+	dockercfgSecretName, _, err := waitForServiceAccountPullSecret(clusterAdminKubeClient, sa.Namespace, sa.Name, 20, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dockercfgSecretName) == 0 {
+		t.Fatal("pull secret was not created")
+	}
+
+	// Get the matching secret's name
+	dockercfgSecret, err := clusterAdminKubeClient.Core().Secrets(sa.Namespace).Get(dockercfgSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	secretName := dockercfgSecret.Annotations[controllers.ServiceAccountTokenSecretNameKey]
+	if len(secretName) == 0 {
+		t.Fatal("secret was not created")
+	}
+
+	// Delete the service account's secret
+	if err := clusterAdminKubeClient.Core().Secrets(sa.Namespace).Delete(secretName, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Expect the matching dockercfg secret to also be deleted
+	waitForSecretDelete(dockercfgSecretName, secretsWatch, t)
+}
+
+func waitForSecretDelete(secretName string, w watch.Interface, t *testing.T) {
+	for {
+		select {
+		case event := <-w.ResultChan():
+			secret := event.Object.(*api.Secret)
+			secret.Data = nil // reduce noise in log
+			t.Logf("got %#v %#v", event, secret)
+			if event.Type == watch.Deleted && secret.Name == secretName {
+				return
+			}
+
+		case <-time.After(3 * time.Minute):
+			t.Fatalf("timeout: %v", secretName)
+		}
+	}
 }

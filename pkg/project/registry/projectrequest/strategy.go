@@ -4,10 +4,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
-	projectapi "github.com/openshift/origin/pkg/project/api"
-	projectvalidation "github.com/openshift/origin/pkg/project/api/validation"
+	projectapi "github.com/openshift/origin/pkg/project/apis/project"
+	projectvalidation "github.com/openshift/origin/pkg/project/apis/project/validation"
 )
 
 // strategy implements behavior for OAuthClient objects
@@ -15,7 +15,7 @@ type strategy struct {
 	runtime.ObjectTyper
 }
 
-var Strategy = strategy{kapi.Scheme}
+var Strategy = strategy{legacyscheme.Scheme}
 
 func (strategy) PrepareForUpdate(ctx apirequest.Context, obj, old runtime.Object) {}
 

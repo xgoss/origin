@@ -8,11 +8,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apiserver/pkg/registry/rest"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 
 	oapi "github.com/openshift/origin/pkg/api"
-	"github.com/openshift/origin/pkg/project/api"
+	projectapi "github.com/openshift/origin/pkg/project/apis/project"
 )
 
 // mockLister returns the namespaces in the list
@@ -47,7 +48,7 @@ func TestListProjects(t *testing.T) {
 	if err != nil {
 		t.Errorf("%#v should be nil.", err)
 	}
-	projects := response.(*api.ProjectList)
+	projects := response.(*projectapi.ProjectList)
 	if len(projects.Items) != 1 {
 		t.Errorf("%#v projects.Items should have len 1.", projects.Items)
 	}
@@ -60,7 +61,7 @@ func TestListProjects(t *testing.T) {
 func TestCreateProjectBadObject(t *testing.T) {
 	storage := REST{}
 
-	obj, err := storage.Create(apirequest.NewContext(), &api.ProjectList{})
+	obj, err := storage.Create(apirequest.NewContext(), &projectapi.ProjectList{}, rest.ValidateAllObjectFunc, false)
 	if obj != nil {
 		t.Errorf("Expected nil, got %v", obj)
 	}
@@ -72,11 +73,11 @@ func TestCreateProjectBadObject(t *testing.T) {
 func TestCreateInvalidProject(t *testing.T) {
 	mockClient := &fake.Clientset{}
 	storage := NewREST(mockClient.Core().Namespaces(), &mockLister{}, nil, nil)
-	_, err := storage.Create(apirequest.NewContext(), &api.Project{
+	_, err := storage.Create(apirequest.NewContext(), &projectapi.Project{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{oapi.OpenShiftDisplayName: "h\t\ni"},
 		},
-	})
+	}, rest.ValidateAllObjectFunc, false)
 	if !errors.IsInvalid(err) {
 		t.Errorf("Expected 'invalid' error, got %v", err)
 	}
@@ -85,9 +86,9 @@ func TestCreateInvalidProject(t *testing.T) {
 func TestCreateProjectOK(t *testing.T) {
 	mockClient := &fake.Clientset{}
 	storage := NewREST(mockClient.Core().Namespaces(), &mockLister{}, nil, nil)
-	_, err := storage.Create(apirequest.NewContext(), &api.Project{
+	_, err := storage.Create(apirequest.NewContext(), &projectapi.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
-	})
+	}, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %#v", err)
 	}
@@ -109,7 +110,7 @@ func TestGetProjectOK(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected non-nil error: %v", err)
 	}
-	if project.(*api.Project).Name != "foo" {
+	if project.(*projectapi.Project).Name != "foo" {
 		t.Errorf("Unexpected project: %#v", project)
 	}
 }

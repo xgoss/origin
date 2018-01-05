@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	informers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 )
 
@@ -22,16 +24,16 @@ const (
 )
 
 var (
-	registryService = &kapi.Service{
+	registryService = &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: registryName, Namespace: registryNamespace},
-		Spec: kapi.ServiceSpec{
+		Spec: v1.ServiceSpec{
 			ClusterIP: "172.16.123.123",
-			Ports:     []kapi.ServicePort{{Port: 1235}},
+			Ports:     []v1.ServicePort{{Port: 1235}},
 		},
 	}
 )
 
-func controllerSetup(startingObjects []runtime.Object, t *testing.T) (*fake.Clientset, *watch.FakeWatcher, *DockerRegistryServiceController) {
+func controllerSetup(startingObjects []runtime.Object, t *testing.T, stopCh <-chan struct{}) (*fake.Clientset, *watch.FakeWatcher, *DockerRegistryServiceController, informers.SharedInformerFactory) {
 	kubeclient := fake.NewSimpleClientset(startingObjects...)
 	fakeWatch := watch.NewFake()
 	kubeclient.PrependReactor("create", "*", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -42,15 +44,21 @@ func controllerSetup(startingObjects []runtime.Object, t *testing.T) (*fake.Clie
 	})
 	kubeclient.PrependWatchReactor("services", clientgotesting.DefaultWatchReactor(fakeWatch, nil))
 
-	controller := NewDockerRegistryServiceController(kubeclient, DockerRegistryServiceControllerOptions{
-		Resync:               10 * time.Minute,
-		RegistryNamespace:    registryNamespace,
-		RegistryServiceName:  registryName,
-		DockercfgController:  &DockercfgController{},
-		DockerURLsIntialized: make(chan struct{}),
-	})
+	informerFactory := informers.NewSharedInformerFactory(kubeclient, controller.NoResyncPeriodFunc())
 
-	return kubeclient, fakeWatch, controller
+	controller := NewDockerRegistryServiceController(
+		informerFactory.Core().V1().Secrets(),
+		kubeclient,
+		DockerRegistryServiceControllerOptions{
+			Resync:                10 * time.Minute,
+			RegistryNamespace:     registryNamespace,
+			RegistryServiceName:   registryName,
+			DockercfgController:   &DockercfgController{},
+			DockerURLsInitialized: make(chan struct{}),
+		},
+	)
+	controller.secretsSynced = func() bool { return true }
+	return kubeclient, fakeWatch, controller, informerFactory
 }
 
 func wrapHandler(indicator chan bool, handler func(string) error, t *testing.T) func(string) error {
@@ -71,19 +79,20 @@ func TestNoChangeNoOp(t *testing.T) {
 	defer close(stopChannel)
 	received := make(chan bool)
 
-	kubeclient, fakeWatch, controller := controllerSetup([]runtime.Object{registryService}, t)
+	kubeclient, fakeWatch, controller, informerFactory := controllerSetup([]runtime.Object{registryService}, t, stopChannel)
 	kubeclient.PrependReactor("update", "secrets", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-		return true, &kapi.Secret{}, fmt.Errorf("%v unexpected", action)
+		return true, &v1.Secret{}, fmt.Errorf("%v unexpected", action)
 	})
 	kubeclient.PrependReactor("create", "secrets", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-		return true, &kapi.Secret{}, fmt.Errorf("%v unexpected", action)
+		return true, &v1.Secret{}, fmt.Errorf("%v unexpected", action)
 	})
 	controller.syncRegistryLocationHandler = wrapHandler(received, controller.syncRegistryLocationChange, t)
+	informerFactory.Start(stopChannel)
 	go controller.Run(5, stopChannel)
 
 	t.Log("Waiting for ready")
 	select {
-	case <-controller.dockerURLsIntialized:
+	case <-controller.dockerURLsInitialized:
 	case <-time.After(time.Duration(45 * time.Second)):
 		t.Fatalf("failed to become ready")
 	}
@@ -104,7 +113,7 @@ func TestUpdateNewStyleSecret(t *testing.T) {
 	received := make(chan bool)
 	updatedSecret := make(chan bool)
 
-	newStyleDockercfgSecret := &kapi.Secret{
+	newStyleDockercfgSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "secret-name", Namespace: registryNamespace,
 			Annotations: map[string]string{
@@ -112,18 +121,19 @@ func TestUpdateNewStyleSecret(t *testing.T) {
 				ServiceAccountTokenSecretNameKey:   "sa-token-secret",
 			},
 		},
-		Type: kapi.SecretTypeDockercfg,
-		Data: map[string][]byte{kapi.DockerConfigKey: []byte("{}")},
+		Type: v1.SecretTypeDockercfg,
+		Data: map[string][]byte{v1.DockerConfigKey: []byte("{}")},
 	}
 
-	kubeclient, fakeWatch, controller := controllerSetup([]runtime.Object{newStyleDockercfgSecret}, t)
+	kubeclient, fakeWatch, controller, informerFactory := controllerSetup([]runtime.Object{newStyleDockercfgSecret}, t, stopChannel)
 	controller.syncRegistryLocationHandler = wrapHandler(received, controller.syncRegistryLocationChange, t)
 	controller.syncSecretHandler = wrapHandler(updatedSecret, controller.syncSecretUpdate, t)
+	informerFactory.Start(stopChannel)
 	go controller.Run(5, stopChannel)
 
 	t.Log("Waiting for ready")
 	select {
-	case <-controller.dockerURLsIntialized:
+	case <-controller.dockerURLsInitialized:
 	case <-time.After(time.Duration(45 * time.Second)):
 		t.Fatalf("failed to become ready")
 	}
@@ -156,9 +166,9 @@ func TestUpdateNewStyleSecret(t *testing.T) {
 		switch {
 		case action.Matches("update", "secrets"):
 			updateService := action.(clientgotesting.UpdateAction)
-			secret := updateService.GetObject().(*kapi.Secret)
+			secret := updateService.GetObject().(*v1.Secret)
 			actualDockercfg := &credentialprovider.DockerConfig{}
-			if err := json.Unmarshal(secret.Data[kapi.DockerConfigKey], actualDockercfg); err != nil {
+			if err := json.Unmarshal(secret.Data[v1.DockerConfigKey], actualDockercfg); err != nil {
 				t.Errorf("unexpected err %v", err)
 				continue
 			}
@@ -193,25 +203,26 @@ func TestUpdateOldStyleSecretWithKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
 	}
-	oldStyleDockercfgSecret := &kapi.Secret{
+	oldStyleDockercfgSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "secret-name", Namespace: registryNamespace,
 			Annotations: map[string]string{
 				ServiceAccountTokenSecretNameKey: "sa-token-secret",
 			},
 		},
-		Type: kapi.SecretTypeDockercfg,
-		Data: map[string][]byte{kapi.DockerConfigKey: dockercfgContent},
+		Type: v1.SecretTypeDockercfg,
+		Data: map[string][]byte{v1.DockerConfigKey: dockercfgContent},
 	}
 
-	kubeclient, fakeWatch, controller := controllerSetup([]runtime.Object{oldStyleDockercfgSecret}, t)
+	kubeclient, fakeWatch, controller, informerFactory := controllerSetup([]runtime.Object{oldStyleDockercfgSecret}, t, stopChannel)
 	controller.syncRegistryLocationHandler = wrapHandler(received, controller.syncRegistryLocationChange, t)
 	controller.syncSecretHandler = wrapHandler(updatedSecret, controller.syncSecretUpdate, t)
+	informerFactory.Start(stopChannel)
 	go controller.Run(5, stopChannel)
 
 	t.Log("Waiting for ready")
 	select {
-	case <-controller.dockerURLsIntialized:
+	case <-controller.dockerURLsInitialized:
 	case <-time.After(time.Duration(45 * time.Second)):
 		t.Fatalf("failed to become ready")
 	}
@@ -245,9 +256,9 @@ func TestUpdateOldStyleSecretWithKey(t *testing.T) {
 		switch {
 		case action.Matches("update", "secrets"):
 			updateService := action.(clientgotesting.UpdateAction)
-			secret := updateService.GetObject().(*kapi.Secret)
+			secret := updateService.GetObject().(*v1.Secret)
 			actualDockercfg := &credentialprovider.DockerConfig{}
-			if err := json.Unmarshal(secret.Data[kapi.DockerConfigKey], actualDockercfg); err != nil {
+			if err := json.Unmarshal(secret.Data[v1.DockerConfigKey], actualDockercfg); err != nil {
 				t.Errorf("unexpected err %v", err)
 				continue
 			}
@@ -270,38 +281,39 @@ func TestUpdateOldStyleSecretWithoutKey(t *testing.T) {
 	received := make(chan bool)
 	updatedSecret := make(chan bool)
 
-	oldStyleDockercfgSecret := &kapi.Secret{
+	oldStyleDockercfgSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "secret-name", Namespace: registryNamespace,
 			Annotations: map[string]string{
 				ServiceAccountTokenSecretNameKey: "sa-token-secret",
 			},
 		},
-		Type: kapi.SecretTypeDockercfg,
-		Data: map[string][]byte{kapi.DockerConfigKey: []byte("{}")},
+		Type: v1.SecretTypeDockercfg,
+		Data: map[string][]byte{v1.DockerConfigKey: []byte("{}")},
 	}
-	tokenSecret := &kapi.Secret{
+	tokenSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "sa-token-secret", Namespace: registryNamespace,
 			Annotations: map[string]string{
 				ServiceAccountTokenSecretNameKey: "sa-token-secret",
 			},
 		},
-		Type: kapi.SecretTypeServiceAccountToken,
-		Data: map[string][]byte{kapi.ServiceAccountTokenKey: []byte("the-sa-bearer-token")},
+		Type: v1.SecretTypeServiceAccountToken,
+		Data: map[string][]byte{v1.ServiceAccountTokenKey: []byte("the-sa-bearer-token")},
 	}
 
-	kubeclient, fakeWatch, controller := controllerSetup([]runtime.Object{tokenSecret, oldStyleDockercfgSecret}, t)
+	kubeclient, fakeWatch, controller, informerFactory := controllerSetup([]runtime.Object{tokenSecret, oldStyleDockercfgSecret}, t, stopChannel)
 	kubeclient.PrependReactor("get", "secrets", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
 		return true, tokenSecret, nil
 	})
 	controller.syncRegistryLocationHandler = wrapHandler(received, controller.syncRegistryLocationChange, t)
 	controller.syncSecretHandler = wrapHandler(updatedSecret, controller.syncSecretUpdate, t)
+	informerFactory.Start(stopChannel)
 	go controller.Run(5, stopChannel)
 
 	t.Log("Waiting for ready")
 	select {
-	case <-controller.dockerURLsIntialized:
+	case <-controller.dockerURLsInitialized:
 	case <-time.After(time.Duration(45 * time.Second)):
 		t.Fatalf("failed to become ready")
 	}
@@ -335,9 +347,9 @@ func TestUpdateOldStyleSecretWithoutKey(t *testing.T) {
 		switch {
 		case action.Matches("update", "secrets"):
 			updateService := action.(clientgotesting.UpdateAction)
-			secret := updateService.GetObject().(*kapi.Secret)
+			secret := updateService.GetObject().(*v1.Secret)
 			actualDockercfg := &credentialprovider.DockerConfig{}
-			if err := json.Unmarshal(secret.Data[kapi.DockerConfigKey], actualDockercfg); err != nil {
+			if err := json.Unmarshal(secret.Data[v1.DockerConfigKey], actualDockercfg); err != nil {
 				t.Errorf("unexpected err %v", err)
 				continue
 			}
@@ -372,7 +384,7 @@ func TestClearSecretAndRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
 	}
-	oldStyleDockercfgSecret := &kapi.Secret{
+	oldStyleDockercfgSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "secret-name", Namespace: registryNamespace,
 			Annotations: map[string]string{
@@ -380,18 +392,19 @@ func TestClearSecretAndRecreate(t *testing.T) {
 				ServiceAccountTokenSecretNameKey:   "sa-token-secret",
 			},
 		},
-		Type: kapi.SecretTypeDockercfg,
-		Data: map[string][]byte{kapi.DockerConfigKey: dockercfgContent},
+		Type: v1.SecretTypeDockercfg,
+		Data: map[string][]byte{v1.DockerConfigKey: dockercfgContent},
 	}
 
-	kubeclient, fakeWatch, controller := controllerSetup([]runtime.Object{registryService, oldStyleDockercfgSecret}, t)
+	kubeclient, fakeWatch, controller, informerFactory := controllerSetup([]runtime.Object{registryService, oldStyleDockercfgSecret}, t, stopChannel)
 	controller.syncRegistryLocationHandler = wrapHandler(received, controller.syncRegistryLocationChange, t)
 	controller.syncSecretHandler = wrapHandler(updatedSecret, controller.syncSecretUpdate, t)
+	informerFactory.Start(stopChannel)
 	go controller.Run(5, stopChannel)
 
 	t.Log("Waiting for ready")
 	select {
-	case <-controller.dockerURLsIntialized:
+	case <-controller.dockerURLsInitialized:
 	case <-time.After(time.Duration(45 * time.Second)):
 		t.Fatalf("failed to become ready")
 	}
@@ -416,9 +429,9 @@ func TestClearSecretAndRecreate(t *testing.T) {
 		switch {
 		case action.Matches("update", "secrets"):
 			updateService := action.(clientgotesting.UpdateAction)
-			secret := updateService.GetObject().(*kapi.Secret)
+			secret := updateService.GetObject().(*v1.Secret)
 			actualDockercfg := &credentialprovider.DockerConfig{}
-			if err := json.Unmarshal(secret.Data[kapi.DockerConfigKey], actualDockercfg); err != nil {
+			if err := json.Unmarshal(secret.Data[v1.DockerConfigKey], actualDockercfg); err != nil {
 				t.Errorf("unexpected err %v", err)
 				continue
 			}
@@ -463,9 +476,9 @@ func TestClearSecretAndRecreate(t *testing.T) {
 		switch {
 		case action.Matches("update", "secrets"):
 			updateService := action.(clientgotesting.UpdateAction)
-			secret := updateService.GetObject().(*kapi.Secret)
+			secret := updateService.GetObject().(*v1.Secret)
 			actualDockercfg := &credentialprovider.DockerConfig{}
-			if err := json.Unmarshal(secret.Data[kapi.DockerConfigKey], actualDockercfg); err != nil {
+			if err := json.Unmarshal(secret.Data[v1.DockerConfigKey], actualDockercfg); err != nil {
 				t.Errorf("unexpected err %v", err)
 				continue
 			}

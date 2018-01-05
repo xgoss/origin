@@ -5,8 +5,7 @@ set -o nounset
 set -o pipefail
 
 # Should set OPENSHIFT_NETWORK_PLUGIN
-source /data/network-plugin
-source /data/additional-args
+source /data/dind-env
 
 function ensure-master-config() {
   local config_path="/data/openshift.local.config"
@@ -23,7 +22,7 @@ function ensure-master-config() {
   local name
   name="$(hostname)"
 
-  /usr/local/bin/openshift admin ca create-master-certs \
+  /usr/local/bin/oc adm ca create-master-certs \
     --overwrite=false \
     --cert-dir="${master_path}" \
     --master="https://${ip_addr}:8443" \

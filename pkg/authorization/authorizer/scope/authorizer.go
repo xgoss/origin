@@ -5,28 +5,28 @@ import (
 
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
+	rbaclisters "k8s.io/kubernetes/pkg/client/listers/rbac/internalversion"
+	authorizerrbac "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	defaultauthorizer "github.com/openshift/origin/pkg/authorization/authorizer"
-	"github.com/openshift/origin/pkg/client"
 )
 
 type scopeAuthorizer struct {
-	delegate            kauthorizer.Authorizer
-	clusterPolicyGetter client.ClusterPolicyLister
+	delegate          authorizer.Authorizer
+	clusterRoleGetter rbaclisters.ClusterRoleLister
 
 	forbiddenMessageMaker defaultauthorizer.ForbiddenMessageMaker
 }
 
-func NewAuthorizer(delegate kauthorizer.Authorizer, clusterPolicyGetter client.ClusterPolicyLister, forbiddenMessageMaker defaultauthorizer.ForbiddenMessageMaker) authorizer.Authorizer {
-	return &scopeAuthorizer{delegate: delegate, clusterPolicyGetter: clusterPolicyGetter, forbiddenMessageMaker: forbiddenMessageMaker}
+func NewAuthorizer(delegate authorizer.Authorizer, clusterRoleGetter rbaclisters.ClusterRoleLister, forbiddenMessageMaker defaultauthorizer.ForbiddenMessageMaker) authorizer.Authorizer {
+	return &scopeAuthorizer{delegate: delegate, clusterRoleGetter: clusterRoleGetter, forbiddenMessageMaker: forbiddenMessageMaker}
 }
 
-func (a *scopeAuthorizer) Authorize(attributes authorizer.Attributes) (bool, string, error) {
+func (a *scopeAuthorizer) Authorize(attributes authorizer.Attributes) (authorizer.Decision, string, error) {
 	user := attributes.GetUser()
 	if user == nil {
-		return false, "", fmt.Errorf("user missing from context")
+		return authorizer.DecisionNoOpinion, "", fmt.Errorf("user missing from context")
 	}
 
 	scopes := user.GetExtra()[authorizationapi.ScopesKey]
@@ -37,21 +37,14 @@ func (a *scopeAuthorizer) Authorize(attributes authorizer.Attributes) (bool, str
 	nonFatalErrors := []error{}
 
 	// scopeResolutionErrors aren't fatal.  If any of the scopes we find allow this, then the overall scope limits allow it
-	rules, err := ScopesToRules(scopes, attributes.GetNamespace(), a.clusterPolicyGetter)
+	rules, err := ScopesToRules(scopes, attributes.GetNamespace(), a.clusterRoleGetter)
 	if err != nil {
 		nonFatalErrors = append(nonFatalErrors, err)
 	}
 
-	for _, rule := range rules {
-		// check rule against attributes
-		matches, err := defaultauthorizer.RuleMatches(attributes, rule)
-		if err != nil {
-			nonFatalErrors = append(nonFatalErrors, err)
-			continue
-		}
-		if matches {
-			return a.delegate.Authorize(attributes)
-		}
+	// check rules against attributes
+	if authorizerrbac.RulesAllow(attributes, rules...) {
+		return a.delegate.Authorize(attributes)
 	}
 
 	denyReason, err := a.forbiddenMessageMaker.MakeMessage(attributes)
@@ -59,5 +52,6 @@ func (a *scopeAuthorizer) Authorize(attributes authorizer.Attributes) (bool, str
 		denyReason = err.Error()
 	}
 
-	return false, fmt.Sprintf("scopes %v prevent this action; %v", scopes, denyReason), kerrors.NewAggregate(nonFatalErrors)
+	// the scope prevent this.  We need to authoritatively deny
+	return authorizer.DecisionDeny, fmt.Sprintf("scopes %v prevent this action; %v", scopes, denyReason), kerrors.NewAggregate(nonFatalErrors)
 }

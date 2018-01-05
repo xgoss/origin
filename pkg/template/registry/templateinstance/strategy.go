@@ -2,34 +2,35 @@ package templateinstance
 
 import (
 	"errors"
-	"fmt"
 
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	kutilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/storage"
 	"k8s.io/apiserver/pkg/storage/names"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/apis/authorization"
+	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
+	authorizationinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/authorization/internalversion"
+	rbacregistry "k8s.io/kubernetes/pkg/registry/rbac"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/client"
-	templateapi "github.com/openshift/origin/pkg/template/api"
-	"github.com/openshift/origin/pkg/template/api/validation"
-	userapi "github.com/openshift/origin/pkg/user/api"
+	"github.com/openshift/origin/pkg/authorization/util"
+	template "github.com/openshift/origin/pkg/template"
+	templateapi "github.com/openshift/origin/pkg/template/apis/template"
+	"github.com/openshift/origin/pkg/template/apis/template/validation"
 )
 
-// templateInstanceStrategy implements behavior for Templates
+// templateInstanceStrategy implements behavior for TemplateInstances
 type templateInstanceStrategy struct {
 	runtime.ObjectTyper
 	names.NameGenerator
-	oc *client.Client
+	authorizationClient authorizationinternalversion.AuthorizationInterface
 }
 
-func NewStrategy(oc *client.Client) *templateInstanceStrategy {
-	return &templateInstanceStrategy{kapi.Scheme, names.SimpleNameGenerator, oc}
+func NewStrategy(authorizationClient authorizationinternalversion.AuthorizationInterface) *templateInstanceStrategy {
+	return &templateInstanceStrategy{legacyscheme.Scheme, names.SimpleNameGenerator, authorizationClient}
 }
 
 // NamespaceScoped is true for templateinstances.
@@ -39,6 +40,10 @@ func (templateInstanceStrategy) NamespaceScoped() bool {
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (templateInstanceStrategy) PrepareForUpdate(ctx apirequest.Context, obj, old runtime.Object) {
+	curr := obj.(*templateapi.TemplateInstance)
+	prev := old.(*templateapi.TemplateInstance)
+
+	curr.Status = prev.Status
 }
 
 // Canonicalize normalizes the object after validation.
@@ -49,12 +54,18 @@ func (templateInstanceStrategy) Canonicalize(obj runtime.Object) {
 func (templateInstanceStrategy) PrepareForCreate(ctx apirequest.Context, obj runtime.Object) {
 	templateInstance := obj.(*templateapi.TemplateInstance)
 
+	// if request not set, pull from context; note: the requester can be set via the service catalog
+	// propagating the user information via the openservicebroker origination api header on
+	// calls to the TSB endpoints (i.e. the Provision call)
 	if templateInstance.Spec.Requester == nil {
-		user, _ := apirequest.UserFrom(ctx)
-		templateInstance.Spec.Requester = &templateapi.TemplateInstanceRequester{
-			Username: user.GetName(),
+
+		if user, ok := apirequest.UserFrom(ctx); ok {
+			templateReq := template.ConvertUserToTemplateInstanceRequester(user)
+			templateInstance.Spec.Requester = &templateReq
 		}
 	}
+
+	templateInstance.Status = templateapi.TemplateInstanceStatus{}
 }
 
 // Validate validates a new templateinstance.
@@ -87,35 +98,46 @@ func (s *templateInstanceStrategy) ValidateUpdate(ctx apirequest.Context, obj, o
 		return field.ErrorList{field.InternalError(field.NewPath(""), errors.New("user not found in context"))}
 	}
 
-	templateInstance := obj.(*templateapi.TemplateInstance)
-	oldTemplateInstance := old.(*templateapi.TemplateInstance)
+	// Decode Spec.Template.Objects on both obj and old to Unstructureds.  This
+	// allows detectection of at least some cases where the Objects are
+	// semantically identical, but the serialisations have been jumbled up.  One
+	// place where this happens is in the garbage collector, which uses
+	// Unstructureds via the dynamic client.
+
+	if obj == nil {
+		return field.ErrorList{field.InternalError(field.NewPath(""), errors.New("input object is nil"))}
+	}
+	templateInstanceCopy := obj.DeepCopyObject()
+	templateInstance := templateInstanceCopy.(*templateapi.TemplateInstance)
+
+	errs := runtime.DecodeList(templateInstance.Spec.Template.Objects, unstructured.UnstructuredJSONScheme)
+	if len(errs) != 0 {
+		return field.ErrorList{field.InternalError(field.NewPath(""), kutilerrors.NewAggregate(errs))}
+	}
+
+	if old == nil {
+		return field.ErrorList{field.InternalError(field.NewPath(""), errors.New("input object is nil"))}
+	}
+	oldTemplateInstanceCopy := old.DeepCopyObject()
+	oldTemplateInstance := oldTemplateInstanceCopy.(*templateapi.TemplateInstance)
+
+	errs = runtime.DecodeList(oldTemplateInstance.Spec.Template.Objects, unstructured.UnstructuredJSONScheme)
+	if len(errs) != 0 {
+		return field.ErrorList{field.InternalError(field.NewPath(""), kutilerrors.NewAggregate(errs))}
+	}
+
 	allErrs := validation.ValidateTemplateInstanceUpdate(templateInstance, oldTemplateInstance)
-	allErrs = append(allErrs, s.validateImpersonation(templateInstance, user)...)
+	allErrs = append(allErrs, s.validateImpersonationUpdate(templateInstance, oldTemplateInstance, user)...)
 
 	return allErrs
 }
 
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-	return storage.SelectionPredicate{
-		Label:    label,
-		Field:    field,
-		GetAttrs: GetAttrs,
+func (s *templateInstanceStrategy) validateImpersonationUpdate(templateInstance, oldTemplateInstance *templateapi.TemplateInstance, userinfo user.Info) field.ErrorList {
+	if rbacregistry.IsOnlyMutatingGCFields(templateInstance, oldTemplateInstance, kapihelper.Semantic) {
+		return nil
 	}
-}
 
-// GetAttrs returns labels and fields of a given object for filtering purposes
-func GetAttrs(o runtime.Object) (labels.Set, fields.Set, error) {
-	obj, ok := o.(*templateapi.TemplateInstance)
-	if !ok {
-		return nil, nil, fmt.Errorf("not a TemplateInstance")
-	}
-	return labels.Set(obj.Labels), SelectableFields(obj), nil
-}
-
-// SelectableFields returns a field set that can be used for filter selection
-func SelectableFields(obj *templateapi.TemplateInstance) fields.Set {
-	return templateapi.TemplateInstanceToSelectableFields(obj)
+	return s.validateImpersonation(templateInstance, userinfo)
 }
 
 func (s *templateInstanceStrategy) validateImpersonation(templateInstance *templateapi.TemplateInstance, userinfo user.Info) field.ErrorList {
@@ -124,20 +146,49 @@ func (s *templateInstanceStrategy) validateImpersonation(templateInstance *templ
 	}
 
 	if templateInstance.Spec.Requester.Username != userinfo.GetName() {
-		sar := authorizationapi.AddUserToSAR(userinfo,
-			&authorizationapi.SubjectAccessReview{
-				Action: authorizationapi.Action{
-					Verb:         "impersonate",
-					Group:        userapi.GroupName,
-					Resource:     authorizationapi.UserResource,
-					ResourceName: templateInstance.Spec.Requester.Username,
-				},
-			})
-		resp, err := s.oc.SubjectAccessReviews().Create(sar)
-		if err != nil || resp == nil || !resp.Allowed {
-			return field.ErrorList{field.Forbidden(field.NewPath("spec.impersonateUser"), "impersonation forbidden")}
+		if err := util.Authorize(s.authorizationClient.SubjectAccessReviews(), userinfo, &authorization.ResourceAttributes{
+			Namespace: templateInstance.Namespace,
+			Verb:      "assign",
+			Group:     templateapi.GroupName,
+			Resource:  "templateinstances",
+			Name:      templateInstance.Name,
+		}); err != nil {
+			return field.ErrorList{field.Forbidden(field.NewPath("spec.requester.username"), "you do not have permission to set username")}
 		}
 	}
 
 	return nil
+}
+
+type statusStrategy struct {
+	runtime.ObjectTyper
+	names.NameGenerator
+}
+
+var StatusStrategy = statusStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
+
+func (statusStrategy) NamespaceScoped() bool {
+	return true
+}
+
+func (statusStrategy) AllowCreateOnUpdate() bool {
+	return false
+}
+
+func (statusStrategy) AllowUnconditionalUpdate() bool {
+	return false
+}
+
+func (statusStrategy) PrepareForUpdate(ctx apirequest.Context, obj, old runtime.Object) {
+	curr := obj.(*templateapi.TemplateInstance)
+	prev := old.(*templateapi.TemplateInstance)
+
+	curr.Spec = prev.Spec
+}
+
+func (statusStrategy) Canonicalize(obj runtime.Object) {
+}
+
+func (statusStrategy) ValidateUpdate(ctx apirequest.Context, obj, old runtime.Object) field.ErrorList {
+	return validation.ValidateTemplateInstanceUpdate(obj.(*templateapi.TemplateInstance), old.(*templateapi.TemplateInstance))
 }

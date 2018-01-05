@@ -8,31 +8,30 @@ import (
 	"github.com/golang/glog"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 
+	"github.com/openshift/origin/pkg/auth/oauth/handlers"
 	scopeauthorizer "github.com/openshift/origin/pkg/authorization/authorizer/scope"
-	"github.com/openshift/origin/pkg/oauth/api"
-	"github.com/openshift/origin/pkg/oauth/registry/oauthaccesstoken"
-	"github.com/openshift/origin/pkg/oauth/registry/oauthauthorizetoken"
-	"github.com/openshift/origin/pkg/oauth/registry/oauthclient"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	oauthclient "github.com/openshift/origin/pkg/oauth/generated/internalclientset/typed/oauth/internalversion"
+	oauthclientregistry "github.com/openshift/origin/pkg/oauth/registry/oauthclient"
 	"github.com/openshift/origin/pkg/oauth/scope"
 )
 
 type UserConversion interface {
-	ConvertToAuthorizeToken(interface{}, *api.OAuthAuthorizeToken) error
-	ConvertToAccessToken(interface{}, *api.OAuthAccessToken) error
-	ConvertFromAuthorizeToken(*api.OAuthAuthorizeToken) (interface{}, error)
-	ConvertFromAccessToken(*api.OAuthAccessToken) (interface{}, error)
+	ConvertToAuthorizeToken(interface{}, *oauthapi.OAuthAuthorizeToken) error
+	ConvertToAccessToken(interface{}, *oauthapi.OAuthAccessToken) error
+	ConvertFromAuthorizeToken(*oauthapi.OAuthAuthorizeToken) (interface{}, error)
+	ConvertFromAccessToken(*oauthapi.OAuthAccessToken) (interface{}, error)
 }
 
 type storage struct {
-	accesstoken    oauthaccesstoken.Registry
-	authorizetoken oauthauthorizetoken.Registry
-	client         oauthclient.Getter
+	accesstoken    oauthclient.OAuthAccessTokenInterface
+	authorizetoken oauthclient.OAuthAuthorizeTokenInterface
+	client         oauthclientregistry.Getter
 	user           UserConversion
 }
 
-func New(access oauthaccesstoken.Registry, authorize oauthauthorizetoken.Registry, client oauthclient.Getter, user UserConversion) osin.Storage {
+func New(access oauthclient.OAuthAccessTokenInterface, authorize oauthclient.OAuthAuthorizeTokenInterface, client oauthclientregistry.Getter, user UserConversion) osin.Storage {
 	return &storage{
 		accesstoken:    access,
 		authorizetoken: authorize,
@@ -43,12 +42,13 @@ func New(access oauthaccesstoken.Registry, authorize oauthauthorizetoken.Registr
 
 type clientWrapper struct {
 	id     string
-	client *api.OAuthClient
+	client *oauthapi.OAuthClient
 }
 
 // Ensure we implement the secret matcher method that allows us to validate multiple secrets
 var _ = osin.Client(&clientWrapper{})
 var _ = osin.ClientSecretMatcher(&clientWrapper{})
+var _ = handlers.TokenMaxAgeSeconds(&clientWrapper{})
 
 func (w *clientWrapper) GetId() string {
 	return w.id
@@ -84,6 +84,10 @@ func (w *clientWrapper) GetUserData() interface{} {
 	return w.client
 }
 
+func (w *clientWrapper) GetTokenMaxAgeSeconds() *int32 {
+	return w.client.AccessTokenMaxAgeSeconds
+}
+
 // Clone the storage if needed. For example, using mgo, you can clone the session with session.Clone
 // to avoid concurrent access problems.
 // This is to avoid cloning the connection at each method access.
@@ -98,7 +102,7 @@ func (s *storage) Close() {
 
 // GetClient loads the client by id (client_id)
 func (s *storage) GetClient(id string) (osin.Client, error) {
-	c, err := s.client.GetClient(apirequest.NewContext(), id, &metav1.GetOptions{})
+	c, err := s.client.Get(id, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			return nil, nil
@@ -114,7 +118,7 @@ func (s *storage) SaveAuthorize(data *osin.AuthorizeData) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.authorizetoken.CreateAuthorizeToken(apirequest.NewContext(), token)
+	_, err = s.authorizetoken.Create(token)
 	return err
 }
 
@@ -122,7 +126,7 @@ func (s *storage) SaveAuthorize(data *osin.AuthorizeData) error {
 // Client information MUST be loaded together.
 // Optionally can return error if expired.
 func (s *storage) LoadAuthorize(code string) (*osin.AuthorizeData, error) {
-	authorize, err := s.authorizetoken.GetAuthorizeToken(apirequest.NewContext(), code, &metav1.GetOptions{})
+	authorize, err := s.authorizetoken.Get(code, metav1.GetOptions{})
 	if kerrors.IsNotFound(err) {
 		glog.V(5).Info("Authorization code not found")
 		return nil, nil
@@ -136,7 +140,7 @@ func (s *storage) LoadAuthorize(code string) (*osin.AuthorizeData, error) {
 // RemoveAuthorize revokes or deletes the authorization code.
 func (s *storage) RemoveAuthorize(code string) error {
 	// TODO: return no error if registry returns IsNotFound
-	return s.authorizetoken.DeleteAuthorizeToken(apirequest.NewContext(), code)
+	return s.authorizetoken.Delete(code, nil)
 }
 
 // SaveAccess writes AccessData.
@@ -146,7 +150,7 @@ func (s *storage) SaveAccess(data *osin.AccessData) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.accesstoken.CreateAccessToken(apirequest.NewContext(), token)
+	_, err = s.accesstoken.Create(token)
 	return err
 }
 
@@ -154,7 +158,7 @@ func (s *storage) SaveAccess(data *osin.AccessData) error {
 // AuthorizeData and AccessData DON'T NEED to be loaded if not easily available.
 // Optionally can return error if expired.
 func (s *storage) LoadAccess(token string) (*osin.AccessData, error) {
-	access, err := s.accesstoken.GetAccessToken(apirequest.NewContext(), token, &metav1.GetOptions{})
+	access, err := s.accesstoken.Get(token, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +168,7 @@ func (s *storage) LoadAccess(token string) (*osin.AccessData, error) {
 // RemoveAccess revokes or deletes an AccessData.
 func (s *storage) RemoveAccess(token string) error {
 	// TODO: return no error if registry returns IsNotFound
-	return s.accesstoken.DeleteAccessToken(apirequest.NewContext(), token)
+	return s.accesstoken.Delete(token, nil)
 }
 
 // LoadRefresh retrieves refresh AccessData. Client information MUST be loaded together.
@@ -179,8 +183,8 @@ func (s *storage) RemoveRefresh(token string) error {
 	return errors.New("not implemented")
 }
 
-func (s *storage) convertToAuthorizeToken(data *osin.AuthorizeData) (*api.OAuthAuthorizeToken, error) {
-	token := &api.OAuthAuthorizeToken{
+func (s *storage) convertToAuthorizeToken(data *osin.AuthorizeData) (*oauthapi.OAuthAuthorizeToken, error) {
+	token := &oauthapi.OAuthAuthorizeToken{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              data.Code,
 			CreationTimestamp: metav1.Time{Time: data.CreatedAt},
@@ -199,12 +203,12 @@ func (s *storage) convertToAuthorizeToken(data *osin.AuthorizeData) (*api.OAuthA
 	return token, nil
 }
 
-func (s *storage) convertFromAuthorizeToken(authorize *api.OAuthAuthorizeToken) (*osin.AuthorizeData, error) {
+func (s *storage) convertFromAuthorizeToken(authorize *oauthapi.OAuthAuthorizeToken) (*osin.AuthorizeData, error) {
 	user, err := s.user.ConvertFromAuthorizeToken(authorize)
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.client.GetClient(apirequest.NewContext(), authorize.ClientName, &metav1.GetOptions{})
+	client, err := s.client.Get(authorize.ClientName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -226,8 +230,8 @@ func (s *storage) convertFromAuthorizeToken(authorize *api.OAuthAuthorizeToken) 
 	}, nil
 }
 
-func (s *storage) convertToAccessToken(data *osin.AccessData) (*api.OAuthAccessToken, error) {
-	token := &api.OAuthAccessToken{
+func (s *storage) convertToAccessToken(data *osin.AccessData) (*oauthapi.OAuthAccessToken, error) {
+	token := &oauthapi.OAuthAccessToken{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              data.AccessToken,
 			CreationTimestamp: metav1.Time{Time: data.CreatedAt},
@@ -247,12 +251,12 @@ func (s *storage) convertToAccessToken(data *osin.AccessData) (*api.OAuthAccessT
 	return token, nil
 }
 
-func (s *storage) convertFromAccessToken(access *api.OAuthAccessToken) (*osin.AccessData, error) {
+func (s *storage) convertFromAccessToken(access *oauthapi.OAuthAccessToken) (*osin.AccessData, error) {
 	user, err := s.user.ConvertFromAccessToken(access)
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.client.GetClient(apirequest.NewContext(), access.ClientName, &metav1.GetOptions{})
+	client, err := s.client.Get(access.ClientName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}

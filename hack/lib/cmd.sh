@@ -108,7 +108,7 @@ minute=$(( 60 * second ))
 function os::cmd::try_until_success() {
 	if [[ $# -lt 1 ]]; then echo "os::cmd::try_until_success expects at least one arguments, got $#"; return 1; fi
 	local cmd=$1
-	local duration=${2:-minute}
+	local duration=${2:-$minute}
 	local interval=${3:-0.2}
 
 	os::cmd::internal::run_until_exit_code "${cmd}" "os::cmd::internal::success_func" "${duration}" "${interval}"
@@ -133,7 +133,7 @@ function os::cmd::try_until_text() {
 	if [[ $# -lt 2 ]]; then echo "os::cmd::try_until_text expects at least two arguments, got $#"; return 1; fi
 	local cmd=$1
 	local text=$2
-	local duration=${3:-minute}
+	local duration=${3:-$minute}
 	local interval=${4:-0.2}
 
 	os::cmd::internal::run_until_text "${cmd}" "${text}" "os::cmd::internal::success_func" "${duration}" "${interval}"
@@ -146,7 +146,7 @@ function os::cmd::try_until_not_text() {
 	if [[ $# -lt 2 ]]; then echo "os::cmd::try_until_not_text expects at least two arguments, got $#"; return 1; fi
 	local cmd=$1
 	local text=$2
-	local duration=${3:-minute}
+	local duration=${3:-$minute}
 	local interval=${4:-0.2}
 
 	os::cmd::internal::run_until_text "${cmd}" "${text}" "os::cmd::internal::failure_func" "${duration}" "${interval}"
@@ -400,7 +400,7 @@ readonly -f os::cmd::internal::mark_attempt
 function os::cmd::internal::compress_output() {
 	local logfile=$1
 
-	awk -f ${OS_ROOT}/hack/compress.awk $logfile
+	awk -f ${OS_ROOT}/hack/lib/compress.awk $logfile
 }
 readonly -f os::cmd::internal::compress_output
 

@@ -13,18 +13,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/diff"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/authentication/user"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	authorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kquota "k8s.io/kubernetes/pkg/quota"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
+	oauthorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/image/admission"
 	"github.com/openshift/origin/pkg/image/admission/testutil"
-	"github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 type fakeUser struct {
@@ -46,7 +45,7 @@ func (u *fakeUser) GetGroups() []string {
 
 func (u *fakeUser) GetExtra() map[string][]string {
 	return map[string][]string{
-		authorizationapi.ScopesKey: {"a", "b"},
+		oauthorizationapi.ScopesKey: {"a", "b"},
 	}
 }
 
@@ -65,38 +64,81 @@ type fakeSubjectAccessReviewRegistry struct {
 	requestNamespace string
 }
 
-var _ subjectaccessreview.Registry = &fakeSubjectAccessReviewRegistry{}
-
-func (f *fakeSubjectAccessReviewRegistry) CreateSubjectAccessReview(ctx apirequest.Context, subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReviewResponse, error) {
+func (f *fakeSubjectAccessReviewRegistry) Create(subjectAccessReview *authorizationapi.SubjectAccessReview) (*authorizationapi.SubjectAccessReview, error) {
 	f.request = subjectAccessReview
-	f.requestNamespace = apirequest.NamespaceValue(ctx)
-	return &authorizationapi.SubjectAccessReviewResponse{Allowed: f.allow}, f.err
+	f.requestNamespace = subjectAccessReview.Spec.ResourceAttributes.Namespace
+	return &authorizationapi.SubjectAccessReview{
+		Status: authorizationapi.SubjectAccessReviewStatus{
+			Allowed: f.allow,
+		},
+	}, f.err
+}
+
+func TestPublicDockerImageRepository(t *testing.T) {
+	tests := map[string]struct {
+		stream         *imageapi.ImageStream
+		expected       string
+		publicRegistry string
+	}{
+		"public registry is not set": {
+			stream: &imageapi.ImageStream{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "somerepo",
+				},
+				Spec: imageapi.ImageStreamSpec{
+					DockerImageRepository: "a/b",
+				},
+			},
+			publicRegistry: "",
+			expected:       "",
+		},
+		"public registry is set": {
+			stream: &imageapi.ImageStream{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "somerepo",
+				},
+				Spec: imageapi.ImageStreamSpec{
+					DockerImageRepository: "a/b",
+				},
+			},
+			publicRegistry: "registry-default.external.url",
+			expected:       "registry-default.external.url/somerepo",
+		},
+	}
+
+	for testName, test := range tests {
+		strategy := NewStrategy(imageapi.DefaultRegistryHostnameRetriever(nil, test.publicRegistry, ""), &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{}, nil)
+		value := strategy.publicDockerImageRepository(test.stream)
+		if e, a := test.expected, value; e != a {
+			t.Errorf("%s: expected %q, got %q", testName, e, a)
+		}
+	}
 }
 
 func TestDockerImageRepository(t *testing.T) {
 	tests := map[string]struct {
-		stream          *api.ImageStream
+		stream          *imageapi.ImageStream
 		expected        string
 		defaultRegistry string
 	}{
 		"DockerImageRepository set on stream": {
-			stream: &api.ImageStream{
+			stream: &imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "somerepo",
 				},
-				Spec: api.ImageStreamSpec{
+				Spec: imageapi.ImageStreamSpec{
 					DockerImageRepository: "a/b",
 				},
 			},
 			expected: "a/b",
 		},
 		"DockerImageRepository set on stream with default registry": {
-			stream: &api.ImageStream{
+			stream: &imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "foo",
 					Name:      "somerepo",
 				},
-				Spec: api.ImageStreamSpec{
+				Spec: imageapi.ImageStreamSpec{
 					DockerImageRepository: "a/b",
 				},
 			},
@@ -104,7 +146,7 @@ func TestDockerImageRepository(t *testing.T) {
 			expected:        "registry:5000/foo/somerepo",
 		},
 		"default namespace": {
-			stream: &api.ImageStream{
+			stream: &imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "somerepo",
 				},
@@ -113,7 +155,7 @@ func TestDockerImageRepository(t *testing.T) {
 			expected:        "registry:5000/default/somerepo",
 		},
 		"nondefault namespace": {
-			stream: &api.ImageStream{
+			stream: &imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "somerepo",
 					Namespace: "somens",
@@ -123,7 +165,7 @@ func TestDockerImageRepository(t *testing.T) {
 			expected:        "registry:5000/somens/somerepo",
 		},
 		"missing default registry": {
-			stream: &api.ImageStream{
+			stream: &imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "somerepo",
 					Namespace: "somens",
@@ -135,7 +177,8 @@ func TestDockerImageRepository(t *testing.T) {
 	}
 
 	for testName, test := range tests {
-		strategy := NewStrategy(&fakeDefaultRegistry{test.defaultRegistry}, &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{}, nil)
+		fakeRegistry := &fakeDefaultRegistry{test.defaultRegistry}
+		strategy := NewStrategy(imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""), &fakeSubjectAccessReviewRegistry{}, &testutil.FakeImageStreamLimitVerifier{}, nil)
 		value := strategy.dockerImageRepository(test.stream)
 		if e, a := test.expected, value; e != a {
 			t.Errorf("%s: expected %q, got %q", testName, e, a)
@@ -145,8 +188,8 @@ func TestDockerImageRepository(t *testing.T) {
 
 func TestTagVerifier(t *testing.T) {
 	tests := map[string]struct {
-		oldTags    map[string]api.TagReference
-		newTags    map[string]api.TagReference
+		oldTags    map[string]imageapi.TagReference
+		newTags    map[string]imageapi.TagReference
 		sarError   error
 		sarAllowed bool
 		expectSar  bool
@@ -154,8 +197,8 @@ func TestTagVerifier(t *testing.T) {
 	}{
 		"old nil, no tags": {},
 		"old nil, all tags are new": {
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -167,8 +210,8 @@ func TestTagVerifier(t *testing.T) {
 			sarAllowed: true,
 		},
 		"nil from": {
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
 						Name: "registry/old/stream:latest",
@@ -178,7 +221,7 @@ func TestTagVerifier(t *testing.T) {
 			expectSar: false,
 		},
 		"same namespace": {
-			newTags: map[string]api.TagReference{
+			newTags: map[string]imageapi.TagReference{
 				"other": {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
@@ -189,8 +232,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 		},
 		"ref unchanged": {
-			oldTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			oldTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -198,8 +241,8 @@ func TestTagVerifier(t *testing.T) {
 					},
 				},
 			},
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -210,8 +253,8 @@ func TestTagVerifier(t *testing.T) {
 			expectSar: false,
 		},
 		"invalid from name": {
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -224,8 +267,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 		},
 		"sar error": {
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -240,8 +283,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 		},
 		"sar denied": {
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -256,8 +299,8 @@ func TestTagVerifier(t *testing.T) {
 			},
 		},
 		"ref changed": {
-			oldTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			oldTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -265,8 +308,8 @@ func TestTagVerifier(t *testing.T) {
 					},
 				},
 			},
-			newTags: map[string]api.TagReference{
-				api.DefaultImageTag: {
+			newTags: map[string]imageapi.TagReference{
+				imageapi.DefaultImageTag: {
 					From: &kapi.ObjectReference{
 						Kind:      "ImageStreamTag",
 						Namespace: "otherns",
@@ -285,18 +328,18 @@ func TestTagVerifier(t *testing.T) {
 			allow: test.sarAllowed,
 		}
 
-		old := &api.ImageStream{
-			Spec: api.ImageStreamSpec{
+		old := &imageapi.ImageStream{
+			Spec: imageapi.ImageStreamSpec{
 				Tags: test.oldTags,
 			},
 		}
 
-		stream := &api.ImageStream{
+		stream := &imageapi.ImageStream{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "namespace",
 				Name:      "stream",
 			},
-			Spec: api.ImageStreamSpec{
+			Spec: imageapi.ImageStreamSpec{
 				Tags: test.newTags,
 			},
 		}
@@ -313,15 +356,19 @@ func TestTagVerifier(t *testing.T) {
 				t.Errorf("%s: sar namespace: expected %v, got %v", name, e, a)
 			}
 			expectedSar := &authorizationapi.SubjectAccessReview{
-				Action: authorizationapi.Action{
-					//				Group:        "image.openshift.io",
-					Verb:         "get",
-					Resource:     "imagestreams/layers",
-					ResourceName: "otherstream",
+				Spec: authorizationapi.SubjectAccessReviewSpec{
+					ResourceAttributes: &authorizationapi.ResourceAttributes{
+						Namespace:   "otherns",
+						Verb:        "get",
+						Group:       "image.openshift.io",
+						Resource:    "imagestreams",
+						Subresource: "layers",
+						Name:        "otherstream",
+					},
+					User:   "user",
+					Groups: []string{"group1"},
+					Extra:  map[string]authorizationapi.ExtraValue{oauthorizationapi.ScopesKey: {"a", "b"}},
 				},
-				User:   "user",
-				Groups: sets.NewString("group1"),
-				Scopes: []string{"a", "b"},
 			}
 			if e, a := expectedSar, sar.request; !reflect.DeepEqual(e, a) {
 				t.Errorf("%s: unexpected SAR request: %s", name, diff.ObjectDiff(e, a))
@@ -348,14 +395,14 @@ func TestLimitVerifier(t *testing.T) {
 
 		err := fmt.Errorf("exceeded %s", strings.Join(exceededStrings, ","))
 
-		return kapierrors.NewForbidden(api.Resource("ImageStream"), isName, err)
+		return kapierrors.NewForbidden(imageapi.Resource("ImageStream"), isName, err)
 	}
 
-	makeISEvaluator := func(maxImages, maxImageTags int64) func(string, *api.ImageStream) error {
-		return func(ns string, is *api.ImageStream) error {
+	makeISEvaluator := func(maxImages, maxImageTags int64) func(string, *imageapi.ImageStream) error {
+		return func(ns string, is *imageapi.ImageStream) error {
 			limit := kapi.ResourceList{
-				api.ResourceImageStreamImages: *resource.NewQuantity(maxImages, resource.DecimalSI),
-				api.ResourceImageStreamTags:   *resource.NewQuantity(maxImageTags, resource.DecimalSI),
+				imageapi.ResourceImageStreamImages: *resource.NewQuantity(maxImages, resource.DecimalSI),
+				imageapi.ResourceImageStreamTags:   *resource.NewQuantity(maxImageTags, resource.DecimalSI),
 			}
 			usage := admission.GetImageStreamUsage(is)
 			if less, exceeded := kquota.LessThanOrEqual(usage, limit); !less {
@@ -367,21 +414,21 @@ func TestLimitVerifier(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		isEvaluator func(string, *api.ImageStream) error
-		is          api.ImageStream
+		isEvaluator func(string, *imageapi.ImageStream) error
+		is          imageapi.ImageStream
 		expected    field.ErrorList
 	}{
 		{
 			name: "no limit",
-			is: api.ImageStream{
+			is: imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "is",
 				},
-				Status: api.ImageStreamStatus{
-					Tags: map[string]api.TagEventList{
+				Status: imageapi.ImageStreamStatus{
+					Tags: map[string]imageapi.TagEventList{
 						"latest": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
 									Image:                testutil.BaseImageWith1LayerDigest,
@@ -395,15 +442,15 @@ func TestLimitVerifier(t *testing.T) {
 
 		{
 			name: "below limit",
-			is: api.ImageStream{
+			is: imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "is",
 				},
-				Status: api.ImageStreamStatus{
-					Tags: map[string]api.TagEventList{
+				Status: imageapi.ImageStreamStatus{
+					Tags: map[string]imageapi.TagEventList{
 						"latest": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
 									Image:                testutil.BaseImageWith1LayerDigest,
@@ -418,15 +465,15 @@ func TestLimitVerifier(t *testing.T) {
 
 		{
 			name: "exceed images",
-			is: api.ImageStream{
+			is: imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "is",
 				},
-				Status: api.ImageStreamStatus{
-					Tags: map[string]api.TagEventList{
+				Status: imageapi.ImageStreamStatus{
+					Tags: map[string]imageapi.TagEventList{
 						"latest": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith1LayerDigest),
 									Image:                testutil.BaseImageWith1LayerDigest,
@@ -434,7 +481,7 @@ func TestLimitVerifier(t *testing.T) {
 							},
 						},
 						"oldest": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: testutil.MakeDockerImageReference("test", "is", testutil.BaseImageWith2LayersDigest),
 									Image:                testutil.BaseImageWith2LayersDigest,
@@ -445,60 +492,60 @@ func TestLimitVerifier(t *testing.T) {
 				},
 			},
 			isEvaluator: makeISEvaluator(1, 0),
-			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamImages}))},
+			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{imageapi.ResourceImageStreamImages}))},
 		},
 
 		{
 			name: "exceed tags",
-			is: api.ImageStream{
+			is: imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "is",
 				},
-				Spec: api.ImageStreamSpec{
-					Tags: map[string]api.TagReference{
+				Spec: imageapi.ImageStreamSpec{
+					Tags: map[string]imageapi.TagReference{
 						"new": {
 							Name: "new",
 							From: &kapi.ObjectReference{
 								Kind: "DockerImage",
 								Name: testutil.MakeDockerImageReference("test", "is", testutil.ChildImageWith2LayersDigest),
 							},
-							ReferencePolicy: api.TagReferencePolicy{
-								Type: api.SourceTagReferencePolicy,
+							ReferencePolicy: imageapi.TagReferencePolicy{
+								Type: imageapi.SourceTagReferencePolicy,
 							},
 						},
 					},
 				},
 			},
 			isEvaluator: makeISEvaluator(0, 0),
-			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamTags}))},
+			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{imageapi.ResourceImageStreamTags}))},
 		},
 
 		{
 			name: "exceed images and tags",
-			is: api.ImageStream{
+			is: imageapi.ImageStream{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "is",
 				},
-				Spec: api.ImageStreamSpec{
-					Tags: map[string]api.TagReference{
+				Spec: imageapi.ImageStreamSpec{
+					Tags: map[string]imageapi.TagReference{
 						"new": {
 							Name: "new",
 							From: &kapi.ObjectReference{
 								Kind: "DockerImage",
 								Name: testutil.MakeDockerImageReference("test", "other", testutil.BaseImageWith1LayerDigest),
 							},
-							ReferencePolicy: api.TagReferencePolicy{
-								Type: api.SourceTagReferencePolicy,
+							ReferencePolicy: imageapi.TagReferencePolicy{
+								Type: imageapi.SourceTagReferencePolicy,
 							},
 						},
 					},
 				},
-				Status: api.ImageStreamStatus{
-					Tags: map[string]api.TagEventList{
+				Status: imageapi.ImageStreamStatus{
+					Tags: map[string]imageapi.TagEventList{
 						"latest": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: testutil.MakeDockerImageReference("test", "other", testutil.BaseImageWith1LayerDigest),
 									Image:                testutil.BaseImageWith1LayerDigest,
@@ -509,7 +556,7 @@ func TestLimitVerifier(t *testing.T) {
 				},
 			},
 			isEvaluator: makeISEvaluator(0, 0),
-			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{api.ResourceImageStreamImages, api.ResourceImageStreamTags}))},
+			expected:    field.ErrorList{field.InternalError(field.NewPath(""), makeISForbiddenError("is", []kapi.ResourceName{imageapi.ResourceImageStreamImages, imageapi.ResourceImageStreamTags}))},
 		},
 	}
 
@@ -518,13 +565,13 @@ func TestLimitVerifier(t *testing.T) {
 			allow: true,
 		}
 		tagVerifier := &TagVerifier{sar}
-
+		fakeRegistry := &fakeDefaultRegistry{}
 		s := &Strategy{
 			tagVerifier: tagVerifier,
 			limitVerifier: &testutil.FakeImageStreamLimitVerifier{
 				ImageStreamEvaluator: tc.isEvaluator,
 			},
-			defaultRegistry: &fakeDefaultRegistry{},
+			registryHostnameRetriever: imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""),
 		}
 
 		ctx := apirequest.WithUser(apirequest.NewDefaultContext(), &fakeUser{})
@@ -535,7 +582,7 @@ func TestLimitVerifier(t *testing.T) {
 
 		// Update must fail the exact same way
 		tc.is.ResourceVersion = "1"
-		old := &api.ImageStream{
+		old := &imageapi.ImageStream{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:       "test",
 				Name:            "is",
@@ -550,7 +597,7 @@ func TestLimitVerifier(t *testing.T) {
 }
 
 type fakeImageStreamGetter struct {
-	stream *api.ImageStream
+	stream *imageapi.ImageStream
 }
 
 func (f *fakeImageStreamGetter) Get(ctx apirequest.Context, name string, opts *metav1.GetOptions) (runtime.Object, error) {
@@ -559,23 +606,23 @@ func (f *fakeImageStreamGetter) Get(ctx apirequest.Context, name string, opts *m
 
 func TestTagsChanged(t *testing.T) {
 	tests := map[string]struct {
-		tags               map[string]api.TagReference
-		previous           map[string]api.TagReference
-		existingTagHistory map[string]api.TagEventList
-		expectedTagHistory map[string]api.TagEventList
+		tags               map[string]imageapi.TagReference
+		previous           map[string]imageapi.TagReference
+		existingTagHistory map[string]imageapi.TagEventList
+		expectedTagHistory map[string]imageapi.TagEventList
 		stream             string
-		otherStream        *api.ImageStream
+		otherStream        *imageapi.ImageStream
 	}{
 		"no tags, no history": {
 			stream:             "registry:5000/ns/stream",
-			tags:               make(map[string]api.TagReference),
-			existingTagHistory: make(map[string]api.TagEventList),
-			expectedTagHistory: make(map[string]api.TagEventList),
+			tags:               make(map[string]imageapi.TagReference),
+			existingTagHistory: make(map[string]imageapi.TagEventList),
+			expectedTagHistory: make(map[string]imageapi.TagEventList),
 		},
 		"single tag update, preserves history": {
 			stream:   "registry:5000/ns/stream",
-			previous: map[string]api.TagReference{},
-			tags: map[string]api.TagReference{
+			previous: map[string]imageapi.TagReference{},
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -584,22 +631,22 @@ func TestTagsChanged(t *testing.T) {
 					Reference: true,
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
-				"t2": {Items: []api.TagEvent{
+			existingTagHistory: map[string]imageapi.TagEventList{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
 				}},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			expectedTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:t1",
 						Image:                "",
 					},
 				}},
-				"t2": {Items: []api.TagEvent{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -609,13 +656,13 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"empty tag ignored on create": {
 			stream:             "registry:5000/ns/stream",
-			tags:               map[string]api.TagReference{"t1": {}},
-			existingTagHistory: make(map[string]api.TagEventList),
-			expectedTagHistory: map[string]api.TagEventList{},
+			tags:               map[string]imageapi.TagReference{"t1": {}},
+			existingTagHistory: make(map[string]imageapi.TagEventList),
+			expectedTagHistory: map[string]imageapi.TagEventList{},
 		},
 		"tag to missing ignored on create": {
 			stream: "registry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -623,12 +670,12 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: make(map[string]api.TagEventList),
-			expectedTagHistory: map[string]api.TagEventList{},
+			existingTagHistory: make(map[string]imageapi.TagEventList),
+			expectedTagHistory: map[string]imageapi.TagEventList{},
 		},
 		"new tags, no history": {
 			stream: "registry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -644,15 +691,15 @@ func TestTagsChanged(t *testing.T) {
 					Reference: true,
 				},
 			},
-			existingTagHistory: make(map[string]api.TagEventList),
-			expectedTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			existingTagHistory: make(map[string]imageapi.TagEventList),
+			expectedTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:t1",
 						Image:                "",
 					},
 				}},
-				"t2": {Items: []api.TagEvent{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
@@ -661,7 +708,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"no-op": {
 			stream: "registry:5000/ns/stream",
-			previous: map[string]api.TagReference{
+			previous: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -675,7 +722,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -689,28 +736,28 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			existingTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:v1image1",
 						Image:                "v1image1",
 					},
 				}},
-				"t2": {Items: []api.TagEvent{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
 				}},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			expectedTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:v1image1",
 						Image:                "v1image1",
 					},
 				}},
-				"t2": {Items: []api.TagEvent{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -720,7 +767,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"new tag copies existing history": {
 			stream: "registry:5000/ns/stream",
-			previous: map[string]api.TagReference{
+			previous: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -734,7 +781,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "DockerImage",
@@ -757,33 +804,33 @@ func TestTagsChanged(t *testing.T) {
 					Reference: true,
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			existingTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:v1image1",
 						Image:                "v1image1",
 					},
 				}},
-				"t3": {Items: []api.TagEvent{
+				"t3": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 					},
 				}},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
-				"t1": {Items: []api.TagEvent{
+			expectedTagHistory: map[string]imageapi.TagEventList{
+				"t1": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:v1image1",
 					},
 				}},
 				// tag copies existing history
-				"t2": {Items: []api.TagEvent{
+				"t2": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream:v1image1",
 					},
 				}},
-				"t3": {Items: []api.TagEvent{
+				"t3": {Items: []imageapi.TagEvent{
 					{
 						DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 						Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -793,7 +840,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"object reference to image stream tag in same stream": {
 			stream: "registry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamTag",
@@ -801,9 +848,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
+			existingTagHistory: map[string]imageapi.TagEventList{
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -811,9 +858,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
+			expectedTagHistory: map[string]imageapi.TagEventList{
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -821,7 +868,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -832,7 +879,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"tag changes and referenced tag should react": {
 			stream: "registry:5000/ns/stream",
-			previous: map[string]api.TagReference{
+			previous: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamTag",
@@ -846,7 +893,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamImage",
@@ -860,9 +907,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
+			existingTagHistory: map[string]imageapi.TagEventList{
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
 							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
@@ -874,7 +921,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
 							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
@@ -882,7 +929,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"t2": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
 							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
@@ -890,9 +937,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
+			expectedTagHistory: map[string]imageapi.TagEventList{
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
 							Image:                "sha256:293aa25bf219f3e47472281b7e68c09bb6f315c2adf7f86a7302b85bdaa63db3",
@@ -904,7 +951,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -916,7 +963,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"t2": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -931,7 +978,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"object reference to image stream image in same stream": {
 			stream: "internalregistry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamImage",
@@ -939,9 +986,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
+			existingTagHistory: map[string]imageapi.TagEventList{
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -949,9 +996,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
+			expectedTagHistory: map[string]imageapi.TagEventList{
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -959,7 +1006,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -970,7 +1017,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"object reference to image stream image in same stream (bad digest)": {
 			stream: "internalregistry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamImage",
@@ -978,9 +1025,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{
+			existingTagHistory: map[string]imageapi.TagEventList{
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream:12345",
 							Image:                "12345",
@@ -988,9 +1035,9 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			expectedTagHistory: map[string]api.TagEventList{
+			expectedTagHistory: map[string]imageapi.TagEventList{
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream:12345",
 							Image:                "12345",
@@ -998,7 +1045,7 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 				"other": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream:12345",
 							Image:                "12345",
@@ -1009,7 +1056,7 @@ func TestTagsChanged(t *testing.T) {
 		},
 		"object reference to image stream tag in different stream": {
 			stream: "registry:5000/ns/stream",
-			tags: map[string]api.TagReference{
+			tags: map[string]imageapi.TagReference{
 				"t1": {
 					From: &kapi.ObjectReference{
 						Kind: "ImageStreamTag",
@@ -1017,10 +1064,10 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			existingTagHistory: map[string]api.TagEventList{},
-			expectedTagHistory: map[string]api.TagEventList{
+			existingTagHistory: map[string]imageapi.TagEventList{},
+			expectedTagHistory: map[string]imageapi.TagEventList{
 				"t1": {
-					Items: []api.TagEvent{
+					Items: []imageapi.TagEvent{
 						{
 							DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 							Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1028,11 +1075,11 @@ func TestTagsChanged(t *testing.T) {
 					},
 				},
 			},
-			otherStream: &api.ImageStream{
-				Status: api.ImageStreamStatus{
-					Tags: map[string]api.TagEventList{
+			otherStream: &imageapi.ImageStream{
+				Status: imageapi.ImageStreamStatus{
+					Tags: map[string]imageapi.TagEventList{
 						"other": {
-							Items: []api.TagEvent{
+							Items: []imageapi.TagEvent{
 								{
 									DockerImageReference: "registry:5000/ns/stream@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 									Image:                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1046,14 +1093,14 @@ func TestTagsChanged(t *testing.T) {
 	}
 
 	for testName, test := range tests {
-		stream := &api.ImageStream{
+		stream := &imageapi.ImageStream{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "stream",
 			},
-			Spec: api.ImageStreamSpec{
+			Spec: imageapi.ImageStreamSpec{
 				Tags: test.tags,
 			},
-			Status: api.ImageStreamStatus{
+			Status: imageapi.ImageStreamStatus{
 				DockerImageRepository: test.stream,
 				Tags: test.existingTagHistory,
 			},
@@ -1061,17 +1108,20 @@ func TestTagsChanged(t *testing.T) {
 		// we can't reuse the same map twice, it causes both to be modified during updates
 		var previousTagHistory = test.existingTagHistory
 		if previousTagHistory != nil {
-			obj, _ := kapi.Scheme.DeepCopy(previousTagHistory)
-			previousTagHistory, _ = obj.(map[string]api.TagEventList)
+			previousTagHistoryCopy := map[string]imageapi.TagEventList{}
+			for k, v := range previousTagHistory {
+				previousTagHistory[k] = *v.DeepCopy()
+			}
+			previousTagHistory = previousTagHistoryCopy
 		}
-		previousStream := &api.ImageStream{
+		previousStream := &imageapi.ImageStream{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "stream",
 			},
-			Spec: api.ImageStreamSpec{
+			Spec: imageapi.ImageStreamSpec{
 				Tags: test.previous,
 			},
-			Status: api.ImageStreamStatus{
+			Status: imageapi.ImageStreamStatus{
 				DockerImageRepository: test.stream,
 				Tags: previousTagHistory,
 			},
@@ -1080,9 +1130,10 @@ func TestTagsChanged(t *testing.T) {
 			previousStream = nil
 		}
 
+		fakeRegistry := &fakeDefaultRegistry{}
 		s := &Strategy{
-			defaultRegistry:   &fakeDefaultRegistry{},
-			imageStreamGetter: &fakeImageStreamGetter{test.otherStream},
+			registryHostnameRetriever: imageapi.DefaultRegistryHostnameRetriever(fakeRegistry.DefaultRegistry, "", ""),
+			imageStreamGetter:         &fakeImageStreamGetter{test.otherStream},
 		}
 		err := s.tagsChanged(previousStream, stream)
 		if len(err) > 0 {
@@ -1120,34 +1171,34 @@ func TestTagsChanged(t *testing.T) {
 
 func TestTagRefChanged(t *testing.T) {
 	tests := map[string]struct {
-		old, next api.TagReference
+		old, next imageapi.TagReference
 		expected  bool
 	}{
 		"no ref, no from": {
-			old:      api.TagReference{},
-			next:     api.TagReference{},
+			old:      imageapi.TagReference{},
+			next:     imageapi.TagReference{},
 			expected: false,
 		},
 		"same ref": {
-			old:      api.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
-			next:     api.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
+			old:      imageapi.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
+			next:     imageapi.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
 			expected: false,
 		},
 		"different ref": {
-			old:      api.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
-			next:     api.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "bar"}},
+			old:      imageapi.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "foo"}},
+			next:     imageapi.TagReference{From: &kapi.ObjectReference{Kind: "DockerImage", Name: "bar"}},
 			expected: true,
 		},
 		"no kind, no name": {
-			old: api.TagReference{},
-			next: api.TagReference{
+			old: imageapi.TagReference{},
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{},
 			},
 			expected: false,
 		},
 		"old from nil": {
-			old: api.TagReference{},
-			next: api.TagReference{
+			old: imageapi.TagReference{},
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "another",
 					Name:      "other:latest",
@@ -1156,12 +1207,12 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different namespace - old implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "another",
 					Name:      "other:latest",
@@ -1170,13 +1221,13 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different namespace - old explicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "something",
 					Name:      "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "another",
 					Name:      "other:latest",
@@ -1185,13 +1236,13 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different namespace - next implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "something",
 					Name:      "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},
@@ -1199,12 +1250,12 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different name - old namespace implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:other",
@@ -1213,13 +1264,13 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different name - old namespace explicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:other",
@@ -1228,13 +1279,13 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"different name - new namespace implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:other",
 				},
@@ -1242,12 +1293,12 @@ func TestTagRefChanged(t *testing.T) {
 			expected: true,
 		},
 		"same name - old namespace implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:latest",
@@ -1256,13 +1307,13 @@ func TestTagRefChanged(t *testing.T) {
 			expected: false,
 		},
 		"same name - old namespace explicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Namespace: "streamnamespace",
 					Name:      "other:latest",
@@ -1271,12 +1322,12 @@ func TestTagRefChanged(t *testing.T) {
 			expected: false,
 		},
 		"same name - both namespaces implicit": {
-			old: api.TagReference{
+			old: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},
 			},
-			next: api.TagReference{
+			next: imageapi.TagReference{
 				From: &kapi.ObjectReference{
 					Name: "other:latest",
 				},

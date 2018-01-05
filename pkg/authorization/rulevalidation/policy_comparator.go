@@ -5,7 +5,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 )
 
 // Covers determines whether or not the ownerRules cover the servantRules in terms of allowed actions.
@@ -77,7 +77,7 @@ func BreakdownRule(rule authorizationapi.PolicyRule) []authorizationapi.PolicyRu
 func breakdownRuleForGroup(group string, rule authorizationapi.PolicyRule) []authorizationapi.PolicyRule {
 	subrules := []authorizationapi.PolicyRule{}
 
-	for resource := range authorizationapi.NormalizeResources(rule.Resources) {
+	for resource := range rule.Resources {
 		for verb := range rule.Verbs {
 			if len(rule.ResourceNames) > 0 {
 				for _, resourceName := range rule.ResourceNames.List() {
@@ -101,7 +101,7 @@ func ruleCovers(ownerRule, subrule authorizationapi.PolicyRule) bool {
 		return false
 	}
 
-	allResources := authorizationapi.NormalizeResources(ownerRule.Resources)
+	allResources := ownerRule.Resources
 
 	ownerGroups := sets.NewString(ownerRule.APIGroups...)
 	groupMatches := ownerGroups.Has(authorizationapi.APIGroupAll) || ownerGroups.HasAll(subrule.APIGroups...) || (len(ownerRule.APIGroups) == 0 && len(subrule.APIGroups) == 0)

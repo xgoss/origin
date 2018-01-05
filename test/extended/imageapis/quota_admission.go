@@ -7,12 +7,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kutilerrors "k8s.io/apimachinery/pkg/util/errors"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	imagesutil "github.com/openshift/origin/test/extended/images"
 	exutil "github.com/openshift/origin/test/extended/util"
 	testutil "github.com/openshift/origin/test/util"
@@ -23,10 +23,10 @@ const (
 
 	quotaName = "isquota"
 
-	waitTimeout = time.Second * 30
+	waitTimeout = time.Second * 600
 )
 
-var _ = g.Describe("[imageapis] openshift resource quota admission", func() {
+var _ = g.Describe("[Feature:ImageQuota][registry][Serial] Image resource quota", func() {
 	defer g.GinkgoRecover()
 	var oc = exutil.NewCLI("resourcequota-admission", exutil.KubeConfigPath())
 
@@ -60,25 +60,25 @@ var _ = g.Describe("[imageapis] openshift resource quota admission", func() {
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image exceeding quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "refused", imageSize, 1, outSink, false)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "refused", imageSize, 1, outSink, false, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		quota, err = bumpQuota(oc, imageapi.ResourceImageStreams, 1)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image below quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "tag1", imageSize, 1, outSink, true)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "tag1", imageSize, 1, outSink, true, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		used, err := waitForResourceQuotaSync(oc, quotaName, quota)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(assertQuotasEqual(used, quota)).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image to existing image stream %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "tag2", imageSize, 1, outSink, true)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "first", "tag2", imageSize, 1, outSink, true, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image exceeding quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "second", "refused", imageSize, 1, outSink, false)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "second", "refused", imageSize, 1, outSink, false, true)
 
 		quota, err = bumpQuota(oc, imageapi.ResourceImageStreams, 2)
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -86,18 +86,18 @@ var _ = g.Describe("[imageapis] openshift resource quota admission", func() {
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image below quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "second", "tag1", imageSize, 1, outSink, true)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "second", "tag1", imageSize, 1, outSink, true, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		used, err = waitForResourceQuotaSync(oc, quotaName, quota)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(assertQuotasEqual(used, quota)).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image exceeding quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "third", "refused", imageSize, 1, outSink, false)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "third", "refused", imageSize, 1, outSink, false, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("deleting first image stream")
-		err = oc.Client().ImageStreams(oc.Namespace()).Delete("first")
+		err = oc.ImageClient().Image().ImageStreams(oc.Namespace()).Delete("first", nil)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		used, err = exutil.WaitForResourceQuotaSync(
 			oc.InternalKubeClient().Core().ResourceQuotas(oc.Namespace()),
@@ -110,7 +110,7 @@ var _ = g.Describe("[imageapis] openshift resource quota admission", func() {
 		o.Expect(assertQuotasEqual(used, kapi.ResourceList{imageapi.ResourceImageStreams: resource.MustParse("1")})).NotTo(o.HaveOccurred())
 
 		g.By(fmt.Sprintf("trying to push image below quota %v", quota))
-		_, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "third", "tag", imageSize, 1, outSink, true)
+		_, _, err = imagesutil.BuildAndPushImageOfSizeWithDocker(oc, dClient, "third", "tag", imageSize, 1, outSink, true, true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 		used, err = waitForResourceQuotaSync(oc, quotaName, quota)
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -220,14 +220,14 @@ func deleteTestImagesAndStreams(oc *exutil.CLI) {
 		oc.Namespace(),
 	} {
 		g.By(fmt.Sprintf("Deleting images and image streams in project %q", projectName))
-		iss, err := oc.AdminClient().ImageStreams(projectName).List(metav1.ListOptions{})
+		iss, err := oc.AdminImageClient().Image().ImageStreams(projectName).List(metav1.ListOptions{})
 		if err != nil {
 			continue
 		}
 		for _, is := range iss.Items {
 			for _, history := range is.Status.Tags {
 				for i := range history.Items {
-					oc.AdminClient().Images().Delete(history.Items[i].Image)
+					oc.AdminImageClient().Image().Images().Delete(history.Items[i].Image, nil)
 				}
 			}
 			for _, tagRef := range is.Spec.Tags {
@@ -237,7 +237,7 @@ func deleteTestImagesAndStreams(oc *exutil.CLI) {
 					if err != nil {
 						continue
 					}
-					oc.AdminClient().Images().Delete(id)
+					oc.AdminImageClient().Image().Images().Delete(id, nil)
 				}
 			}
 		}
@@ -245,7 +245,7 @@ func deleteTestImagesAndStreams(oc *exutil.CLI) {
 		// let the extended framework take care of the current namespace
 		if projectName != oc.Namespace() {
 			g.By(fmt.Sprintf("Deleting project %q", projectName))
-			oc.AdminClient().Projects().Delete(projectName)
+			oc.AdminProjectClient().Project().Projects().Delete(projectName, nil)
 		}
 	}
 }

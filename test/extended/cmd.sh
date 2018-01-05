@@ -9,19 +9,16 @@ os::util::environment::setup_time_vars
 
 os::build::setup_env
 
-function cleanup()
-{
-	out=$?
+function cleanup() {
+	return_code=$?
+
 	docker rmi test/scratchimage
-	cleanup_openshift
 
-	os::test::junit::generate_oscmd_report
-
-	os::log::info "Exiting"
-	return "${out}"
+	os::test::junit::generate_report
+	os::cleanup::all
+	os::util::describe_return_code "${return_code}"
+	exit "${return_code}"
 }
-
-trap "exit" INT TERM
 trap "cleanup" EXIT
 
 os::log::info "Starting server"
@@ -35,16 +32,11 @@ os::log::system::start
 os::start::configure_server
 os::start::server
 
-# Allow setting $JUNIT_REPORT to toggle output behavior
-if [[ -n "${JUNIT_REPORT:-}" ]]; then
-	export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
-fi
-
 export KUBECONFIG="${ADMIN_KUBECONFIG}"
 
 oc login -u system:admin -n default
 # let everyone be able to see stuff in the default namespace
-oadm policy add-role-to-group view system:authenticated -n default
+oc adm policy add-role-to-group view system:authenticated -n default
 
 os::start::registry
 oc rollout status dc/docker-registry
@@ -155,7 +147,7 @@ os::test::junit::declare_suite_start "extended/cmd/service-signer"
 # check to make sure that service serving cert signing works correctly
 # nginx currently needs to run as root
 os::cmd::expect_success "oc login -u system:admin -n default"
-os::cmd::expect_success "oadm policy add-scc-to-user anyuid system:serviceaccount:service-serving-cert-generation:default"
+os::cmd::expect_success "oc adm policy add-scc-to-user anyuid system:serviceaccount:service-serving-cert-generation:default"
 
 os::cmd::expect_success "oc login -u serving-cert -p asdf"
 VERBOSE=true os::cmd::expect_success "oc new-project service-serving-cert-generation"

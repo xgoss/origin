@@ -1,9 +1,21 @@
 package azure
 
+// Copyright 2017 Microsoft Corporation
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
 import (
 	"fmt"
-	"github.com/Azure/go-autorest/autorest"
-	"github.com/Azure/go-autorest/autorest/mocks"
 	"io/ioutil"
 	"net/http"
 	"reflect"
@@ -11,6 +23,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Azure/go-autorest/autorest"
+	"github.com/Azure/go-autorest/autorest/mocks"
 )
 
 func TestGetAsyncOperation_ReturnsAzureAsyncOperationHeader(t *testing.T) {
@@ -357,7 +372,7 @@ func TestUpdatePollingState_UsesTheObjectLocationIfAsyncHeadersAreMissing(t *tes
 	resp := newAsynchronousResponse()
 	resp.Header.Del(http.CanonicalHeaderKey(headerAsyncOperation))
 	resp.Header.Del(http.CanonicalHeaderKey(autorest.HeaderLocation))
-	resp.Request.Method = methodPatch
+	resp.Request.Method = http.MethodPatch
 
 	ps := pollingState{}
 	updatePollingState(resp, &ps)
@@ -368,7 +383,7 @@ func TestUpdatePollingState_UsesTheObjectLocationIfAsyncHeadersAreMissing(t *tes
 }
 
 func TestUpdatePollingState_RecognizesLowerCaseHTTPVerbs(t *testing.T) {
-	for _, m := range []string{"patch", "put", "get"} {
+	for _, m := range []string{strings.ToLower(http.MethodPatch), strings.ToLower(http.MethodPut), strings.ToLower(http.MethodGet)} {
 		resp := newAsynchronousResponse()
 		resp.Header.Del(http.CanonicalHeaderKey(headerAsyncOperation))
 		resp.Header.Del(http.CanonicalHeaderKey(autorest.HeaderLocation))
@@ -388,7 +403,7 @@ func TestUpdatePollingState_ReturnsAnErrorIfAsyncHeadersAreMissingForANewOrDelet
 	resp.Header.Del(http.CanonicalHeaderKey(headerAsyncOperation))
 	resp.Header.Del(http.CanonicalHeaderKey(autorest.HeaderLocation))
 
-	for _, m := range []string{methodDelete, methodPost} {
+	for _, m := range []string{http.MethodDelete, http.MethodPost} {
 		resp.Request.Method = m
 		err := updatePollingState(resp, &pollingState{})
 		if err == nil {

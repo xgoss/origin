@@ -6,9 +6,9 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 )
 
 // BuildByBuildConfigIndexFunc indexes Build items by their associated BuildConfig, if none, index with key "orphan"
@@ -57,7 +57,7 @@ func NewFilterBeforePredicate(d time.Duration) FilterPredicate {
 	now := metav1.Now()
 	before := metav1.NewTime(now.Time.Add(-1 * d))
 	return func(build *buildapi.Build) bool {
-		return build.CreationTimestamp.Before(before)
+		return build.CreationTimestamp.Before(&before)
 	}
 }
 

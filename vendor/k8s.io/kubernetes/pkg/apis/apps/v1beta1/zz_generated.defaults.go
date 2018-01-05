@@ -21,27 +21,31 @@ limitations under the License.
 package v1beta1
 
 import (
+	v1beta1 "k8s.io/api/apps/v1beta1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
-	v1 "k8s.io/kubernetes/pkg/api/v1"
+	v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 )
 
 // RegisterDefaults adds defaulters functions to the given scheme.
 // Public to allow building arbitrary schemes.
 // All generated defaulters are covering - they call all nested defaulters.
 func RegisterDefaults(scheme *runtime.Scheme) error {
-	scheme.AddTypeDefaultingFunc(&Deployment{}, func(obj interface{}) { SetObjectDefaults_Deployment(obj.(*Deployment)) })
-	scheme.AddTypeDefaultingFunc(&DeploymentList{}, func(obj interface{}) { SetObjectDefaults_DeploymentList(obj.(*DeploymentList)) })
-	scheme.AddTypeDefaultingFunc(&StatefulSet{}, func(obj interface{}) { SetObjectDefaults_StatefulSet(obj.(*StatefulSet)) })
-	scheme.AddTypeDefaultingFunc(&StatefulSetList{}, func(obj interface{}) { SetObjectDefaults_StatefulSetList(obj.(*StatefulSetList)) })
+	scheme.AddTypeDefaultingFunc(&v1beta1.Deployment{}, func(obj interface{}) { SetObjectDefaults_Deployment(obj.(*v1beta1.Deployment)) })
+	scheme.AddTypeDefaultingFunc(&v1beta1.DeploymentList{}, func(obj interface{}) { SetObjectDefaults_DeploymentList(obj.(*v1beta1.DeploymentList)) })
+	scheme.AddTypeDefaultingFunc(&v1beta1.StatefulSet{}, func(obj interface{}) { SetObjectDefaults_StatefulSet(obj.(*v1beta1.StatefulSet)) })
+	scheme.AddTypeDefaultingFunc(&v1beta1.StatefulSetList{}, func(obj interface{}) { SetObjectDefaults_StatefulSetList(obj.(*v1beta1.StatefulSetList)) })
 	return nil
 }
 
-func SetObjectDefaults_Deployment(in *Deployment) {
+func SetObjectDefaults_Deployment(in *v1beta1.Deployment) {
 	SetDefaults_Deployment(in)
 	v1.SetDefaults_PodSpec(&in.Spec.Template.Spec)
 	for i := range in.Spec.Template.Spec.Volumes {
 		a := &in.Spec.Template.Spec.Volumes[i]
 		v1.SetDefaults_Volume(a)
+		if a.VolumeSource.HostPath != nil {
+			v1.SetDefaults_HostPathVolumeSource(a.VolumeSource.HostPath)
+		}
 		if a.VolumeSource.Secret != nil {
 			v1.SetDefaults_SecretVolumeSource(a.VolumeSource.Secret)
 		}
@@ -82,15 +86,6 @@ func SetObjectDefaults_Deployment(in *Deployment) {
 		}
 		if a.VolumeSource.ScaleIO != nil {
 			v1.SetDefaults_ScaleIOVolumeSource(a.VolumeSource.ScaleIO)
-		}
-		if a.VolumeSource.Metadata != nil {
-			v1.SetDefaults_DeprecatedDownwardAPIVolumeSource(a.VolumeSource.Metadata)
-			for j := range a.VolumeSource.Metadata.Items {
-				b := &a.VolumeSource.Metadata.Items[j]
-				if b.FieldRef != nil {
-					v1.SetDefaults_ObjectFieldSelector(b.FieldRef)
-				}
-			}
 		}
 	}
 	for i := range in.Spec.Template.Spec.InitContainers {
@@ -179,19 +174,22 @@ func SetObjectDefaults_Deployment(in *Deployment) {
 	}
 }
 
-func SetObjectDefaults_DeploymentList(in *DeploymentList) {
+func SetObjectDefaults_DeploymentList(in *v1beta1.DeploymentList) {
 	for i := range in.Items {
 		a := &in.Items[i]
 		SetObjectDefaults_Deployment(a)
 	}
 }
 
-func SetObjectDefaults_StatefulSet(in *StatefulSet) {
+func SetObjectDefaults_StatefulSet(in *v1beta1.StatefulSet) {
 	SetDefaults_StatefulSet(in)
 	v1.SetDefaults_PodSpec(&in.Spec.Template.Spec)
 	for i := range in.Spec.Template.Spec.Volumes {
 		a := &in.Spec.Template.Spec.Volumes[i]
 		v1.SetDefaults_Volume(a)
+		if a.VolumeSource.HostPath != nil {
+			v1.SetDefaults_HostPathVolumeSource(a.VolumeSource.HostPath)
+		}
 		if a.VolumeSource.Secret != nil {
 			v1.SetDefaults_SecretVolumeSource(a.VolumeSource.Secret)
 		}
@@ -232,15 +230,6 @@ func SetObjectDefaults_StatefulSet(in *StatefulSet) {
 		}
 		if a.VolumeSource.ScaleIO != nil {
 			v1.SetDefaults_ScaleIOVolumeSource(a.VolumeSource.ScaleIO)
-		}
-		if a.VolumeSource.Metadata != nil {
-			v1.SetDefaults_DeprecatedDownwardAPIVolumeSource(a.VolumeSource.Metadata)
-			for j := range a.VolumeSource.Metadata.Items {
-				b := &a.VolumeSource.Metadata.Items[j]
-				if b.FieldRef != nil {
-					v1.SetDefaults_ObjectFieldSelector(b.FieldRef)
-				}
-			}
 		}
 	}
 	for i := range in.Spec.Template.Spec.InitContainers {
@@ -336,7 +325,7 @@ func SetObjectDefaults_StatefulSet(in *StatefulSet) {
 	}
 }
 
-func SetObjectDefaults_StatefulSetList(in *StatefulSetList) {
+func SetObjectDefaults_StatefulSetList(in *v1beta1.StatefulSetList) {
 	for i := range in.Items {
 		a := &in.Items[i]
 		SetObjectDefaults_StatefulSet(a)

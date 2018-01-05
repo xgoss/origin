@@ -8,24 +8,30 @@ import (
 	"github.com/golang/glog"
 	gocontext "golang.org/x/net/context"
 
+	corev1 "k8s.io/api/core/v1"
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/diff"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	authorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
+	kapiv1 "k8s.io/kubernetes/pkg/apis/core/v1"
+	authorizationclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/authorization/internalversion"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/client"
+	imageapiv1 "github.com/openshift/api/image/v1"
+	authorizationutil "github.com/openshift/origin/pkg/authorization/util"
 	serverapi "github.com/openshift/origin/pkg/cmd/server/api"
-	"github.com/openshift/origin/pkg/dockerregistry"
-	"github.com/openshift/origin/pkg/image/api"
-	imageapiv1 "github.com/openshift/origin/pkg/image/api/v1"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
 	"github.com/openshift/origin/pkg/image/importer"
+	"github.com/openshift/origin/pkg/image/importer/dockerv1client"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
+	"github.com/openshift/origin/pkg/image/util"
 	quotautil "github.com/openshift/origin/pkg/quota/util"
 )
 
@@ -34,7 +40,7 @@ type ImporterFunc func(r importer.RepositoryRetriever) importer.Interface
 
 // ImporterDockerRegistryFunc returns an instance of a docker client that should be used per invocation of import,
 // may be nil if no legacy import capability is required.
-type ImporterDockerRegistryFunc func() dockerregistry.Client
+type ImporterDockerRegistryFunc func() dockerv1client.Client
 
 // REST implements the RESTStorage interface for ImageStreamImport
 type REST struct {
@@ -42,31 +48,33 @@ type REST struct {
 	streams           imagestream.Registry
 	internalStreams   rest.CreaterUpdater
 	images            rest.Creater
-	secrets           client.ImageStreamSecretsNamespacer
+	isClient          imageclient.ImageStreamsGetter
 	transport         http.RoundTripper
 	insecureTransport http.RoundTripper
 	clientFn          ImporterDockerRegistryFunc
 	strategy          *strategy
-	sarClient         client.SubjectAccessReviewInterface
+	sarClient         authorizationclient.SubjectAccessReviewInterface
 }
+
+var _ rest.Creater = &REST{}
 
 // NewREST returns a REST storage implementation that handles importing images. The clientFn argument is optional
 // if v1 Docker Registry importing is not required. Insecure transport is optional, and both transports should not
 // include client certs unless you wish to allow the entire cluster to import using those certs.
 func NewREST(importFn ImporterFunc, streams imagestream.Registry, internalStreams rest.CreaterUpdater,
-	images rest.Creater, secrets client.ImageStreamSecretsNamespacer,
+	images rest.Creater, isClient imageclient.ImageStreamsGetter,
 	transport, insecureTransport http.RoundTripper,
 	clientFn ImporterDockerRegistryFunc,
 	allowedImportRegistries *serverapi.AllowedRegistries,
-	registryFn api.DefaultRegistryFunc,
-	sarClient client.SubjectAccessReviewInterface,
+	registryFn imageapi.RegistryHostnameRetriever,
+	sarClient authorizationclient.SubjectAccessReviewInterface,
 ) *REST {
 	return &REST{
 		importFn:          importFn,
 		streams:           streams,
 		internalStreams:   internalStreams,
 		images:            images,
-		secrets:           secrets,
+		isClient:          isClient,
 		transport:         transport,
 		insecureTransport: insecureTransport,
 		clientFn:          clientFn,
@@ -77,11 +85,11 @@ func NewREST(importFn ImporterFunc, streams imagestream.Registry, internalStream
 
 // New is only implemented to make REST implement RESTStorage
 func (r *REST) New() runtime.Object {
-	return &api.ImageStreamImport{}
+	return &imageapi.ImageStreamImport{}
 }
 
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Object, error) {
-	isi, ok := obj.(*api.ImageStreamImport)
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+	isi, ok := obj.(*imageapi.ImageStreamImport)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("obj is not an ImageStreamImport: %#v", obj))
 	}
@@ -89,6 +97,9 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 	inputMeta := isi.ObjectMeta
 
 	if err := rest.BeforeCreate(r.strategy, ctx, obj); err != nil {
+		return nil, err
+	}
+	if err := createValidation(obj.DeepCopyObject()); err != nil {
 		return nil, err
 	}
 
@@ -100,37 +111,37 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 	if !ok {
 		return nil, kapierrors.NewBadRequest("unable to get user from context")
 	}
-	isCreateImage, err := r.sarClient.Create(
-		&authorizationapi.SubjectAccessReview{
-			User: user.GetName(),
-			Action: authorizationapi.Action{
+	createImageSAR := authorizationutil.AddUserToSAR(user, &authorizationapi.SubjectAccessReview{
+		Spec: authorizationapi.SubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationapi.ResourceAttributes{
 				Verb:     "create",
-				Group:    api.GroupName,
+				Group:    imageapi.GroupName,
 				Resource: "images",
 			},
 		},
-	)
+	})
+	isCreateImage, err := r.sarClient.Create(createImageSAR)
 	if err != nil {
 		return nil, err
 	}
 
-	isCreateImageStreamMapping, err := r.sarClient.Create(
-		&authorizationapi.SubjectAccessReview{
-			User: user.GetName(),
-			Action: authorizationapi.Action{
+	createImageStreamMappingSAR := authorizationutil.AddUserToSAR(user, &authorizationapi.SubjectAccessReview{
+		Spec: authorizationapi.SubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationapi.ResourceAttributes{
 				Verb:     "create",
-				Group:    api.GroupName,
+				Group:    imageapi.GroupName,
 				Resource: "imagestreammapping",
 			},
 		},
-	)
+	})
+	isCreateImageStreamMapping, err := r.sarClient.Create(createImageStreamMappingSAR)
 	if err != nil {
 		return nil, err
 	}
 
-	if !isCreateImage.Allowed && !isCreateImageStreamMapping.Allowed {
+	if !isCreateImage.Status.Allowed && !isCreateImageStreamMapping.Status.Allowed {
 		if errs := r.strategy.ValidateAllowedRegistries(isi); len(errs) != 0 {
-			return nil, kapierrors.NewInvalid(api.Kind("ImageStreamImport"), isi.Name, errs)
+			return nil, kapierrors.NewInvalid(imageapi.Kind("ImageStreamImport"), isi.Name, errs)
 		}
 	}
 
@@ -145,17 +156,54 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 		}
 	}
 
+	create := false
+	stream, err := r.streams.GetImageStream(ctx, isi.Name, &metav1.GetOptions{})
+	if err != nil {
+		if !kapierrors.IsNotFound(err) {
+			return nil, err
+		}
+		// consistency check, stream must exist
+		if len(inputMeta.ResourceVersion) > 0 || len(inputMeta.UID) > 0 {
+			return nil, err
+		}
+		create = true
+		stream = &imageapi.ImageStream{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       isi.Name,
+				Namespace:  namespace,
+				Generation: 0,
+			},
+		}
+	} else {
+		if len(inputMeta.ResourceVersion) > 0 && inputMeta.ResourceVersion != stream.ResourceVersion {
+			glog.V(4).Infof("DEBUG: mismatch between requested ResourceVersion %s and located ResourceVersion %s", inputMeta.ResourceVersion, stream.ResourceVersion)
+			return nil, kapierrors.NewConflict(imageapi.Resource("imagestream"), inputMeta.Name, fmt.Errorf("the image stream was updated from %q to %q", inputMeta.ResourceVersion, stream.ResourceVersion))
+		}
+		if len(inputMeta.UID) > 0 && inputMeta.UID != stream.UID {
+			glog.V(4).Infof("DEBUG: mismatch between requested UID %s and located UID %s", inputMeta.UID, stream.UID)
+			return nil, kapierrors.NewNotFound(imageapi.Resource("imagestream"), inputMeta.Name)
+		}
+	}
+
 	// only load secrets if we need them
-	credentials := importer.NewLazyCredentialsForSecrets(func() ([]kapi.Secret, error) {
-		secrets, err := r.secrets.ImageStreamSecrets(namespace).Secrets(isi.Name, metav1.ListOptions{})
+	credentials := importer.NewLazyCredentialsForSecrets(func() ([]corev1.Secret, error) {
+		secrets, err := r.isClient.ImageStreams(namespace).Secrets(isi.Name, metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
-		return secrets.Items, nil
+		secretsv1 := make([]corev1.Secret, len(secrets.Items))
+		for i, secret := range secrets.Items {
+			err := kapiv1.Convert_core_Secret_To_v1_Secret(&secret, &secretsv1[i], nil)
+			if err != nil {
+				utilruntime.HandleError(err)
+				continue
+			}
+		}
+		return secretsv1, nil
 	})
 	importCtx := importer.NewContext(r.transport, r.insecureTransport).WithCredentials(credentials)
 	imports := r.importFn(importCtx)
-	if err := imports.Import(ctx.(gocontext.Context), isi); err != nil {
+	if err := imports.Import(ctx.(gocontext.Context), isi, stream); err != nil {
 		return nil, kapierrors.NewInternalError(err)
 	}
 
@@ -184,50 +232,18 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 		return isi, nil
 	}
 
-	create := false
-	stream, err := r.streams.GetImageStream(ctx, isi.Name, &metav1.GetOptions{})
-	if err != nil {
-		if !kapierrors.IsNotFound(err) {
-			return nil, err
-		}
-		// consistency check, stream must exist
-		if len(inputMeta.ResourceVersion) > 0 || len(inputMeta.UID) > 0 {
-			return nil, err
-		}
-		create = true
-		stream = &api.ImageStream{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:       isi.Name,
-				Namespace:  namespace,
-				Generation: 0,
-			},
-		}
-	} else {
-		if len(inputMeta.ResourceVersion) > 0 && inputMeta.ResourceVersion != stream.ResourceVersion {
-			glog.V(4).Infof("DEBUG: mismatch between requested ResourceVersion %s and located ResourceVersion %s", inputMeta.ResourceVersion, stream.ResourceVersion)
-			return nil, kapierrors.NewConflict(api.Resource("imagestream"), inputMeta.Name, fmt.Errorf("the image stream was updated from %q to %q", inputMeta.ResourceVersion, stream.ResourceVersion))
-		}
-		if len(inputMeta.UID) > 0 && inputMeta.UID != stream.UID {
-			glog.V(4).Infof("DEBUG: mismatch between requested UID %s and located UID %s", inputMeta.UID, stream.UID)
-			return nil, kapierrors.NewNotFound(api.Resource("imagestream"), inputMeta.Name)
-		}
-	}
-
 	if stream.Annotations == nil {
 		stream.Annotations = make(map[string]string)
 	}
 	now := metav1.Now()
-	_, hasAnnotation := stream.Annotations[api.DockerImageRepositoryCheckAnnotation]
+	_, hasAnnotation := stream.Annotations[imageapi.DockerImageRepositoryCheckAnnotation]
 	nextGeneration := stream.Generation + 1
 
-	original, err := kapi.Scheme.DeepCopy(stream)
-	if err != nil {
-		return nil, err
-	}
+	original := stream.DeepCopy()
 
 	// walk the retrieved images, ensuring each one exists in etcd
 	importedImages := make(map[string]error)
-	updatedImages := make(map[string]*api.Image)
+	updatedImages := make(map[string]*imageapi.Image)
 
 	if spec := isi.Spec.Repository; spec != nil {
 		for i, status := range isi.Status.Repository.Images {
@@ -236,12 +252,12 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 			}
 
 			image := status.Image
-			ref, err := api.ParseDockerImageReference(image.DockerImageReference)
+			ref, err := imageapi.ParseDockerImageReference(image.DockerImageReference)
 			if err != nil {
 				utilruntime.HandleError(fmt.Errorf("unable to parse image reference during import: %v", err))
 				continue
 			}
-			from, err := api.ParseDockerImageReference(spec.From.Name)
+			from, err := imageapi.ParseDockerImageReference(spec.From.Name)
 			if err != nil {
 				utilruntime.HandleError(fmt.Errorf("unable to parse from reference during import: %v", err))
 				continue
@@ -294,34 +310,34 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 
 	// ensure defaulting is applied by round trip converting
 	// TODO: convert to using versioned types.
-	external, err := kapi.Scheme.ConvertToVersion(stream, imageapiv1.SchemeGroupVersion)
+	external, err := legacyscheme.Scheme.ConvertToVersion(stream, imageapiv1.SchemeGroupVersion)
 	if err != nil {
 		return nil, err
 	}
-	kapi.Scheme.Default(external)
-	internal, err := kapi.Scheme.ConvertToVersion(external, api.SchemeGroupVersion)
+	legacyscheme.Scheme.Default(external)
+	internal, err := legacyscheme.Scheme.ConvertToVersion(external, imageapi.SchemeGroupVersion)
 	if err != nil {
 		return nil, err
 	}
-	stream = internal.(*api.ImageStream)
+	stream = internal.(*imageapi.ImageStream)
 
 	// if and only if we have changes between the original and the imported stream, trigger
 	// an import
-	hasChanges := !kapi.Semantic.DeepEqual(original, stream)
+	hasChanges := !kapihelper.Semantic.DeepEqual(original, stream)
 	if create {
-		stream.Annotations[api.DockerImageRepositoryCheckAnnotation] = now.UTC().Format(time.RFC3339)
+		stream.Annotations[imageapi.DockerImageRepositoryCheckAnnotation] = now.UTC().Format(time.RFC3339)
 		glog.V(4).Infof("create new stream: %#v", stream)
-		obj, err = r.internalStreams.Create(ctx, stream)
+		obj, err = r.internalStreams.Create(ctx, stream, rest.ValidateAllObjectFunc, false)
 	} else {
 		if hasAnnotation && !hasChanges {
 			glog.V(4).Infof("stream did not change: %#v", stream)
-			obj, err = original.(*api.ImageStream), nil
+			obj, err = original, nil
 		} else {
 			if glog.V(4) {
 				glog.V(4).Infof("updating stream %s", diff.ObjectDiff(original, stream))
 			}
-			stream.Annotations[api.DockerImageRepositoryCheckAnnotation] = now.UTC().Format(time.RFC3339)
-			obj, _, err = r.internalStreams.Update(ctx, stream.Name, rest.DefaultUpdatedObjectInfo(stream, kapi.Scheme))
+			stream.Annotations[imageapi.DockerImageRepositoryCheckAnnotation] = now.UTC().Format(time.RFC3339)
+			obj, _, err = r.internalStreams.Update(ctx, stream.Name, rest.DefaultUpdatedObjectInfo(stream), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 		}
 	}
 
@@ -329,10 +345,10 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 		// if we have am admission limit error then record the conditions on the original stream.  Quota errors
 		// will be recorded by the importer.
 		if quotautil.IsErrorLimitExceeded(err) {
-			originalStream := original.(*api.ImageStream)
+			originalStream := original
 			recordLimitExceededStatus(originalStream, stream, err, now, nextGeneration)
 			var limitErr error
-			obj, _, limitErr = r.internalStreams.Update(ctx, stream.Name, rest.DefaultUpdatedObjectInfo(originalStream, kapi.Scheme))
+			obj, _, limitErr = r.internalStreams.Update(ctx, stream.Name, rest.DefaultUpdatedObjectInfo(originalStream), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 			if limitErr != nil {
 				utilruntime.HandleError(fmt.Errorf("failed to record limit exceeded status in image stream %s/%s: %v", stream.Namespace, stream.Name, limitErr))
 			}
@@ -340,20 +356,20 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 
 		return nil, err
 	}
-	isi.Status.Import = obj.(*api.ImageStream)
+	isi.Status.Import = obj.(*imageapi.ImageStream)
 	return isi, nil
 }
 
 // recordLimitExceededStatus adds the limit err to any new tag.
-func recordLimitExceededStatus(originalStream *api.ImageStream, newStream *api.ImageStream, err error, now metav1.Time, nextGeneration int64) {
+func recordLimitExceededStatus(originalStream *imageapi.ImageStream, newStream *imageapi.ImageStream, err error, now metav1.Time, nextGeneration int64) {
 	for tag := range newStream.Status.Tags {
 		if _, ok := originalStream.Status.Tags[tag]; !ok {
-			api.SetTagConditions(originalStream, tag, newImportFailedCondition(err, nextGeneration, now))
+			imageapi.SetTagConditions(originalStream, tag, newImportFailedCondition(err, nextGeneration, now))
 		}
 	}
 }
 
-func checkImportFailure(status api.ImageImportStatus, stream *api.ImageStream, tag string, nextGeneration int64, now metav1.Time) bool {
+func checkImportFailure(status imageapi.ImageImportStatus, stream *imageapi.ImageStream, tag string, nextGeneration int64, now metav1.Time) bool {
 	if status.Image != nil && status.Status.Status == metav1.StatusSuccess {
 		return false
 	}
@@ -361,8 +377,8 @@ func checkImportFailure(status api.ImageImportStatus, stream *api.ImageStream, t
 	if len(message) == 0 {
 		message = "unknown error prevented import"
 	}
-	condition := api.TagEventCondition{
-		Type:       api.ImportSuccess,
+	condition := imageapi.TagEventCondition{
+		Type:       imageapi.ImportSuccess,
 		Status:     kapi.ConditionFalse,
 		Message:    message,
 		Reason:     string(status.Status.Reason),
@@ -375,14 +391,14 @@ func checkImportFailure(status api.ImageImportStatus, stream *api.ImageStream, t
 		if len(status.Tag) > 0 {
 			tag = status.Tag
 		} else if status.Image != nil {
-			if ref, err := api.ParseDockerImageReference(status.Image.DockerImageReference); err == nil {
+			if ref, err := imageapi.ParseDockerImageReference(status.Image.DockerImageReference); err == nil {
 				tag = ref.Tag
 			}
 		}
 	}
 
-	if !api.HasTagCondition(stream, tag, condition) {
-		api.SetTagConditions(stream, tag, condition)
+	if !imageapi.HasTagCondition(stream, tag, condition) {
+		imageapi.SetTagConditions(stream, tag, condition)
 		if tagRef, ok := stream.Spec.Tags[tag]; ok {
 			zero := int64(0)
 			tagRef.Generation = &zero
@@ -394,10 +410,10 @@ func checkImportFailure(status api.ImageImportStatus, stream *api.ImageStream, t
 
 // ensureSpecTag guarantees that the spec tag is set with the provided from, importPolicy and referencePolicy.
 // If reset is passed, the tag will be overwritten.
-func ensureSpecTag(stream *api.ImageStream, tag, from string, importPolicy api.TagImportPolicy,
-	referencePolicy api.TagReferencePolicy, reset bool) api.TagReference {
+func ensureSpecTag(stream *imageapi.ImageStream, tag, from string, importPolicy imageapi.TagImportPolicy,
+	referencePolicy imageapi.TagReferencePolicy, reset bool) imageapi.TagReference {
 	if stream.Spec.Tags == nil {
-		stream.Spec.Tags = make(map[string]api.TagReference)
+		stream.Spec.Tags = make(map[string]imageapi.TagReference)
 	}
 	specTag, ok := stream.Spec.Tags[tag]
 	if ok && !reset {
@@ -422,14 +438,14 @@ func ensureSpecTag(stream *api.ImageStream, tag, from string, importPolicy api.T
 // operation, it *replaces* the imported image (from the remote repository) with the updated image.
 func (r *REST) importSuccessful(
 	ctx apirequest.Context,
-	image *api.Image, stream *api.ImageStream, tag string, from string, nextGeneration int64, now metav1.Time,
-	importPolicy api.TagImportPolicy, referencePolicy api.TagReferencePolicy,
-	importedImages map[string]error, updatedImages map[string]*api.Image,
-) (*api.Image, bool) {
+	image *imageapi.Image, stream *imageapi.ImageStream, tag string, from string, nextGeneration int64, now metav1.Time,
+	importPolicy imageapi.TagImportPolicy, referencePolicy imageapi.TagReferencePolicy,
+	importedImages map[string]error, updatedImages map[string]*imageapi.Image,
+) (*imageapi.Image, bool) {
 	r.strategy.PrepareImageForCreate(image)
 
-	pullSpec, _ := api.MostAccuratePullSpec(image.DockerImageReference, image.Name, "")
-	tagEvent := api.TagEvent{
+	pullSpec, _ := imageapi.MostAccuratePullSpec(image.DockerImageReference, image.Name, "")
+	tagEvent := imageapi.TagEvent{
 		Created:              now,
 		DockerImageReference: pullSpec,
 		Image:                image.Name,
@@ -437,15 +453,15 @@ func (r *REST) importSuccessful(
 	}
 
 	if stream.Spec.Tags == nil {
-		stream.Spec.Tags = make(map[string]api.TagReference)
+		stream.Spec.Tags = make(map[string]imageapi.TagReference)
 	}
 
 	// ensure the spec and status tag match the imported image
-	changed := api.DifferentTagEvent(stream, tag, tagEvent) || api.DifferentTagGeneration(stream, tag)
+	changed := imageapi.DifferentTagEvent(stream, tag, tagEvent) || imageapi.DifferentTagGeneration(stream, tag)
 	specTag, ok := stream.Spec.Tags[tag]
 	if changed || !ok {
 		specTag = ensureSpecTag(stream, tag, from, importPolicy, referencePolicy, true)
-		api.AddTagEventToImageStream(stream, tag, tagEvent)
+		imageapi.AddTagEventToImageStream(stream, tag, tagEvent)
 	}
 	// always reset the import policy
 	specTag.ImportPolicy = importPolicy
@@ -454,9 +470,9 @@ func (r *REST) importSuccessful(
 	// import or reuse the image, and ensure tag conditions are set
 	importErr, alreadyImported := importedImages[image.Name]
 	if importErr != nil {
-		api.SetTagConditions(stream, tag, newImportFailedCondition(importErr, nextGeneration, now))
+		imageapi.SetTagConditions(stream, tag, newImportFailedCondition(importErr, nextGeneration, now))
 	} else {
-		api.SetTagConditions(stream, tag)
+		imageapi.SetTagConditions(stream, tag)
 	}
 
 	// create the image if it does not exist, otherwise cache the updated status from the store for use by other tags
@@ -467,16 +483,16 @@ func (r *REST) importSuccessful(
 		return nil, false
 	}
 
-	updated, err := r.images.Create(ctx, image)
+	updated, err := r.images.Create(ctx, image, rest.ValidateAllObjectFunc, false)
 	switch {
 	case kapierrors.IsAlreadyExists(err):
-		if err := api.ImageWithMetadata(image); err != nil {
-			glog.V(4).Infof("Unable to update image metadata during image import when image already exists %q: err", image.Name, err)
+		if err := util.ImageWithMetadata(image); err != nil {
+			glog.V(4).Infof("Unable to update image metadata during image import when image already exists %q: %v", image.Name, err)
 		}
 		updated = image
 		fallthrough
 	case err == nil:
-		updatedImage := updated.(*api.Image)
+		updatedImage := updated.(*imageapi.Image)
 		updatedImages[image.Name] = updatedImage
 		//isi.Status.Repository.Images[i].Image = updatedImage
 		importedImages[image.Name] = nil
@@ -488,7 +504,7 @@ func (r *REST) importSuccessful(
 }
 
 // clearManifests unsets the manifest for each object that does not request it
-func clearManifests(isi *api.ImageStreamImport) {
+func clearManifests(isi *imageapi.ImageStreamImport) {
 	for i := range isi.Status.Images {
 		if !isi.Spec.Images[i].IncludeManifest {
 			if isi.Status.Images[i].Image != nil {
@@ -507,9 +523,9 @@ func clearManifests(isi *api.ImageStreamImport) {
 	}
 }
 
-func newImportFailedCondition(err error, gen int64, now metav1.Time) api.TagEventCondition {
-	c := api.TagEventCondition{
-		Type:       api.ImportSuccess,
+func newImportFailedCondition(err error, gen int64, now metav1.Time) imageapi.TagEventCondition {
+	c := imageapi.TagEventCondition{
+		Type:       imageapi.ImportSuccess,
 		Status:     kapi.ConditionFalse,
 		Message:    err.Error(),
 		Generation: gen,
@@ -521,8 +537,4 @@ func newImportFailedCondition(err error, gen int64, now metav1.Time) api.TagEven
 		c.Reason, c.Message = string(s.Reason), s.Message
 	}
 	return c
-}
-
-func invalidStatus(kind, position string, errs ...*field.Error) metav1.Status {
-	return kapierrors.NewInvalid(api.Kind(kind), position, errs).ErrStatus
 }

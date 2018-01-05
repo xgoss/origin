@@ -3,9 +3,9 @@ package admission
 import (
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
 	kerrutil "k8s.io/apimachinery/pkg/util/errors"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 type LimitVerifier interface {

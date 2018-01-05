@@ -7,8 +7,8 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/kubernetes/pkg/util/exec"
 	utilversion "k8s.io/kubernetes/pkg/util/version"
+	"k8s.io/utils/exec"
 )
 
 // Interface represents an interface to OVS
@@ -140,7 +140,7 @@ func (ovsif *ovsExec) exec(cmd string, args ...string) (string, error) {
 
 	output, err := ovsif.execer.Command(cmd, args...).CombinedOutput()
 	if err != nil {
-		glog.V(5).Infof("Error executing %s: %s", cmd, string(output))
+		glog.V(2).Infof("Error executing %s: %s", cmd, string(output))
 		return "", err
 	}
 
@@ -173,11 +173,18 @@ func (ovsif *ovsExec) DeleteBridge() error {
 func (ovsif *ovsExec) GetOFPort(port string) (int, error) {
 	ofportStr, err := ovsif.exec(OVS_VSCTL, "get", "Interface", port, "ofport")
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("failed to get OVS port for %s: %v", port, err)
 	}
 	ofport, err := strconv.Atoi(ofportStr)
 	if err != nil {
-		return -1, fmt.Errorf("Could not parse allocated ofport %q: %v", ofportStr, err)
+		return -1, fmt.Errorf("could not parse allocated ofport %q: %v", ofportStr, err)
+	}
+	if ofport == -1 {
+		errStr, err := ovsif.exec(OVS_VSCTL, "get", "Interface", port, "error")
+		if err != nil || errStr == "" {
+			errStr = "unknown error"
+		}
+		return -1, fmt.Errorf("error on port %s: %s", port, errStr)
 	}
 	return ofport, nil
 }
@@ -198,8 +205,11 @@ func (ovsif *ovsExec) AddPort(port string, ofportRequest int, properties ...stri
 		return -1, err
 	}
 	ofport, err := ovsif.GetOFPort(port)
+	if err != nil {
+		return -1, err
+	}
 	if ofportRequest > 0 && ofportRequest != ofport {
-		return -1, fmt.Errorf("Allocated ofport (%d) did not match request (%d)", ofport, ofportRequest)
+		return -1, fmt.Errorf("allocated ofport (%d) did not match request (%d)", ofport, ofportRequest)
 	}
 	return ofport, nil
 }

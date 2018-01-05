@@ -6,19 +6,23 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/golang/glog"
+
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kuval "k8s.io/apimachinery/pkg/util/validation"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 	extensions "k8s.io/kubernetes/pkg/apis/extensions"
 
-	build "github.com/openshift/origin/pkg/build/api"
-	deploy "github.com/openshift/origin/pkg/deploy/api"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/generate"
-	image "github.com/openshift/origin/pkg/image/api"
-	route "github.com/openshift/origin/pkg/route/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	"github.com/openshift/origin/pkg/util/docker/dockerfile"
 )
 
@@ -26,7 +30,7 @@ import (
 type PipelineBuilder interface {
 	To(string) PipelineBuilder
 
-	NewBuildPipeline(string, *ImageRef, *SourceRepository) (*Pipeline, error)
+	NewBuildPipeline(string, *ImageRef, *SourceRepository, bool) (*Pipeline, error)
 	NewImagePipeline(string, *ImageRef) (*Pipeline, error)
 }
 
@@ -36,7 +40,7 @@ type PipelineBuilder interface {
 // The pipelines created with a PipelineBuilder will have access to the given
 // environment. The boolean outputDocker controls whether builds will output to
 // an image stream tag or docker image reference.
-func NewPipelineBuilder(name string, environment Environment, dockerStrategyOptions *build.DockerStrategyOptions, outputDocker bool) PipelineBuilder {
+func NewPipelineBuilder(name string, environment Environment, dockerStrategyOptions *buildapi.DockerStrategyOptions, outputDocker bool) PipelineBuilder {
 	return &pipelineBuilder{
 		nameGenerator:         NewUniqueNameGenerator(name),
 		environment:           environment,
@@ -50,7 +54,7 @@ type pipelineBuilder struct {
 	environment           Environment
 	outputDocker          bool
 	to                    string
-	dockerStrategyOptions *build.DockerStrategyOptions
+	dockerStrategyOptions *buildapi.DockerStrategyOptions
 }
 
 func (pb *pipelineBuilder) To(name string) PipelineBuilder {
@@ -60,7 +64,7 @@ func (pb *pipelineBuilder) To(name string) PipelineBuilder {
 
 // NewBuildPipeline creates a new pipeline with components that are expected to
 // be built.
-func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, sourceRepository *SourceRepository) (*Pipeline, error) {
+func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, sourceRepository *SourceRepository, binary bool) (*Pipeline, error) {
 	strategy, source, err := StrategyAndSourceForRepository(sourceRepository, input)
 	if err != nil {
 		return nil, fmt.Errorf("can't build %q: %v", from, err)
@@ -72,7 +76,7 @@ func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, source
 		AsImageStream: !pb.outputDocker,
 	}
 	if len(pb.to) > 0 {
-		outputImageRef, err := image.ParseDockerImageReference(pb.to)
+		outputImageRef, err := imageapi.ParseDockerImageReference(pb.to)
 		if err != nil {
 			return nil, err
 		}
@@ -86,9 +90,9 @@ func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, source
 		if err != nil {
 			return nil, err
 		}
-		output.Reference = image.DockerImageReference{
+		output.Reference = imageapi.DockerImageReference{
 			Name: name,
-			Tag:  image.DefaultImageTag,
+			Tag:  imageapi.DefaultImageTag,
 		}
 	}
 	source.Name = name
@@ -99,8 +103,8 @@ func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, source
 		ports := dockerfile.LastExposedPorts(node)
 		if len(ports) > 0 {
 			if input.Info == nil {
-				input.Info = &image.DockerImage{
-					Config: &image.DockerConfig{},
+				input.Info = &imageapi.DockerImage{
+					Config: &imageapi.DockerConfig{},
 				}
 			}
 			input.Info.Config.ExposedPorts = map[string]struct{}{}
@@ -123,6 +127,7 @@ func (pb *pipelineBuilder) NewBuildPipeline(from string, input *ImageRef, source
 		Output:   output,
 		Env:      pb.environment,
 		DockerStrategyOptions: pb.dockerStrategyOptions,
+		Binary:                binary,
 	}
 
 	return &Pipeline{
@@ -198,6 +203,15 @@ func (p *Pipeline) Objects(accept, objectAccept Acceptor) (Objects, error) {
 		}
 		if objectAccept.Accept(repo) {
 			objects = append(objects, repo)
+		} else {
+			// if the image stream exists, if possible create the imagestream tag referenced if that does not exist
+			tag, err := p.Image.ImageStreamTag()
+			if err != nil {
+				return nil, err
+			}
+			if objectAccept.Accept(tag) {
+				objects = append(objects, tag)
+			}
 		}
 	}
 	if p.Build != nil && accept.Accept(p.Build) {
@@ -353,7 +367,7 @@ func AddServices(objects Objects, firstPortOnly bool) Objects {
 	svcs := []runtime.Object{}
 	for _, o := range objects {
 		switch t := o.(type) {
-		case *deploy.DeploymentConfig:
+		case *appsapi.DeploymentConfig:
 			svc := addServiceInternal(t.Spec.Template.Spec.Containers, t.ObjectMeta, t.Spec.Selector, firstPortOnly)
 			if svc != nil {
 				svcs = append(svcs, svc)
@@ -388,13 +402,13 @@ func AddRoutes(objects Objects) Objects {
 	for _, o := range objects {
 		switch t := o.(type) {
 		case *kapi.Service:
-			routes = append(routes, &route.Route{
+			routes = append(routes, &routeapi.Route{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   t.Name,
 					Labels: t.Labels,
 				},
-				Spec: route.RouteSpec{
-					To: route.RouteTargetReference{
+				Spec: routeapi.RouteSpec{
+					To: routeapi.RouteTargetReference{
 						Name: t.Name,
 					},
 				},
@@ -415,7 +429,7 @@ func (acceptNew) Accept(from interface{}) bool {
 	if err != nil {
 		return false
 	}
-	if len(meta.ResourceVersion) > 0 {
+	if len(meta.GetResourceVersion()) > 0 {
 		return false
 	}
 	return true
@@ -436,7 +450,7 @@ func (a *acceptUnique) Accept(from interface{}) bool {
 	if err != nil {
 		return false
 	}
-	key := fmt.Sprintf("%s/%s/%s", gvk[0].Kind, meta.Namespace, meta.Name)
+	key := fmt.Sprintf("%s/%s/%s", gvk[0].Kind, meta.GetNamespace(), meta.GetName())
 	_, exists := a.objects[key]
 	if exists {
 		return false
@@ -454,12 +468,102 @@ func NewAcceptUnique(typer runtime.ObjectTyper) Acceptor {
 	}
 }
 
-func objectMetaData(raw interface{}) (runtime.Object, *metav1.ObjectMeta, error) {
+type acceptNonExistentImageStream struct {
+	typer     runtime.ObjectTyper
+	getter    imageclient.ImageInterface
+	namespace string
+}
+
+// Accept accepts any non-ImageStream object or an ImageStream that does
+// not exist in the api server
+func (a *acceptNonExistentImageStream) Accept(from interface{}) bool {
+	obj, _, err := objectMetaData(from)
+	if err != nil {
+		return false
+	}
+	gvk, _, err := a.typer.ObjectKinds(obj)
+	if err != nil {
+		return false
+	}
+	gk := gvk[0].GroupKind()
+	if !imageapi.IsKindOrLegacy("ImageStream", gk) {
+		return true
+	}
+	is, ok := from.(*imageapi.ImageStream)
+	if !ok {
+		glog.V(4).Infof("type cast to image stream %#v not right for an unanticipated reason", from)
+		return true
+	}
+	imgstrm, err := a.getter.ImageStreams(a.namespace).Get(is.Name, metav1.GetOptions{})
+	if err == nil && imgstrm != nil {
+		glog.V(4).Infof("acceptor determined that imagestream %s in namespace %s exists so don't accept: %#v", is.Name, a.namespace, imgstrm)
+		return false
+	}
+	return true
+}
+
+// NewAcceptNonExistentImageStream creates an acceptor that accepts an object
+// if it is either a) not an ImageStream, or b) or an ImageStream which does not
+// yet exist in master
+func NewAcceptNonExistentImageStream(typer runtime.ObjectTyper, getter imageclient.ImageInterface, namespace string) Acceptor {
+	return &acceptNonExistentImageStream{
+		typer:     typer,
+		getter:    getter,
+		namespace: namespace,
+	}
+}
+
+type acceptNonExistentImageStreamTag struct {
+	typer     runtime.ObjectTyper
+	getter    imageclient.ImageInterface
+	namespace string
+}
+
+// Accept accepts any non-ImageStreamTag object or an ImageStreamTag that does
+// not exist in the api server
+func (a *acceptNonExistentImageStreamTag) Accept(from interface{}) bool {
+	obj, _, err := objectMetaData(from)
+	if err != nil {
+		return false
+	}
+	gvk, _, err := a.typer.ObjectKinds(obj)
+	if err != nil {
+		return false
+	}
+	gk := gvk[0].GroupKind()
+	if !imageapi.IsKindOrLegacy("ImageStreamTag", gk) {
+		return true
+	}
+	ist, ok := from.(*imageapi.ImageStreamTag)
+	if !ok {
+		glog.V(4).Infof("type cast to imagestreamtag %#v not right for an unanticipated reason", from)
+		return true
+	}
+	tag, err := a.getter.ImageStreamTags(a.namespace).Get(ist.Name, metav1.GetOptions{})
+	if err == nil && tag != nil {
+		glog.V(4).Infof("acceptor determined that imagestreamtag %s in namespace %s exists so don't accept", ist.Name, a.namespace)
+		return false
+	}
+	return true
+}
+
+// NewAcceptNonExistentImageStreamTag creates an acceptor that accepts an object
+// if it is either a) not an ImageStreamTag, or b) or an ImageStreamTag which does not
+// yet exist in master
+func NewAcceptNonExistentImageStreamTag(typer runtime.ObjectTyper, getter imageclient.ImageInterface, namespace string) Acceptor {
+	return &acceptNonExistentImageStreamTag{
+		typer:     typer,
+		getter:    getter,
+		namespace: namespace,
+	}
+}
+
+func objectMetaData(raw interface{}) (runtime.Object, metav1.Object, error) {
 	obj, ok := raw.(runtime.Object)
 	if !ok {
 		return nil, nil, fmt.Errorf("%#v is not a runtime.Object", raw)
 	}
-	meta, err := metav1.ObjectMetaFor(obj)
+	meta, err := meta.Accessor(obj)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -481,7 +585,7 @@ func (a *acceptBuildConfigs) Accept(from interface{}) bool {
 		return false
 	}
 	gk := gvk[0].GroupKind()
-	return build.IsKindOrLegacy("BuildConfig", gk) || image.IsKindOrLegacy("ImageStream", gk)
+	return buildapi.IsKindOrLegacy("BuildConfig", gk) || imageapi.IsKindOrLegacy("ImageStream", gk)
 }
 
 // NewAcceptBuildConfigs creates an acceptor accepting BuildConfig objects

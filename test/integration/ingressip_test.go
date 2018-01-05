@@ -6,17 +6,17 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
+	kinformers "k8s.io/client-go/informers"
+	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/service/controller/ingressip"
-	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
 
@@ -25,26 +25,18 @@ const sentinelName = "sentinel"
 // TestIngressIPAllocation validates that ingress ip allocation is
 // performed correctly even when multiple controllers are running.
 func TestIngressIPAllocation(t *testing.T) {
-	testutil.RequireEtcd(t)
-
 	masterConfig, err := testserver.DefaultMasterOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 	masterConfig.NetworkConfig.ExternalIPNetworkCIDRs = []string{"172.16.0.0/24"}
 	masterConfig.NetworkConfig.IngressIPNetworkCIDR = "172.16.1.0/24"
 	clusterAdminKubeConfig, err := testserver.StartConfiguredMasterWithOptions(masterConfig, testserver.TestOptions{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	kc, _, err := configapi.GetInternalKubeClient(clusterAdminKubeConfig, &configapi.ClientConnectionOverrides{
-		QPS:   20,
-		Burst: 50,
-	})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	extkc, _, err := configapi.GetExternalKubeClient(clusterAdminKubeConfig, &configapi.ClientConnectionOverrides{
+	kc, _, err := configapi.GetExternalKubeClient(clusterAdminKubeConfig, &configapi.ClientConnectionOverrides{
 		QPS:   20,
 		Burst: 50,
 	})
@@ -68,11 +60,11 @@ func TestIngressIPAllocation(t *testing.T) {
 				return kc.Core().Services(metav1.NamespaceAll).Watch(options)
 			},
 		},
-		&kapi.Service{},
+		&v1.Service{},
 		time.Minute*10,
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(old, cur interface{}) {
-				service := cur.(*kapi.Service)
+				service := cur.(*v1.Service)
 				if service.Name == sentinelName && len(service.Spec.ExternalIPs) > 0 {
 					received <- true
 				}
@@ -85,8 +77,10 @@ func TestIngressIPAllocation(t *testing.T) {
 	go generateServiceEvents(t, kc)
 
 	// Start a second controller that will be out of sync with the first
+	kubeInformers := kinformers.NewSharedInformerFactory(kc, 0)
 	_, ipNet, err := net.ParseCIDR(masterConfig.NetworkConfig.IngressIPNetworkCIDR)
-	c := ingressip.NewIngressIPController(kc, extkc, ipNet, 10*time.Minute)
+	c := ingressip.NewIngressIPController(kubeInformers.Core().V1().Services().Informer(), kc, ipNet, 10*time.Minute)
+	kubeInformers.Start(stopChannel)
 	go c.Run(stopChannel)
 
 	t.Log("waiting for sentinel to be updated with external ip")
@@ -104,7 +98,7 @@ func TestIngressIPAllocation(t *testing.T) {
 	}
 	ips := sets.NewString()
 	for _, s := range services.Items {
-		typeLoadBalancer := s.Spec.Type == kapi.ServiceTypeLoadBalancer
+		typeLoadBalancer := s.Spec.Type == v1.ServiceTypeLoadBalancer
 		hasAllocation := len(s.Status.LoadBalancer.Ingress) > 0
 		switch {
 		case !typeLoadBalancer && !hasAllocation:
@@ -139,7 +133,7 @@ func generateServiceEvents(t *testing.T, kc kclientset.Interface) {
 	maxMillisecondInterval := 25
 	minServiceCount := 10
 	maxOperations := minServiceCount + 30
-	var services []*kapi.Service
+	var services []*v1.Service
 	for i := 0; i < maxOperations; {
 		op := createOp
 		if len(services) > minServiceCount {
@@ -166,11 +160,11 @@ func generateServiceEvents(t *testing.T, kc kclientset.Interface) {
 				continue
 			}
 			// Flip the service type
-			if s.Spec.Type == kapi.ServiceTypeLoadBalancer {
-				s.Spec.Type = kapi.ServiceTypeClusterIP
+			if s.Spec.Type == v1.ServiceTypeLoadBalancer {
+				s.Spec.Type = v1.ServiceTypeClusterIP
 				s.Spec.Ports[0].NodePort = 0
 			} else {
-				s.Spec.Type = kapi.ServiceTypeLoadBalancer
+				s.Spec.Type = v1.ServiceTypeLoadBalancer
 			}
 			s, err = kc.Core().Services(metav1.NamespaceDefault).Update(s)
 			if err != nil {
@@ -202,19 +196,19 @@ func generateServiceEvents(t *testing.T, kc kclientset.Interface) {
 	}
 }
 
-func createService(kc kclientset.Interface, name string, typeLoadBalancer bool) (*kapi.Service, error) {
-	serviceType := kapi.ServiceTypeClusterIP
+func createService(kc kclientset.Interface, name string, typeLoadBalancer bool) (*v1.Service, error) {
+	serviceType := v1.ServiceTypeClusterIP
 	if typeLoadBalancer {
-		serviceType = kapi.ServiceTypeLoadBalancer
+		serviceType = v1.ServiceTypeLoadBalancer
 	}
-	service := &kapi.Service{
+	service := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "service-",
 			Name:         name,
 		},
-		Spec: kapi.ServiceSpec{
+		Spec: v1.ServiceSpec{
 			Type: serviceType,
-			Ports: []kapi.ServicePort{{
+			Ports: []v1.ServicePort{{
 				Protocol: "TCP",
 				Port:     8080,
 			}},

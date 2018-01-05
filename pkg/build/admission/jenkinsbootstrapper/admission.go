@@ -6,33 +6,31 @@ import (
 
 	"github.com/golang/glog"
 	kapierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kutilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/admission"
 	restclient "k8s.io/client-go/rest"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	kadmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
 
-	"github.com/openshift/origin/pkg/api/latest"
 	authenticationclient "github.com/openshift/origin/pkg/auth/client"
-	buildapi "github.com/openshift/origin/pkg/build/api"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	jenkinscontroller "github.com/openshift/origin/pkg/build/controller/jenkins"
-	"github.com/openshift/origin/pkg/client"
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/config/cmd"
+	templateclient "github.com/openshift/origin/pkg/template/generated/internalclientset"
 )
 
-func init() {
-	admission.RegisterPlugin("openshift.io/JenkinsBootstrapper", func(config io.Reader) (admission.Interface, error) {
-		return NewJenkinsBootstrapper(), nil
-	})
+func Register(plugins *admission.Plugins) {
+	plugins.Register("openshift.io/JenkinsBootstrapper",
+		func(config io.Reader) (admission.Interface, error) {
+			return NewJenkinsBootstrapper(), nil
+		})
 }
 
 type jenkinsBootstrapper struct {
@@ -40,14 +38,14 @@ type jenkinsBootstrapper struct {
 
 	privilegedRESTClientConfig restclient.Config
 	serviceClient              coreclient.ServicesGetter
-	openshiftClient            client.Interface
+	templateClient             templateclient.Interface
 
 	jenkinsConfig configapi.JenkinsPipelineConfig
 }
 
 var _ = oadmission.WantsJenkinsPipelineConfig(&jenkinsBootstrapper{})
 var _ = oadmission.WantsRESTClientConfig(&jenkinsBootstrapper{})
-var _ = oadmission.WantsOpenshiftClient(&jenkinsBootstrapper{})
+var _ = oadmission.WantsOpenshiftInternalTemplateClient(&jenkinsBootstrapper{})
 var _ = kadmission.WantsInternalKubeClientSet(&jenkinsBootstrapper{})
 
 // NewJenkinsBootstrapper returns an admission plugin that will create required jenkins resources as the user if they are needed.
@@ -86,7 +84,7 @@ func (a *jenkinsBootstrapper) Admit(attributes admission.Attributes) error {
 	}
 
 	glog.V(3).Infof("Adding new jenkins service %q to the project %q", svcName, namespace)
-	jenkinsTemplate := jenkinscontroller.NewPipelineTemplate(namespace, a.jenkinsConfig, a.openshiftClient)
+	jenkinsTemplate := jenkinscontroller.NewPipelineTemplate(namespace, a.jenkinsConfig, a.templateClient)
 	objects, errs := jenkinsTemplate.Process()
 	if len(errs) > 0 {
 		return kutilerrors.NewAggregate(errs)
@@ -101,37 +99,9 @@ func (a *jenkinsBootstrapper) Admit(attributes admission.Attributes) error {
 
 	bulk := &cmd.Bulk{
 		Mapper: &resource.Mapper{
-			RESTMapper:  kapi.Registry.RESTMapper(),
-			ObjectTyper: kapi.Scheme,
-			ClientMapper: resource.ClientMapperFunc(func(mapping *meta.RESTMapping) (resource.RESTClient, error) {
-				// TODO this is a nasty copy&paste from pkg/cmd/util/clientcmd/factory_object_mapping.go#ClientForMapping
-				if latest.OriginKind(mapping.GroupVersionKind) {
-					if err := client.SetOpenShiftDefaults(&impersonatingConfig); err != nil {
-						return nil, err
-					}
-					impersonatingConfig.APIPath = "/apis"
-					if mapping.GroupVersionKind.Group == kapi.GroupName {
-						impersonatingConfig.APIPath = "/oapi"
-					}
-					gv := mapping.GroupVersionKind.GroupVersion()
-					impersonatingConfig.GroupVersion = &gv
-					return restclient.RESTClientFor(&impersonatingConfig)
-				}
-				// TODO and this from vendor/k8s.io/kubernetes/pkg/kubectl/cmd/util/factory_object_mapping.go#ClientForMapping
-				if err := kclient.SetKubernetesDefaults(&impersonatingConfig); err != nil {
-					return nil, err
-				}
-				gvk := mapping.GroupVersionKind
-				switch gvk.Group {
-				case kapi.GroupName:
-					impersonatingConfig.APIPath = "/api"
-				default:
-					impersonatingConfig.APIPath = "/apis"
-				}
-				gv := gvk.GroupVersion()
-				impersonatingConfig.GroupVersion = &gv
-				return restclient.RESTClientFor(&impersonatingConfig)
-			}),
+			RESTMapper:   legacyscheme.Registry.RESTMapper(),
+			ObjectTyper:  legacyscheme.Scheme,
+			ClientMapper: cmd.ClientMapperFromConfig(&impersonatingConfig),
 		},
 		Op: cmd.Create,
 		After: func(info *resource.Info, err error) bool {
@@ -180,13 +150,16 @@ func (q *jenkinsBootstrapper) SetInternalKubeClientSet(c kclientset.Interface) {
 	q.serviceClient = c.Core()
 }
 
-func (a *jenkinsBootstrapper) SetOpenshiftClient(oclient client.Interface) {
-	a.openshiftClient = oclient
+func (a *jenkinsBootstrapper) SetOpenshiftInternalTemplateClient(c templateclient.Interface) {
+	a.templateClient = c
 }
 
-func (a *jenkinsBootstrapper) Validate() error {
-	if a.openshiftClient == nil {
-		return fmt.Errorf("missing openshiftClient")
+func (a *jenkinsBootstrapper) ValidateInitialization() error {
+	if a.serviceClient == nil {
+		return fmt.Errorf("missing serviceClient")
+	}
+	if a.templateClient == nil {
+		return fmt.Errorf("missing templateClient")
 	}
 	return nil
 }

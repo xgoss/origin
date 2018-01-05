@@ -13,15 +13,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/api"
-	externalfake "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/fake"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	internalfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	kexternalinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions"
 	kinternalinformers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
 
-	"github.com/openshift/origin/pkg/client/testclient"
-	"github.com/openshift/origin/pkg/controller/shared"
-	quotaapi "github.com/openshift/origin/pkg/quota/api"
+	quotaapi "github.com/openshift/origin/pkg/quota/apis/quota"
+	quotainformer "github.com/openshift/origin/pkg/quota/generated/informers/internalversion"
+	quotaclient "github.com/openshift/origin/pkg/quota/generated/internalclientset/fake"
 )
 
 var (
@@ -55,25 +53,20 @@ func runFuzzer(t *testing.T) {
 
 	startingNamespaces := CreateStartingNamespaces()
 	internalKubeClient := internalfake.NewSimpleClientset(startingNamespaces...)
-	externalKubeClient := externalfake.NewSimpleClientset(startingNamespaces...)
 	nsWatch := watch.NewFake()
 	internalKubeClient.PrependWatchReactor("namespaces", clientgotesting.DefaultWatchReactor(nsWatch, nil))
-	externalKubeClient.PrependWatchReactor("namespaces", clientgotesting.DefaultWatchReactor(nsWatch, nil))
-
-	startingQuotas := CreateStartingQuotas()
-	originclient := testclient.NewSimpleFake(startingQuotas...)
-	quotaWatch := watch.NewFake()
-	originclient.PrependWatchReactor("clusterresourcequotas", clientgotesting.DefaultWatchReactor(quotaWatch, nil))
 
 	internalKubeInformerFactory := kinternalinformers.NewSharedInformerFactory(internalKubeClient, 10*time.Minute)
-	externalKubeInformerFactory := kexternalinformers.NewSharedInformerFactory(externalKubeClient, 10*time.Minute)
-	informerFactory := shared.NewInformerFactory(internalKubeInformerFactory, externalKubeInformerFactory, internalKubeClient, originclient, shared.DefaultListerWatcherOverrides{}, 10*time.Minute)
-	controller := NewClusterQuotaMappingController(internalKubeInformerFactory.Core().InternalVersion().Namespaces(), informerFactory.ClusterResourceQuotas())
+
+	startingQuotas := CreateStartingQuotas()
+	quotaWatch := watch.NewFake()
+	quotaClient := quotaclient.NewSimpleClientset(startingQuotas...)
+	quotaClient.PrependWatchReactor("clusterresourcequotas", clientgotesting.DefaultWatchReactor(quotaWatch, nil))
+	quotaFactory := quotainformer.NewSharedInformerFactory(quotaClient, 0)
+	controller := NewClusterQuotaMappingControllerInternal(internalKubeInformerFactory.Core().InternalVersion().Namespaces(), quotaFactory.Quota().InternalVersion().ClusterResourceQuotas())
 	go controller.Run(5, stopCh)
-	informerFactory.Start(stopCh)
-	informerFactory.StartCore(stopCh)
+	quotaFactory.Start(stopCh)
 	internalKubeInformerFactory.Start(stopCh)
-	externalKubeInformerFactory.Start(stopCh)
 
 	finalNamespaces := map[string]*kapi.Namespace{}
 	finalQuotas := map[string]*quotaapi.ClusterResourceQuota{}
@@ -117,10 +110,7 @@ func runFuzzer(t *testing.T) {
 
 			quota := NewQuota(name)
 			finalQuotas[name] = quota
-			copied, err := kapi.Scheme.Copy(quota)
-			if err != nil {
-				t.Fatal(err)
-			}
+			copied := quota.DeepCopy()
 			if exists {
 				quotaActions[name] = append(quotaActions[name], fmt.Sprintf("updating %v to %v", name, quota.Spec.Selector))
 				quotaWatch.Modify(copied)
@@ -156,10 +146,7 @@ func runFuzzer(t *testing.T) {
 
 			ns := NewNamespace(name)
 			finalNamespaces[name] = ns
-			copied, err := kapi.Scheme.Copy(ns)
-			if err != nil {
-				t.Fatal(err)
-			}
+			copied := ns.DeepCopy()
 			if exists {
 				namespaceActions[name] = append(namespaceActions[name], fmt.Sprintf("updating %v to %v", name, ns.Labels))
 				nsWatch.Modify(copied)

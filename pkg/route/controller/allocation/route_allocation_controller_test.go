@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	routeapi "github.com/openshift/origin/pkg/route/api"
+	routeapi "github.com/openshift/origin/pkg/route/apis/route"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -83,7 +83,7 @@ func TestRouteAllocationController(t *testing.T) {
 	}
 
 	plugin := &TestAllocationPlugin{Name: "test allocation plugin"}
-	fac := &RouteAllocationControllerFactory{nil, nil}
+	fac := &RouteAllocationControllerFactory{nil}
 	allocator := fac.Create(plugin)
 	for _, tc := range tests {
 		shard, err := allocator.AllocateRouterShard(tc.route)

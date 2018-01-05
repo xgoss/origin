@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,13 +15,15 @@ import (
 	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/generate"
 	"github.com/openshift/origin/pkg/generate/git"
 	"github.com/openshift/origin/pkg/util"
+
+	s2igit "github.com/openshift/source-to-image/pkg/scm/git"
 )
 
 const (
@@ -84,30 +85,29 @@ func (g *Generated) WithType(slicePtr interface{}) bool {
 	return found
 }
 
-func nameFromGitURL(url *url.URL) (string, bool) {
+func nameFromGitURL(url *s2igit.URL) (string, bool) {
 	if url == nil {
 		return "", false
 	}
 	// from path
-	if name, ok := git.NameFromRepositoryURL(url); ok {
+	if name, ok := git.NameFromRepositoryURL(&url.URL); ok {
 		return name, true
 	}
 	// TODO: path is questionable
-	if len(url.Host) > 0 {
+	if len(url.URL.Host) > 0 {
 		// from host with port
-		if host, _, err := net.SplitHostPort(url.Host); err == nil {
+		if host, _, err := net.SplitHostPort(url.URL.Host); err == nil {
 			return host, true
 		}
 		// from host without port
-		return url.Host, true
+		return url.URL.Host, true
 	}
 	return "", false
 }
 
 // SourceRef is a reference to a build source
 type SourceRef struct {
-	URL        *url.URL
-	Ref        string
+	URL        *s2igit.URL
 	Dir        string
 	Name       string
 	ContextDir string
@@ -122,11 +122,6 @@ type SourceRef struct {
 	Binary bool
 
 	RequiresAuth bool
-}
-
-func urlWithoutRef(url url.URL) string {
-	url.Fragment = ""
-	return url.String()
 }
 
 // SuggestName returns a name derived from the source URL
@@ -164,8 +159,8 @@ func (r *SourceRef) BuildSource() (*buildapi.BuildSource, []buildapi.BuildTrigge
 	}
 	if r.URL != nil {
 		source.Git = &buildapi.GitBuildSource{
-			URI: urlWithoutRef(*r.URL),
-			Ref: r.Ref,
+			URI: r.URL.StringNoFragment(),
+			Ref: r.URL.URL.Fragment,
 		}
 		source.ContextDir = r.ContextDir
 	}
@@ -245,6 +240,7 @@ type BuildRef struct {
 	DockerStrategyOptions *buildapi.DockerStrategyOptions
 	Output                *ImageRef
 	Env                   Environment
+	Binary                bool
 }
 
 // BuildConfig creates a buildConfig resource from the build configuration reference
@@ -271,14 +267,23 @@ func (r *BuildRef) BuildConfig() (*buildapi.BuildConfig, error) {
 		return nil, err
 	}
 
-	if source.Binary == nil {
+	if !r.Binary {
 		configChangeTrigger := buildapi.BuildTriggerPolicy{
 			Type: buildapi.ConfigChangeBuildTriggerType,
 		}
 		triggers = append(triggers, configChangeTrigger)
 		triggers = append(triggers, strategyTriggers...)
+	} else {
+		// remove imagechangetriggers from binary buildconfigs because
+		// triggered builds will fail (no binary input available)
+		filteredTriggers := []buildapi.BuildTriggerPolicy{}
+		for _, trigger := range triggers {
+			if trigger.Type != buildapi.ImageChangeBuildTriggerType {
+				filteredTriggers = append(filteredTriggers, trigger)
+			}
+		}
+		triggers = filteredTriggers
 	}
-
 	return &buildapi.BuildConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -311,7 +316,7 @@ type DeploymentConfigRef struct {
 // DeploymentConfig creates a deploymentConfig resource from the deployment configuration reference
 //
 // TODO: take a pod template spec as argument
-func (r *DeploymentConfigRef) DeploymentConfig() (*deployapi.DeploymentConfig, error) {
+func (r *DeploymentConfigRef) DeploymentConfig() (*appsapi.DeploymentConfig, error) {
 	if len(r.Name) == 0 {
 		suggestions := NameSuggestions{}
 		for i := range r.Images {
@@ -333,10 +338,10 @@ func (r *DeploymentConfigRef) DeploymentConfig() (*deployapi.DeploymentConfig, e
 		}
 	}
 
-	triggers := []deployapi.DeploymentTriggerPolicy{
+	triggers := []appsapi.DeploymentTriggerPolicy{
 		// By default, always deploy on change
 		{
-			Type: deployapi.DeploymentTriggerOnConfigChange,
+			Type: appsapi.DeploymentTriggerOnConfigChange,
 		},
 	}
 
@@ -366,11 +371,11 @@ func (r *DeploymentConfigRef) DeploymentConfig() (*deployapi.DeploymentConfig, e
 		template.Containers[i].Env = append(template.Containers[i].Env, r.Env.List()...)
 	}
 
-	dc := &deployapi.DeploymentConfig{
+	dc := &appsapi.DeploymentConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: r.Name,
 		},
-		Spec: deployapi.DeploymentConfigSpec{
+		Spec: appsapi.DeploymentConfigSpec{
 			Replicas: 1,
 			Test:     r.AsTest,
 			Selector: selector,
@@ -386,9 +391,9 @@ func (r *DeploymentConfigRef) DeploymentConfig() (*deployapi.DeploymentConfig, e
 	if r.PostHook != nil {
 		//dc.Spec.Strategy.Type = "Rolling"
 		if len(r.PostHook.Shell) > 0 {
-			dc.Spec.Strategy.RecreateParams = &deployapi.RecreateDeploymentStrategyParams{
-				Post: &deployapi.LifecycleHook{
-					ExecNewPod: &deployapi.ExecNewPodHook{
+			dc.Spec.Strategy.RecreateParams = &appsapi.RecreateDeploymentStrategyParams{
+				Post: &appsapi.LifecycleHook{
+					ExecNewPod: &appsapi.ExecNewPodHook{
 						Command: []string{"/bin/sh", "-c", r.PostHook.Shell},
 					},
 				},

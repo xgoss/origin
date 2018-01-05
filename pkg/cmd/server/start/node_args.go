@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/url"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -58,6 +57,10 @@ type NodeArgs struct {
 
 	// Bootstrap is true if the node should rely on the server to set initial configuration.
 	Bootstrap bool
+	// BootstrapConfigName is the name of a config map to read node-config.yaml from.
+	BootstrapConfigName string
+	// BootstrapConfigNamespace is the namespace the config map for bootstrap config is expected to load from.
+	BootstrapConfigNamespace string
 
 	MasterCertDir string
 	ConfigDir     flag.StringFlag
@@ -65,12 +68,16 @@ type NodeArgs struct {
 	AllowDisabledDocker bool
 	// VolumeDir is the volume storage directory.
 	VolumeDir string
+	// VolumeDirProvided is set to true if the user has specified this flag.
+	VolumeDirProvided bool
 
 	DefaultKubernetesURL *url.URL
 	ClusterDomain        string
 	ClusterDNS           net.IP
 	// DNSBindAddr is provided for the all-in-one start only and is not exposed via a flag
 	DNSBindAddr string
+	// RecursiveResolvConf
+	RecursiveResolvConf string
 
 	// NetworkPluginName is the network plugin to be called for configuring networking for pods.
 	NetworkPluginName string
@@ -85,6 +92,8 @@ func BindNodeArgs(args *NodeArgs, flags *pflag.FlagSet, prefix string, component
 	if components {
 		args.Components.Bind(flags, prefix+"%s", "The set of node components to")
 	}
+
+	flags.StringVar(&args.RecursiveResolvConf, prefix+"recursive-resolv-conf", args.RecursiveResolvConf, "An optional upstream resolv.conf that will override the DNS config.")
 
 	flags.StringVar(&args.NetworkPluginName, prefix+"network-plugin", args.NetworkPluginName, "The network plugin to be called for configuring networking for pods.")
 
@@ -102,6 +111,8 @@ func BindNodeArgs(args *NodeArgs, flags *pflag.FlagSet, prefix string, component
 // BindNodeNetworkArgs binds the options to the flags with prefix + default flag names
 func BindNodeNetworkArgs(args *NodeArgs, flags *pflag.FlagSet, prefix string) {
 	args.Components.Bind(flags, "%s", "The set of network components to")
+
+	flags.StringVar(&args.RecursiveResolvConf, prefix+"recursive-resolv-conf", args.RecursiveResolvConf, "An optional upstream resolv.conf that will override the DNS config.")
 
 	flags.StringVar(&args.NetworkPluginName, prefix+"network-plugin", args.NetworkPluginName, "The network plugin to be called for configuring networking for pods.")
 }
@@ -122,6 +133,9 @@ func NewDefaultNodeArgs() *NodeArgs {
 		Components: NewNodeComponentFlag(),
 
 		NodeName: hostname,
+
+		BootstrapConfigName:      "",
+		BootstrapConfigNamespace: "openshift-node",
 
 		MasterCertDir: "openshift.local.config/master",
 
@@ -145,6 +159,11 @@ func (args NodeArgs) Validate() error {
 	}
 	if addr, _ := args.KubeConnectionArgs.GetKubernetesAddress(args.DefaultKubernetesURL); addr == nil {
 		return errors.New("--kubeconfig must be set to provide API server connection information")
+	}
+	if len(args.BootstrapConfigName) > 0 {
+		if len(args.BootstrapConfigNamespace) == 0 {
+			return errors.New("--bootstrap-config-namespace must be specified")
+		}
 	}
 	return nil
 }
@@ -173,7 +192,7 @@ func (args NodeArgs) BuildSerializeableNodeConfig() (*configapi.NodeConfig, erro
 		NodeName: args.NodeName,
 
 		ServingInfo: configapi.ServingInfo{
-			BindAddress: net.JoinHostPort(args.ListenArg.ListenAddr.Host, strconv.Itoa(ports.KubeletPort)),
+			BindAddress: args.ListenArg.ListenAddr.HostPort(ports.KubeletPort),
 		},
 
 		ImageConfig: configapi.ImageConfig{
@@ -191,6 +210,8 @@ func (args NodeArgs) BuildSerializeableNodeConfig() (*configapi.NodeConfig, erro
 		DNSBindAddress: args.DNSBindAddr,
 		DNSDomain:      args.ClusterDomain,
 		DNSIP:          dnsIP,
+
+		DNSRecursiveResolvConf: args.RecursiveResolvConf,
 
 		MasterKubeConfig: admin.DefaultNodeKubeConfigFile(args.ConfigDir.Value()),
 
@@ -226,10 +247,12 @@ func (args NodeArgs) MergeSerializeableNodeConfig(config *configapi.NodeConfig) 
 	if len(args.NodeName) > 0 {
 		config.NodeName = args.NodeName
 	}
-
-	config.ServingInfo.BindAddress = net.JoinHostPort(args.ListenArg.ListenAddr.Host, strconv.Itoa(ports.KubeletPort))
-
-	config.VolumeDirectory = args.VolumeDir
+	if args.ListenArg.ListenAddr.Provided {
+		config.ServingInfo.BindAddress = net.JoinHostPort(args.ListenArg.ListenAddr.Host, strconv.Itoa(ports.KubeletPort))
+	}
+	if args.VolumeDirProvided {
+		config.VolumeDirectory = args.VolumeDir
+	}
 	config.AllowDisabledDocker = args.AllowDisabledDocker
 	return nil
 }
@@ -300,14 +323,4 @@ func defaultHostname() (string, error) {
 		return "", fmt.Errorf("Couldn't determine hostname: %v", err)
 	}
 	return strings.ToLower(strings.TrimSpace(string(fqdn))), nil
-}
-
-var invalidNameCharactersRegexp = regexp.MustCompile("[^-a-z0-9]")
-
-func safeSecretName(s string) string {
-	// Remove everything except [-0-9a-z]
-	s = invalidNameCharactersRegexp.ReplaceAllString(strings.ToLower(s), "-")
-	// Remove leading and trailing hyphen(s) that may be introduced by the previous step
-	s = strings.Trim(s, "-")
-	return s
 }

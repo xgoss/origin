@@ -18,24 +18,17 @@ package framework
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
+	authorizationv1beta1 "k8s.io/api/authorization/v1beta1"
+	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1unstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	unstructuredconversion "k8s.io/apimachinery/pkg/conversion/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/kubernetes/pkg/api"
-	authorizationv1beta1 "k8s.io/kubernetes/pkg/apis/authorization/v1beta1"
-	rbacinternal "k8s.io/kubernetes/pkg/apis/rbac"
-	rbacv1beta1 "k8s.io/kubernetes/pkg/apis/rbac/v1beta1"
-	v1beta1authorization "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/typed/authorization/v1beta1"
-	v1beta1rbac "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/typed/rbac/v1beta1"
-
-	openshiftauthzinternal "github.com/openshift/origin/pkg/authorization/api"
-	openshiftauthzexternal "github.com/openshift/origin/pkg/authorization/api/v1"
+	v1beta1authorization "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
+	v1beta1rbac "k8s.io/client-go/kubernetes/typed/rbac/v1beta1"
 )
 
 const (
@@ -46,6 +39,12 @@ const (
 // WaitForAuthorizationUpdate checks if the given user can perform the named verb and action.
 // If policyCachePollTimeout is reached without the expected condition matching, an error is returned
 func WaitForAuthorizationUpdate(c v1beta1authorization.SubjectAccessReviewsGetter, user, namespace, verb string, resource schema.GroupResource, allowed bool) error {
+	return WaitForNamedAuthorizationUpdate(c, user, namespace, verb, "", resource, allowed)
+}
+
+// WaitForAuthorizationUpdate checks if the given user can perform the named verb and action on the named resource.
+// If policyCachePollTimeout is reached without the expected condition matching, an error is returned
+func WaitForNamedAuthorizationUpdate(c v1beta1authorization.SubjectAccessReviewsGetter, user, namespace, verb, resourceName string, resource schema.GroupResource, allowed bool) error {
 	review := &authorizationv1beta1.SubjectAccessReview{
 		Spec: authorizationv1beta1.SubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1beta1.ResourceAttributes{
@@ -53,6 +52,7 @@ func WaitForAuthorizationUpdate(c v1beta1authorization.SubjectAccessReviewsGette
 				Verb:      verb,
 				Resource:  resource.Resource,
 				Namespace: namespace,
+				Name:      resourceName,
 			},
 			User: user,
 		},
@@ -78,9 +78,9 @@ func WaitForAuthorizationUpdate(c v1beta1authorization.SubjectAccessReviewsGette
 }
 
 // BindClusterRole binds the cluster role at the cluster scope
-func BindClusterRole(c v1beta1rbac.ClusterRoleBindingsGetter, clientPool dynamic.ClientPool, clusterRole, ns string, subjects ...rbacv1beta1.Subject) {
+func BindClusterRole(c v1beta1rbac.ClusterRoleBindingsGetter, clusterRole, ns string, subjects ...rbacv1beta1.Subject) {
 	// Since the namespace names are unique, we can leave this lying around so we don't have to race any caches
-	clusterRoleBinding := &rbacv1beta1.ClusterRoleBinding{
+	_, err := c.ClusterRoleBindings().Create(&rbacv1beta1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: ns + "--" + clusterRole,
 		},
@@ -90,112 +90,62 @@ func BindClusterRole(c v1beta1rbac.ClusterRoleBindingsGetter, clientPool dynamic
 			Name:     clusterRole,
 		},
 		Subjects: subjects,
-	}
-	_, err := c.ClusterRoleBindings().Create(clusterRoleBinding)
+	})
 
 	// if we failed, don't fail the entire test because it may still work. RBAC may simply be disabled.
 	if err != nil {
 		fmt.Printf("Error binding clusterrole/%s for %q for %v\n", clusterRole, ns, subjects)
 	}
-
-	// CARRY: also do this for OpenShift
-	internalClusterRoleBinding := &rbacinternal.ClusterRoleBinding{}
-	if err := api.Scheme.Convert(clusterRoleBinding, internalClusterRoleBinding, nil); err != nil {
-		fmt.Printf("Error converting v1beta1 ClusterRoleBinding to internal: %v\n", err)
-		return
-	}
-
-	openShiftInternal := &openshiftauthzinternal.ClusterRoleBinding{}
-	if err := api.Scheme.Convert(internalClusterRoleBinding, openShiftInternal, nil); err != nil {
-		fmt.Printf("Error converting kube ClusterRoleBinding to openshift internal: %v\n", err)
-		return
-	}
-
-	openShiftExternal := &openshiftauthzexternal.ClusterRoleBinding{}
-	if err := api.Scheme.Convert(openShiftInternal, openShiftExternal, nil); err != nil {
-		fmt.Printf("Error converting openshift internal ClusterRoleBinding to external: %v\n", err)
-		return
-	}
-
-	gvkClient, err := clientPool.ClientForGroupVersionKind(openshiftauthzexternal.SchemeGroupVersion.WithKind("ClusterRoleBinding"))
-	if err != nil {
-		fmt.Printf("Error creating dynamic client: %v", err)
-		return
-	}
-
-	oc := gvkClient.Resource(&metav1.APIResource{Name: "clusterrolebindings"}, "")
-
-	unstructured := metav1unstructured.Unstructured{
-		Object: make(map[string]interface{}),
-	}
-	if err := unstructuredconversion.DefaultConverter.ToUnstructured(openShiftExternal, &unstructured.Object); err != nil {
-		fmt.Printf("Error converting to unstructured: %v", err)
-		return
-	}
-
-	if _, err := oc.Create(&unstructured); err != nil {
-		fmt.Printf("Error binding OpenShift clusterrole/%s for %q for %v: %v\n", clusterRole, ns, subjects, err)
-	}
 }
 
 // BindClusterRoleInNamespace binds the cluster role at the namespace scope
-func BindClusterRoleInNamespace(c v1beta1rbac.RoleBindingsGetter, clientPool dynamic.ClientPool, clusterRole, ns string, subjects ...rbacv1beta1.Subject) {
+func BindClusterRoleInNamespace(c v1beta1rbac.RoleBindingsGetter, clusterRole, ns string, subjects ...rbacv1beta1.Subject) {
+	bindInNamespace(c, "ClusterRole", clusterRole, ns, subjects...)
+}
+
+// BindRoleInNamespace binds the role at the namespace scope
+func BindRoleInNamespace(c v1beta1rbac.RoleBindingsGetter, role, ns string, subjects ...rbacv1beta1.Subject) {
+	bindInNamespace(c, "Role", role, ns, subjects...)
+}
+
+func bindInNamespace(c v1beta1rbac.RoleBindingsGetter, roleType, role, ns string, subjects ...rbacv1beta1.Subject) {
 	// Since the namespace names are unique, we can leave this lying around so we don't have to race any caches
-	roleBinding := &rbacv1beta1.RoleBinding{
+	_, err := c.RoleBindings(ns).Create(&rbacv1beta1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ns + "--" + clusterRole,
+			Name: ns + "--" + role,
 		},
 		RoleRef: rbacv1beta1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     clusterRole,
+			Kind:     roleType,
+			Name:     role,
 		},
 		Subjects: subjects,
-	}
-
-	_, err := c.RoleBindings(ns).Create(roleBinding)
+	})
 
 	// if we failed, don't fail the entire test because it may still work. RBAC may simply be disabled.
 	if err != nil {
-		fmt.Printf("Error binding clusterrole/%s into %q for %v\n", clusterRole, ns, subjects)
+		fmt.Printf("Error binding %s/%s into %q for %v\n", roleType, role, ns, subjects)
 	}
+}
 
-	// CARRY: also do this for OpenShift
-	internalRoleBinding := &rbacinternal.RoleBinding{}
-	if err := api.Scheme.Convert(roleBinding, internalRoleBinding, nil); err != nil {
-		fmt.Printf("Error converting v1beta1 RoleBinding to internal: %v\n", err)
-		return
-	}
+var (
+	isRBACEnabledOnce sync.Once
+	isRBACEnabled     bool
+)
 
-	openShiftInternal := &openshiftauthzinternal.RoleBinding{}
-	if err := api.Scheme.Convert(internalRoleBinding, openShiftInternal, nil); err != nil {
-		fmt.Printf("Error converting kube RoleBinding to openshift internal: %v\n", err)
-		return
-	}
-
-	openShiftExternal := &openshiftauthzexternal.RoleBinding{}
-	if err := api.Scheme.Convert(openShiftInternal, openShiftExternal, nil); err != nil {
-		fmt.Printf("Error converting openshift internal RoleBinding to external: %v\n", err)
-		return
-	}
-
-	gvkClient, err := clientPool.ClientForGroupVersionKind(openshiftauthzexternal.SchemeGroupVersion.WithKind("RoleBinding"))
-	if err != nil {
-		fmt.Printf("Error creating dynamic client: %v", err)
-		return
-	}
-
-	oc := gvkClient.Resource(&metav1.APIResource{Name: "rolebindings"}, "")
-
-	unstructured := metav1unstructured.Unstructured{
-		Object: make(map[string]interface{}),
-	}
-	if err := unstructuredconversion.DefaultConverter.ToUnstructured(openShiftExternal, &unstructured.Object); err != nil {
-		fmt.Printf("Error converting to unstructured: %v", err)
-		return
-	}
-
-	if _, err := oc.Create(&unstructured); err != nil {
-		fmt.Printf("Error binding OpenShift clusterrole/%s for %q for %v: %v\n", clusterRole, ns, subjects, err)
-	}
+func IsRBACEnabled(f *Framework) bool {
+	isRBACEnabledOnce.Do(func() {
+		crs, err := f.ClientSet.RbacV1().ClusterRoles().List(metav1.ListOptions{})
+		if err != nil {
+			Logf("Error listing ClusterRoles; assuming RBAC is disabled: %v", err)
+			isRBACEnabled = false
+		} else if crs == nil || len(crs.Items) == 0 {
+			Logf("No ClusteRoles found; assuming RBAC is disabled.")
+			isRBACEnabled = false
+		} else {
+			Logf("Found ClusterRoles; assuming RBAC is enabled.")
+			isRBACEnabled = true
+		}
+	})
+	return isRBACEnabled
 }

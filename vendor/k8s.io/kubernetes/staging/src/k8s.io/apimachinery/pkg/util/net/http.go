@@ -26,12 +26,33 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
 	"github.com/golang/glog"
 	"golang.org/x/net/http2"
 )
+
+// JoinPreservingTrailingSlash does a path.Join of the specified elements,
+// preserving any trailing slash on the last non-empty segment
+func JoinPreservingTrailingSlash(elem ...string) string {
+	// do the basic path join
+	result := path.Join(elem...)
+
+	// find the last non-empty segment
+	for i := len(elem) - 1; i >= 0; i-- {
+		if len(elem[i]) > 0 {
+			// if the last segment ended in a slash, ensure our result does as well
+			if strings.HasSuffix(elem[i], "/") && !strings.HasSuffix(result, "/") {
+				result += "/"
+			}
+			break
+		}
+	}
+
+	return result
+}
 
 // IsProbableEOF returns true if the given error resembles a connection termination
 // scenario that would justify assuming that the watch is empty.
@@ -97,7 +118,7 @@ type RoundTripperWrapper interface {
 
 type DialFunc func(net, addr string) (net.Conn, error)
 
-func Dialer(transport http.RoundTripper) (DialFunc, error) {
+func DialerFor(transport http.RoundTripper) (DialFunc, error) {
 	if transport == nil {
 		return nil, nil
 	}
@@ -106,37 +127,9 @@ func Dialer(transport http.RoundTripper) (DialFunc, error) {
 	case *http.Transport:
 		return transport.Dial, nil
 	case RoundTripperWrapper:
-		return Dialer(transport.WrappedRoundTripper())
+		return DialerFor(transport.WrappedRoundTripper())
 	default:
-		return nil, fmt.Errorf("unknown transport type: %v", transport)
-	}
-}
-
-// CloneTLSConfig returns a tls.Config with all exported fields except SessionTicketsDisabled and SessionTicketKey copied.
-// This makes it safe to call CloneTLSConfig on a config in active use by a server.
-// TODO: replace with tls.Config#Clone when we move to go1.8
-func CloneTLSConfig(cfg *tls.Config) *tls.Config {
-	if cfg == nil {
-		return &tls.Config{}
-	}
-	return &tls.Config{
-		Rand:                     cfg.Rand,
-		Time:                     cfg.Time,
-		Certificates:             cfg.Certificates,
-		NameToCertificate:        cfg.NameToCertificate,
-		GetCertificate:           cfg.GetCertificate,
-		RootCAs:                  cfg.RootCAs,
-		NextProtos:               cfg.NextProtos,
-		ServerName:               cfg.ServerName,
-		ClientAuth:               cfg.ClientAuth,
-		ClientCAs:                cfg.ClientCAs,
-		InsecureSkipVerify:       cfg.InsecureSkipVerify,
-		CipherSuites:             cfg.CipherSuites,
-		PreferServerCipherSuites: cfg.PreferServerCipherSuites,
-		ClientSessionCache:       cfg.ClientSessionCache,
-		MinVersion:               cfg.MinVersion,
-		MaxVersion:               cfg.MaxVersion,
-		CurvePreferences:         cfg.CurvePreferences,
+		return nil, fmt.Errorf("unknown transport type: %T", transport)
 	}
 }
 
@@ -157,7 +150,7 @@ func TLSClientConfig(transport http.RoundTripper) (*tls.Config, error) {
 	case RoundTripperWrapper:
 		return TLSClientConfig(transport.WrappedRoundTripper())
 	default:
-		return nil, fmt.Errorf("unknown transport type: %v", transport)
+		return nil, fmt.Errorf("unknown transport type: %T", transport)
 	}
 }
 
@@ -178,13 +171,13 @@ func GetHTTPClient(req *http.Request) string {
 	return "unknown"
 }
 
-// Extracts and returns the clients IP from the given request.
-// Looks at X-Forwarded-For header, X-Real-Ip header and request.RemoteAddr in that order.
-// Returns nil if none of them are set or is set to an invalid value.
-func GetClientIP(req *http.Request) net.IP {
+// SourceIPs splits the comma separated X-Forwarded-For header or returns the X-Real-Ip header or req.RemoteAddr,
+// in that order, ignoring invalid IPs. It returns nil if all of these are empty or invalid.
+func SourceIPs(req *http.Request) []net.IP {
 	hdr := req.Header
 	// First check the X-Forwarded-For header for requests via proxy.
 	hdrForwardedFor := hdr.Get("X-Forwarded-For")
+	forwardedForIPs := []net.IP{}
 	if hdrForwardedFor != "" {
 		// X-Forwarded-For can be a csv of IPs in case of multiple proxies.
 		// Use the first valid one.
@@ -192,9 +185,12 @@ func GetClientIP(req *http.Request) net.IP {
 		for _, part := range parts {
 			ip := net.ParseIP(strings.TrimSpace(part))
 			if ip != nil {
-				return ip
+				forwardedForIPs = append(forwardedForIPs, ip)
 			}
 		}
+	}
+	if len(forwardedForIPs) > 0 {
+		return forwardedForIPs
 	}
 
 	// Try the X-Real-Ip header.
@@ -202,7 +198,7 @@ func GetClientIP(req *http.Request) net.IP {
 	if hdrRealIp != "" {
 		ip := net.ParseIP(hdrRealIp)
 		if ip != nil {
-			return ip
+			return []net.IP{ip}
 		}
 	}
 
@@ -210,11 +206,43 @@ func GetClientIP(req *http.Request) net.IP {
 	// Remote Address in Go's HTTP server is in the form host:port so we need to split that first.
 	host, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err == nil {
-		return net.ParseIP(host)
+		if remoteIP := net.ParseIP(host); remoteIP != nil {
+			return []net.IP{remoteIP}
+		}
 	}
 
 	// Fallback if Remote Address was just IP.
-	return net.ParseIP(req.RemoteAddr)
+	if remoteIP := net.ParseIP(req.RemoteAddr); remoteIP != nil {
+		return []net.IP{remoteIP}
+	}
+
+	return nil
+}
+
+// Extracts and returns the clients IP from the given request.
+// Looks at X-Forwarded-For header, X-Real-Ip header and request.RemoteAddr in that order.
+// Returns nil if none of them are set or is set to an invalid value.
+func GetClientIP(req *http.Request) net.IP {
+	ips := SourceIPs(req)
+	if len(ips) == 0 {
+		return nil
+	}
+	return ips[0]
+}
+
+// Prepares the X-Forwarded-For header for another forwarding hop by appending the previous sender's
+// IP address to the X-Forwarded-For chain.
+func AppendForwardedForHeader(req *http.Request) {
+	// Copied from net/http/httputil/reverseproxy.go:
+	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		// If we aren't the first proxy retain prior
+		// X-Forwarded-For information as a comma+space
+		// separated list and fold multiple headers into one.
+		if prior, ok := req.Header["X-Forwarded-For"]; ok {
+			clientIP = strings.Join(prior, ", ") + ", " + clientIP
+		}
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
 }
 
 var defaultProxyFuncPointer = fmt.Sprintf("%p", http.ProxyFromEnvironment)
@@ -228,8 +256,11 @@ func isDefault(transportProxier func(*http.Request) (*url.URL, error)) bool {
 // NewProxierWithNoProxyCIDR constructs a Proxier function that respects CIDRs in NO_PROXY and delegates if
 // no matching CIDRs are found
 func NewProxierWithNoProxyCIDR(delegate func(req *http.Request) (*url.URL, error)) func(req *http.Request) (*url.URL, error) {
-	// we wrap the default method, so we only need to perform our check if the NO_PROXY envvar has a CIDR in it
+	// we wrap the default method, so we only need to perform our check if the NO_PROXY (or no_proxy) envvar has a CIDR in it
 	noProxyEnv := os.Getenv("NO_PROXY")
+	if noProxyEnv == "" {
+		noProxyEnv = os.Getenv("no_proxy")
+	}
 	noProxyRules := strings.Split(noProxyEnv, ",")
 
 	cidrs := []*net.IPNet{}
@@ -245,17 +276,7 @@ func NewProxierWithNoProxyCIDR(delegate func(req *http.Request) (*url.URL, error
 	}
 
 	return func(req *http.Request) (*url.URL, error) {
-		host := req.URL.Host
-		// for some urls, the Host is already the host, not the host:port
-		if net.ParseIP(host) == nil {
-			var err error
-			host, _, err = net.SplitHostPort(req.URL.Host)
-			if err != nil {
-				return delegate(req)
-			}
-		}
-
-		ip := net.ParseIP(host)
+		ip := net.ParseIP(req.URL.Hostname())
 		if ip == nil {
 			return delegate(req)
 		}
@@ -270,28 +291,34 @@ func NewProxierWithNoProxyCIDR(delegate func(req *http.Request) (*url.URL, error
 	}
 }
 
-// RequestSender creates and sends an http.Request.
-type RequestSender interface {
-	// SendRequest connects to the address specified by location, constructs a new http.Request,
-	// writes the request to the connection, and returns the opened net.Conn.
-	SendRequest(method string, location *url.URL, header http.Header, body io.Reader) (net.Conn, error)
+// DialerFunc implements Dialer for the provided function.
+type DialerFunc func(req *http.Request) (net.Conn, error)
+
+func (fn DialerFunc) Dial(req *http.Request) (net.Conn, error) {
+	return fn(req)
 }
 
-// ConnectWithRedirects uses requestSender to send req, following up to 10 redirects (relative to
-// baseLocation). It returns the opened net.Conn and the raw response bytes.
-func ConnectWithRedirects(originalMethod string, baseLocation *url.URL, header http.Header, originalBody io.Reader, requestSender RequestSender) (net.Conn, []byte, error) {
+// Dialer dials a host and writes a request to it.
+type Dialer interface {
+	// Dial connects to the host specified by req's URL, writes the request to the connection, and
+	// returns the opened net.Conn.
+	Dial(req *http.Request) (net.Conn, error)
+}
+
+// ConnectWithRedirects uses dialer to send req, following up to 10 redirects (relative to
+// originalLocation). It returns the opened net.Conn and the raw response bytes.
+func ConnectWithRedirects(originalMethod string, originalLocation *url.URL, header http.Header, originalBody io.Reader, dialer Dialer) (net.Conn, []byte, error) {
 	const (
 		maxRedirects    = 10
 		maxResponseSize = 16384 // play it safe to allow the potential for lots of / large headers
 	)
 
 	var (
-		location         = baseLocation
+		location         = originalLocation
 		method           = originalMethod
 		intermediateConn net.Conn
 		rawResponse      = bytes.NewBuffer(make([]byte, 0, 256))
 		body             = originalBody
-		err              error
 	)
 
 	defer func() {
@@ -305,15 +332,15 @@ redirectLoop:
 		if redirects > maxRedirects {
 			return nil, nil, fmt.Errorf("too many redirects (%d)", redirects)
 		}
-		if redirects != 0 {
-			// Redirected requests switch to "GET" according to the HTTP spec:
-			// https://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html#sec10.3
-			method = "GET"
-			// don't send a body when following redirects
-			body = nil
+
+		req, err := http.NewRequest(method, location.String(), body)
+		if err != nil {
+			return nil, nil, err
 		}
 
-		intermediateConn, err = requestSender.SendRequest(method, location, header, body)
+		req.Header = header
+
+		intermediateConn, err = dialer.Dial(req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -338,6 +365,12 @@ redirectLoop:
 			break redirectLoop
 		}
 
+		// Redirected requests switch to "GET" according to the HTTP spec:
+		// https://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html#sec10.3
+		method = "GET"
+		// don't send a body when following redirects
+		body = nil
+
 		resp.Body.Close() // not used
 
 		// Reset the connection.
@@ -349,6 +382,10 @@ redirectLoop:
 		if redirectStr == "" {
 			return nil, nil, fmt.Errorf("%d response missing Location header", resp.StatusCode)
 		}
+		// We have to parse relative to the current location, NOT originalLocation. For example,
+		// if we request http://foo.com/a and get back "http://bar.com/b", the result should be
+		// http://bar.com/b. If we then make that request and get back a redirect to "/c", the result
+		// should be http://bar.com/c, not http://foo.com/c.
 		location, err = location.Parse(redirectStr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("malformed Location header: %v", err)

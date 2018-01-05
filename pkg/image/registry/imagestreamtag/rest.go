@@ -11,9 +11,10 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 
 	oapi "github.com/openshift/origin/pkg/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 	"github.com/openshift/origin/pkg/image/registry/image"
 	"github.com/openshift/origin/pkg/image/registry/imagestream"
+	"github.com/openshift/origin/pkg/image/util"
 )
 
 // REST implements the RESTStorage interface for ImageStreamTag
@@ -28,11 +29,16 @@ func NewREST(imageRegistry image.Registry, imageStreamRegistry imagestream.Regis
 	return &REST{imageRegistry: imageRegistry, imageStreamRegistry: imageStreamRegistry}
 }
 
-var _ rest.Creater = &REST{}
-var _ rest.Lister = &REST{}
 var _ rest.Getter = &REST{}
+var _ rest.Lister = &REST{}
+var _ rest.CreaterUpdater = &REST{}
 var _ rest.Deleter = &REST{}
-var _ rest.Updater = &REST{}
+var _ rest.ShortNamesProvider = &REST{}
+
+// ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
+func (r *REST) ShortNames() []string {
+	return []string{"istag"}
+}
 
 // New is only implemented to make REST implement RESTStorage
 func (r *REST) New() runtime.Object {
@@ -106,12 +112,15 @@ func (r *REST) Get(ctx apirequest.Context, id string, options *metav1.GetOptions
 	return newISTag(tag, imageStream, image, false)
 }
 
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
 	istag, ok := obj.(*imageapi.ImageStreamTag)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("obj is not an ImageStreamTag: %#v", obj))
 	}
 	if err := rest.BeforeCreate(Strategy, ctx, obj); err != nil {
+		return nil, err
+	}
+	if err := createValidation(obj.DeepCopyObject()); err != nil {
 		return nil, err
 	}
 	namespace, ok := apirequest.NamespaceFrom(ctx)
@@ -148,7 +157,9 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 	if exists {
 		return nil, kapierrors.NewAlreadyExists(imageapi.Resource("imagestreamtag"), istag.Name)
 	}
-	target.Spec.Tags[imageTag] = *istag.Tag
+	if istag.Tag != nil {
+		target.Spec.Tags[imageTag] = *istag.Tag
+	}
 
 	// Check the stream creation timestamp and make sure we will not
 	// create a new image stream while deleting.
@@ -164,7 +175,7 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 	return istag, nil
 }
 
-func (r *REST) Update(ctx apirequest.Context, tagName string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+func (r *REST) Update(ctx apirequest.Context, tagName string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
 	name, tag, err := nameAndTag(tagName)
 	if err != nil {
 		return nil, false, err
@@ -219,12 +230,24 @@ func (r *REST) Update(ctx apirequest.Context, tagName string, objInfo rest.Updat
 		return nil, false, kapierrors.NewConflict(imageapi.Resource("imagestreamtags"), istag.Name, fmt.Errorf("another caller has updated the resource version to %s", imageStream.ResourceVersion))
 	}
 
+	// When we began returning image stream labels in 3.6, old clients that didn't need to send labels would be
+	// broken on update. Explicitly default labels if they are unset.  We don't support mutation of labels on update.
+	if len(imageStream.Labels) > 0 && len(istag.Labels) == 0 {
+		istag.Labels = imageStream.Labels
+	}
+
 	if create {
 		if err := rest.BeforeCreate(Strategy, ctx, obj); err != nil {
 			return nil, false, err
 		}
+		if err := createValidation(obj.DeepCopyObject()); err != nil {
+			return nil, false, err
+		}
 	} else {
 		if err := rest.BeforeUpdate(Strategy, ctx, obj, old); err != nil {
+			return nil, false, err
+		}
+		if err := updateValidation(obj.DeepCopyObject(), old.DeepCopyObject()); err != nil {
 			return nil, false, err
 		}
 	}
@@ -334,11 +357,14 @@ func newISTag(tag string, imageStream *imageapi.ImageStream, image *imageapi.Ima
 			Name:              istagName,
 			CreationTimestamp: event.Created,
 			Annotations:       map[string]string{},
+			Labels:            imageStream.Labels,
 			ResourceVersion:   imageStream.ResourceVersion,
 			UID:               imageStream.UID,
 		},
 		Generation: event.Generation,
 		Conditions: imageStream.Status.Tags[tag].Conditions,
+
+		LookupPolicy: imageStream.Spec.LookupPolicy,
 	}
 
 	if imageStream.Spec.Tags != nil {
@@ -369,7 +395,7 @@ func newISTag(tag string, imageStream *imageapi.ImageStream, image *imageapi.Ima
 	}
 
 	if image != nil {
-		if err := imageapi.ImageWithMetadata(image); err != nil {
+		if err := util.ImageWithMetadata(image); err != nil {
 			return nil, err
 		}
 		image.DockerImageManifest = ""
@@ -380,12 +406,6 @@ func newISTag(tag string, imageStream *imageapi.ImageStream, image *imageapi.Ima
 		ist.Image.Name = event.Image
 	}
 
-	// Replace the DockerImageReference with the value from event, which contains
-	// real value from status. This should fix the problem for v1 registries,
-	// where mutliple tags point to a single id and only the first image's metadata
-	// is saved. This in turn will always return the pull spec from the first
-	// imported image, which might be different than the requested tag.
-	ist.Image.DockerImageReference = event.DockerImageReference
-
+	ist.Image.DockerImageReference = imageapi.ResolveReferenceForTagEvent(imageStream, tag, event)
 	return ist, nil
 }

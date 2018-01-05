@@ -10,10 +10,11 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	kauthorizer "k8s.io/apiserver/pkg/authorization/authorizer"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	apiserverrest "k8s.io/apiserver/pkg/registry/rest"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/authorization/authorizer"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 	"github.com/openshift/origin/pkg/authorization/registry/subjectaccessreview"
+	"github.com/openshift/origin/pkg/authorization/registry/util"
 )
 
 type subjectAccessTest struct {
@@ -26,17 +27,17 @@ type subjectAccessTest struct {
 }
 
 type testAuthorizer struct {
-	allowed bool
+	allowed kauthorizer.Decision
 	reason  string
 	err     string
 
 	actualAttributes kauthorizer.Attributes
 }
 
-func (a *testAuthorizer) Authorize(passedAttributes kauthorizer.Attributes) (allowed bool, reason string, err error) {
+func (a *testAuthorizer) Authorize(passedAttributes kauthorizer.Attributes) (authorized kauthorizer.Decision, reason string, err error) {
 	// allow the initial check for "can I run this SAR at all"
 	if passedAttributes.GetResource() == "localsubjectaccessreviews" {
-		return true, "", nil
+		return kauthorizer.DecisionAllow, "", nil
 	}
 
 	a.actualAttributes = passedAttributes
@@ -53,7 +54,7 @@ func (a *testAuthorizer) GetAllowedSubjects(passedAttributes kauthorizer.Attribu
 func TestNoNamespace(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: false,
+			allowed: kauthorizer.DecisionNoOpinion,
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
 			Action: authorizationapi.Action{
@@ -72,7 +73,7 @@ func TestNoNamespace(t *testing.T) {
 
 func TestConflictingNamespace(t *testing.T) {
 	authorizer := &testAuthorizer{
-		allowed: false,
+		allowed: kauthorizer.DecisionNoOpinion,
 	}
 	reviewRequest := &authorizationapi.LocalSubjectAccessReview{
 		Action: authorizationapi.Action{
@@ -86,7 +87,7 @@ func TestConflictingNamespace(t *testing.T) {
 
 	storage := NewREST(subjectaccessreview.NewRegistry(subjectaccessreview.NewREST(authorizer)))
 	ctx := apirequest.WithNamespace(apirequest.NewContext(), "bar")
-	_, err := storage.Create(ctx, reviewRequest)
+	_, err := storage.Create(ctx, reviewRequest, apiserverrest.ValidateAllObjectFunc, false)
 	if err == nil {
 		t.Fatalf("unexpected non-error: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestConflictingNamespace(t *testing.T) {
 func TestEmptyReturn(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: false,
+			allowed: kauthorizer.DecisionNoOpinion,
 			reason:  "because reasons",
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
@@ -123,7 +124,7 @@ func TestEmptyReturn(t *testing.T) {
 func TestNoErrors(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: true,
+			allowed: kauthorizer.DecisionAllow,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
@@ -171,7 +172,7 @@ func TestErrors(t *testing.T) {
 func TestRegularWithScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: true,
+			allowed: kauthorizer.DecisionAllow,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
@@ -200,7 +201,7 @@ func TestRegularWithScopes(t *testing.T) {
 func TestSelfWithDefaultScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: true,
+			allowed: kauthorizer.DecisionAllow,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
@@ -228,7 +229,7 @@ func TestSelfWithDefaultScopes(t *testing.T) {
 func TestSelfWithClearedScopes(t *testing.T) {
 	test := &subjectAccessTest{
 		authorizer: &testAuthorizer{
-			allowed: true,
+			allowed: kauthorizer.DecisionAllow,
 			reason:  "because good things",
 		},
 		reviewRequest: &authorizationapi.LocalSubjectAccessReview{
@@ -259,7 +260,7 @@ func (r *subjectAccessTest) runTest(t *testing.T) {
 
 	expectedResponse := &authorizationapi.SubjectAccessReviewResponse{
 		Namespace:       r.reviewRequest.Action.Namespace,
-		Allowed:         r.authorizer.allowed,
+		Allowed:         r.authorizer.allowed == kauthorizer.DecisionAllow,
 		Reason:          r.authorizer.reason,
 		EvaluationError: r.authorizer.err,
 	}
@@ -271,7 +272,7 @@ func (r *subjectAccessTest) runTest(t *testing.T) {
 		ctx = apirequest.WithUser(ctx, &user.DefaultInfo{Name: "dummy"})
 	}
 
-	obj, err := storage.Create(ctx, r.reviewRequest)
+	obj, err := storage.Create(ctx, r.reviewRequest, apiserverrest.ValidateAllObjectFunc, false)
 	switch {
 	case err == nil && len(r.expectedError) == 0:
 	case err == nil && len(r.expectedError) != 0:
@@ -295,7 +296,7 @@ func (r *subjectAccessTest) runTest(t *testing.T) {
 		t.Errorf("Unexpected obj type: %v", obj)
 	}
 
-	expectedAttributes := authorizer.ToDefaultAuthorizationAttributes(r.expectedUserInfo, r.reviewRequest.Action.Namespace, r.reviewRequest.Action)
+	expectedAttributes := util.ToDefaultAuthorizationAttributes(r.expectedUserInfo, r.reviewRequest.Action.Namespace, r.reviewRequest.Action)
 	if !reflect.DeepEqual(expectedAttributes, r.authorizer.actualAttributes) {
 		t.Errorf("diff %v", diff.ObjectGoPrintDiff(expectedAttributes, r.authorizer.actualAttributes))
 	}

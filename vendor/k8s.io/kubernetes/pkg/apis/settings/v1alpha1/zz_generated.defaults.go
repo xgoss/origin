@@ -21,20 +21,21 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1alpha1 "k8s.io/api/settings/v1alpha1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
-	v1 "k8s.io/kubernetes/pkg/api/v1"
+	v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 )
 
 // RegisterDefaults adds defaulters functions to the given scheme.
 // Public to allow building arbitrary schemes.
 // All generated defaulters are covering - they call all nested defaulters.
 func RegisterDefaults(scheme *runtime.Scheme) error {
-	scheme.AddTypeDefaultingFunc(&PodPreset{}, func(obj interface{}) { SetObjectDefaults_PodPreset(obj.(*PodPreset)) })
-	scheme.AddTypeDefaultingFunc(&PodPresetList{}, func(obj interface{}) { SetObjectDefaults_PodPresetList(obj.(*PodPresetList)) })
+	scheme.AddTypeDefaultingFunc(&v1alpha1.PodPreset{}, func(obj interface{}) { SetObjectDefaults_PodPreset(obj.(*v1alpha1.PodPreset)) })
+	scheme.AddTypeDefaultingFunc(&v1alpha1.PodPresetList{}, func(obj interface{}) { SetObjectDefaults_PodPresetList(obj.(*v1alpha1.PodPresetList)) })
 	return nil
 }
 
-func SetObjectDefaults_PodPreset(in *PodPreset) {
+func SetObjectDefaults_PodPreset(in *v1alpha1.PodPreset) {
 	for i := range in.Spec.Env {
 		a := &in.Spec.Env[i]
 		if a.ValueFrom != nil {
@@ -46,6 +47,9 @@ func SetObjectDefaults_PodPreset(in *PodPreset) {
 	for i := range in.Spec.Volumes {
 		a := &in.Spec.Volumes[i]
 		v1.SetDefaults_Volume(a)
+		if a.VolumeSource.HostPath != nil {
+			v1.SetDefaults_HostPathVolumeSource(a.VolumeSource.HostPath)
+		}
 		if a.VolumeSource.Secret != nil {
 			v1.SetDefaults_SecretVolumeSource(a.VolumeSource.Secret)
 		}
@@ -87,19 +91,10 @@ func SetObjectDefaults_PodPreset(in *PodPreset) {
 		if a.VolumeSource.ScaleIO != nil {
 			v1.SetDefaults_ScaleIOVolumeSource(a.VolumeSource.ScaleIO)
 		}
-		if a.VolumeSource.Metadata != nil {
-			v1.SetDefaults_DeprecatedDownwardAPIVolumeSource(a.VolumeSource.Metadata)
-			for j := range a.VolumeSource.Metadata.Items {
-				b := &a.VolumeSource.Metadata.Items[j]
-				if b.FieldRef != nil {
-					v1.SetDefaults_ObjectFieldSelector(b.FieldRef)
-				}
-			}
-		}
 	}
 }
 
-func SetObjectDefaults_PodPresetList(in *PodPresetList) {
+func SetObjectDefaults_PodPresetList(in *v1alpha1.PodPresetList) {
 	for i := range in.Items {
 		a := &in.Items[i]
 		SetObjectDefaults_PodPreset(a)

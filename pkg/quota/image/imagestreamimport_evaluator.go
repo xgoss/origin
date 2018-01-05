@@ -5,17 +5,16 @@ import (
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kadmission "k8s.io/apiserver/pkg/admission"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kquota "k8s.io/kubernetes/pkg/quota"
 	"k8s.io/kubernetes/pkg/quota/generic"
 
-	oscache "github.com/openshift/origin/pkg/client/cache"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageinternalversion "github.com/openshift/origin/pkg/image/generated/listers/image/internalversion"
 )
 
 var imageStreamImportResources = []kapi.ResourceName{
@@ -23,13 +22,13 @@ var imageStreamImportResources = []kapi.ResourceName{
 }
 
 type imageStreamImportEvaluator struct {
-	store *oscache.StoreToImageStreamLister
+	store imageinternalversion.ImageStreamLister
 }
 
 // NewImageStreamImportEvaluator computes resource usage for ImageStreamImport objects. This particular kind
 // is a virtual resource. It depends on ImageStream usage evaluator to compute image numbers before the
 // the admission can work.
-func NewImageStreamImportEvaluator(store *oscache.StoreToImageStreamLister) kquota.Evaluator {
+func NewImageStreamImportEvaluator(store imageinternalversion.ImageStreamLister) kquota.Evaluator {
 	return &imageStreamImportEvaluator{
 		store: store,
 	}
@@ -43,12 +42,12 @@ func (i *imageStreamImportEvaluator) Constraints(required []kapi.ResourceName, o
 	return nil
 }
 
-func (i *imageStreamImportEvaluator) GroupKind() schema.GroupKind {
-	return imageapi.Kind("ImageStreamImport")
+func (i *imageStreamImportEvaluator) GroupResource() schema.GroupResource {
+	return imageapi.Resource("imagestreamimports")
 }
 
-func (i *imageStreamImportEvaluator) Handles(operation kadmission.Operation) bool {
-	return operation == kadmission.Create
+func (i *imageStreamImportEvaluator) Handles(a kadmission.Attributes) bool {
+	return a.GetOperation() == kadmission.Create
 }
 
 func (i *imageStreamImportEvaluator) Matches(resourceQuota *kapi.ResourceQuota, item runtime.Object) (bool, error) {
@@ -74,7 +73,7 @@ func (i *imageStreamImportEvaluator) Usage(item runtime.Object) (kapi.ResourceLi
 		return usage, nil
 	}
 
-	is, err := i.store.ImageStreams(isi.Namespace).Get(isi.Name, metav1.GetOptions{})
+	is, err := i.store.ImageStreams(isi.Namespace).Get(isi.Name)
 	if err != nil && !kerrors.IsNotFound(err) {
 		utilruntime.HandleError(fmt.Errorf("failed to list image streams: %v", err))
 	}

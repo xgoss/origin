@@ -4,26 +4,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	serverapi "github.com/openshift/origin/pkg/cmd/server/api"
-	"github.com/openshift/origin/pkg/image/api"
-	"github.com/openshift/origin/pkg/image/api/validation"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	"github.com/openshift/origin/pkg/image/apis/image/validation"
 )
 
 // strategy implements behavior for ImageStreamImports.
 type strategy struct {
 	runtime.ObjectTyper
-	allowedRegistries *serverapi.AllowedRegistries
-	registryFn        api.DefaultRegistryFunc
+	allowedRegistries     *serverapi.AllowedRegistries
+	registryHostRetriever imageapi.RegistryHostnameRetriever
 }
 
-func NewStrategy(registries *serverapi.AllowedRegistries, registryFn api.DefaultRegistryFunc) *strategy {
+func NewStrategy(registries *serverapi.AllowedRegistries, registry imageapi.RegistryHostnameRetriever) *strategy {
 	return &strategy{
-		ObjectTyper:       kapi.Scheme,
-		allowedRegistries: registries,
-		registryFn:        registryFn,
+		ObjectTyper:           legacyscheme.Scheme,
+		allowedRegistries:     registries,
+		registryHostRetriever: registry,
 	}
 }
 
@@ -38,19 +38,17 @@ func (s *strategy) GenerateName(string) string {
 func (s *strategy) Canonicalize(runtime.Object) {
 }
 
-func (s *strategy) ValidateAllowedRegistries(isi *api.ImageStreamImport) field.ErrorList {
+func (s *strategy) ValidateAllowedRegistries(isi *imageapi.ImageStreamImport) field.ErrorList {
 	errs := field.ErrorList{}
 	if s.allowedRegistries == nil {
 		return errs
 	}
 	allowedRegistries := *s.allowedRegistries
-	// FIXME: The registryFn won't return the registry location until the registry service
-	// is created. This should be switched to use registry DNS instead of lazy-loading.
-	if localRegistry, ok := s.registryFn(); ok {
+	if localRegistry, ok := s.registryHostRetriever.InternalRegistryHostname(); ok {
 		allowedRegistries = append([]configapi.RegistryLocation{{DomainName: localRegistry}}, allowedRegistries...)
 	}
 	validate := func(path *field.Path, name string, insecure bool) field.ErrorList {
-		ref, _ := api.ParseDockerImageReference(name)
+		ref, _ := imageapi.ParseDockerImageReference(name)
 		registryHost, registryPort := ref.RegistryHostPort(insecure)
 		return validation.ValidateRegistryAllowedForImport(path.Child("from", "name"), ref.Name, registryHost, registryPort, &allowedRegistries)
 	}
@@ -66,12 +64,12 @@ func (s *strategy) ValidateAllowedRegistries(isi *api.ImageStreamImport) field.E
 }
 
 func (s *strategy) PrepareForCreate(ctx apirequest.Context, obj runtime.Object) {
-	newIST := obj.(*api.ImageStreamImport)
-	newIST.Status = api.ImageStreamImportStatus{}
+	newIST := obj.(*imageapi.ImageStreamImport)
+	newIST.Status = imageapi.ImageStreamImportStatus{}
 }
 
 func (s *strategy) PrepareImageForCreate(obj runtime.Object) {
-	image := obj.(*api.Image)
+	image := obj.(*imageapi.Image)
 
 	// signatures can be added using "images" or "imagesignatures" resources
 	image.Signatures = nil
@@ -82,6 +80,6 @@ func (s *strategy) PrepareImageForCreate(obj runtime.Object) {
 }
 
 func (s *strategy) Validate(ctx apirequest.Context, obj runtime.Object) field.ErrorList {
-	isi := obj.(*api.ImageStreamImport)
+	isi := obj.(*imageapi.ImageStreamImport)
 	return validation.ValidateImageStreamImport(isi)
 }

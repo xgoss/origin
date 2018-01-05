@@ -8,34 +8,39 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/davecgh/go-spew/spew"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	"github.com/openshift/origin/pkg/client/testclient"
-	oauthapi "github.com/openshift/origin/pkg/oauth/api"
-	authenticationapi "github.com/openshift/origin/pkg/user/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	authfake "github.com/openshift/origin/pkg/authorization/generated/internalclientset/fake"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	oauthfake "github.com/openshift/origin/pkg/oauth/generated/internalclientset/fake"
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
+	securityfake "github.com/openshift/origin/pkg/security/generated/internalclientset/fake"
+	authenticationapi "github.com/openshift/origin/pkg/user/apis/user"
+	userfake "github.com/openshift/origin/pkg/user/generated/internalclientset/fake"
 )
 
 var (
-	usersResource                     = schema.GroupVersionResource{Group: "", Version: "", Resource: "users"}
-	securityContextContraintsResource = schema.GroupVersionResource{Group: "", Version: "", Resource: "securitycontextconstraints"}
-	oAuthClientAuthorizationsResource = schema.GroupVersionResource{Group: "", Version: "", Resource: "oauthclientauthorizations"}
+	usersResource                     = schema.GroupVersionResource{Group: "user.openshift.io", Version: "", Resource: "users"}
+	securityContextContraintsResource = schema.GroupVersionResource{Group: "security.openshift.io", Version: "", Resource: "securitycontextconstraints"}
+	oAuthClientAuthorizationsResource = schema.GroupVersionResource{Group: "oauth.openshift.io", Version: "", Resource: "oauthclientauthorizations"}
 )
 
 func TestUserReaper(t *testing.T) {
 	tests := []struct {
-		name     string
-		user     string
-		objects  []runtime.Object
-		expected []interface{}
+		name         string
+		user         string
+		authObjects  []runtime.Object
+		oauthObjects []runtime.Object
+		userObjects  []runtime.Object
+		sccs         []runtime.Object
+		expected     []interface{}
 	}{
 		{
-			name:    "no objects",
-			user:    "bob",
-			objects: []runtime.Object{},
+			name: "no objects",
+			user: "bob",
 			expected: []interface{}{
 				clientgotesting.DeleteActionImpl{ActionImpl: clientgotesting.ActionImpl{Verb: "delete", Resource: usersResource}, Name: "bob"},
 			},
@@ -43,7 +48,7 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "cluster bindings",
 			user: "bob",
-			objects: []runtime.Object{
+			authObjects: []runtime.Object{
 				&authorizationapi.ClusterRoleBinding{
 					ObjectMeta: metav1.ObjectMeta{Name: "binding-no-subjects"},
 					RoleRef:    kapi.ObjectReference{Name: "role"},
@@ -72,7 +77,7 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "namespaced bindings",
 			user: "bob",
-			objects: []runtime.Object{
+			authObjects: []runtime.Object{
 				&authorizationapi.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{Name: "binding-no-subjects", Namespace: "ns1"},
 					RoleRef:    kapi.ObjectReference{Name: "role"},
@@ -101,23 +106,23 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "sccs",
 			user: "bob",
-			objects: []runtime.Object{
-				&kapi.SecurityContextConstraints{
+			sccs: []runtime.Object{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-no-subjects"},
 					Users:      []string{},
 				},
-				&kapi.SecurityContextConstraints{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-one-subject"},
 					Users:      []string{"bob"},
 				},
-				&kapi.SecurityContextConstraints{
+				&securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-mismatched-subjects"},
 					Users:      []string{"bob2"},
 					Groups:     []string{"bob"},
 				},
 			},
 			expected: []interface{}{
-				clientgotesting.UpdateActionImpl{ActionImpl: clientgotesting.ActionImpl{Verb: "update", Resource: securityContextContraintsResource}, Object: &kapi.SecurityContextConstraints{
+				clientgotesting.UpdateActionImpl{ActionImpl: clientgotesting.ActionImpl{Verb: "update", Resource: securityContextContraintsResource}, Object: &securityapi.SecurityContextConstraints{
 					ObjectMeta: metav1.ObjectMeta{Name: "scc-one-subject"},
 					Users:      []string{},
 				}},
@@ -127,7 +132,7 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "identities",
 			user: "bob",
-			objects: []runtime.Object{
+			userObjects: []runtime.Object{
 				&authenticationapi.Identity{
 					ObjectMeta: metav1.ObjectMeta{Name: "identity-no-user"},
 					User:       kapi.ObjectReference{},
@@ -153,7 +158,7 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "groups",
 			user: "bob",
-			objects: []runtime.Object{
+			userObjects: []runtime.Object{
 				&authenticationapi.Group{
 					ObjectMeta: metav1.ObjectMeta{Name: "group-no-users"},
 					Users:      []string{},
@@ -186,7 +191,7 @@ func TestUserReaper(t *testing.T) {
 		{
 			name: "oauth client authorizations",
 			user: "bob",
-			objects: []runtime.Object{
+			oauthObjects: []runtime.Object{
 				&oauthapi.OAuthClientAuthorization{
 					ObjectMeta: metav1.ObjectMeta{Name: "other-user"},
 					UserName:   "alice",
@@ -212,8 +217,10 @@ func TestUserReaper(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		tc := testclient.NewSimpleFake(testclient.OriginObjects(test.objects)...)
-		ktc := fake.NewSimpleClientset(testclient.UpstreamObjects(test.objects)...)
+		authFake := authfake.NewSimpleClientset(test.authObjects...)
+		userFake := userfake.NewSimpleClientset(test.userObjects...)
+		oauthFake := oauthfake.NewSimpleClientset(test.oauthObjects...)
+		securityFake := securityfake.NewSimpleClientset(test.sccs...)
 
 		actual := []interface{}{}
 		oreactor := func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -225,12 +232,16 @@ func TestUserReaper(t *testing.T) {
 			return false, nil, nil
 		}
 
-		tc.PrependReactor("update", "*", oreactor)
-		tc.PrependReactor("delete", "*", oreactor)
-		ktc.PrependReactor("update", "*", kreactor)
-		ktc.PrependReactor("delete", "*", kreactor)
+		authFake.PrependReactor("update", "*", oreactor)
+		userFake.PrependReactor("update", "*", oreactor)
+		oauthFake.PrependReactor("update", "*", oreactor)
+		authFake.PrependReactor("delete", "*", oreactor)
+		userFake.PrependReactor("delete", "*", oreactor)
+		oauthFake.PrependReactor("delete", "*", oreactor)
+		securityFake.Fake.PrependReactor("update", "*", kreactor)
+		securityFake.Fake.PrependReactor("delete", "*", kreactor)
 
-		reaper := NewUserReaper(tc, tc, tc, tc, tc, ktc.Core())
+		reaper := NewUserReaper(userFake, userFake, authFake, authFake, oauthFake, securityFake.Security().SecurityContextConstraints())
 		err := reaper.Stop("", test.user, 0, nil)
 		if err != nil {
 			t.Errorf("%s: unexpected error: %v", test.name, err)

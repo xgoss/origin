@@ -16,7 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/diff"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
 
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	configapiv1 "github.com/openshift/origin/pkg/cmd/server/api/v1"
@@ -43,11 +44,27 @@ func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runti
 			if len(obj.Controllers) == 0 {
 				obj.Controllers = configapi.ControllersAll
 			}
+			if len(obj.ControllerConfig.Controllers) == 0 {
+				switch {
+				case obj.Controllers == configapi.ControllersAll:
+					obj.ControllerConfig.Controllers = []string{"*"}
+				case obj.Controllers == configapi.ControllersDisabled:
+					obj.ControllerConfig.Controllers = []string{}
+				}
+			}
+			if election := obj.ControllerConfig.Election; election != nil {
+				if len(election.LockNamespace) == 0 {
+					election.LockNamespace = "kube-system"
+				}
+				if len(election.LockResource.Group) == 0 && len(election.LockResource.Resource) == 0 {
+					election.LockResource.Resource = "endpoints"
+				}
+			}
 			if obj.ServingInfo.RequestTimeoutSeconds == 0 {
 				obj.ServingInfo.RequestTimeoutSeconds = 60 * 60
 			}
 			if obj.ServingInfo.MaxRequestsInFlight == 0 {
-				obj.ServingInfo.MaxRequestsInFlight = 500
+				obj.ServingInfo.MaxRequestsInFlight = 1200
 			}
 			if len(obj.PolicyConfig.OpenShiftInfrastructureNamespace) == 0 {
 				obj.PolicyConfig.OpenShiftInfrastructureNamespace = bootstrappolicy.DefaultOpenShiftInfraNamespace
@@ -103,13 +120,41 @@ func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runti
 					obj.NetworkConfig.ServiceNetworkCIDR = "10.0.0.0/24"
 				}
 			}
+			if c.RandBool() {
+				if len(obj.NetworkConfig.ClusterNetworks) == 0 {
+					clusterNetwork := []configapi.ClusterNetworkEntry{
+						{
+							CIDR:             "10.128.0.0/14",
+							HostSubnetLength: 9,
+						},
+					}
+					obj.NetworkConfig.ClusterNetworks = clusterNetwork
+				}
+				obj.NetworkConfig.DeprecatedClusterNetworkCIDR = obj.NetworkConfig.ClusterNetworks[0].CIDR
+				obj.NetworkConfig.DeprecatedHostSubnetLength = obj.NetworkConfig.ClusterNetworks[0].HostSubnetLength
+			} else {
+				obj.NetworkConfig.ClusterNetworks = nil
+				obj.NetworkConfig.DeprecatedClusterNetworkCIDR = ""
+				obj.NetworkConfig.DeprecatedHostSubnetLength = 0
+			}
 
 			// TODO stop duplicating the conversion in the test.
 			kubeConfig := obj.KubernetesMasterConfig
 			noCloudProvider := kubeConfig != nil && (len(kubeConfig.ControllerArguments["cloud-provider"]) == 0 || kubeConfig.ControllerArguments["cloud-provider"][0] == "")
 			if noCloudProvider && len(obj.NetworkConfig.IngressIPNetworkCIDR) == 0 {
 				cidr := configapi.DefaultIngressIPNetworkCIDR
-				if !(configapi.CIDRsOverlap(cidr, obj.NetworkConfig.ClusterNetworkCIDR) || configapi.CIDRsOverlap(cidr, obj.NetworkConfig.ServiceNetworkCIDR)) {
+				setCIDR := true
+				if configapi.CIDRsOverlap(cidr, obj.NetworkConfig.ServiceNetworkCIDR) {
+					setCIDR = false
+				} else {
+					for _, clusterNetwork := range obj.NetworkConfig.ClusterNetworks {
+						if configapi.CIDRsOverlap(cidr, clusterNetwork.CIDR) {
+							setCIDR = false
+							break
+						}
+					}
+				}
+				if setCIDR {
 					obj.NetworkConfig.IngressIPNetworkCIDR = cidr
 				}
 			}
@@ -154,6 +199,9 @@ func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runti
 					},
 				}
 			}
+
+			// this field isn't serialized
+			obj.DisableOpenAPI = false
 		},
 		func(obj *configapi.KubernetesMasterConfig, c fuzz.Continue) {
 			c.FuzzNoCustom(obj)
@@ -318,6 +366,15 @@ func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runti
 		},
 		func(obj *imagepolicyapi.ImagePolicyConfig, c fuzz.Continue) {
 			c.FuzzNoCustom(obj)
+			if obj.ResolutionRules == nil {
+				obj.ResolutionRules = []imagepolicyapi.ImageResolutionPolicyRule{
+					{TargetResource: metav1.GroupResource{Resource: "pods"}, LocalNames: true},
+					{TargetResource: metav1.GroupResource{Group: "build.openshift.io", Resource: "builds"}, LocalNames: true},
+					{TargetResource: metav1.GroupResource{Resource: "replicationcontrollers"}, LocalNames: true},
+					{TargetResource: metav1.GroupResource{Group: "extensions", Resource: "replicasets"}, LocalNames: true},
+					{TargetResource: metav1.GroupResource{Group: "batch", Resource: "jobs"}, LocalNames: true},
+				}
+			}
 			for i := range obj.ExecutionRules {
 				if len(obj.ExecutionRules[i].OnResources) == 0 {
 					obj.ExecutionRules[i].OnResources = []schema.GroupResource{{Resource: "pods"}}
@@ -351,12 +408,7 @@ func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runti
 func roundTrip(t *testing.T, codec runtime.Codec, originalItem runtime.Object) {
 	// Make a copy of the originalItem to give to conversion functions
 	// This lets us know if conversion messed with the input object
-	deepCopy, err := configapi.Scheme.DeepCopy(originalItem)
-	if err != nil {
-		t.Errorf("Could not copy object: %v", err)
-		return
-	}
-	item := deepCopy.(runtime.Object)
+	item := originalItem.DeepCopyObject()
 
 	name := reflect.TypeOf(item).Elem().Name()
 	data, err := runtime.Encode(codec, item)
@@ -383,7 +435,7 @@ func roundTrip(t *testing.T, codec runtime.Codec, originalItem runtime.Object) {
 		obj2 = obj2conv
 	}
 
-	if !kapi.Semantic.DeepEqual(originalItem, obj2) {
+	if !kapihelper.Semantic.DeepEqual(originalItem, obj2) {
 		t.Errorf("1: %v: diff: %v\nCodec: %v\nData: %s", name, diff.ObjectReflectDiff(originalItem, obj2), codec, string(data))
 		return
 	}
@@ -393,7 +445,7 @@ func roundTrip(t *testing.T, codec runtime.Codec, originalItem runtime.Object) {
 		t.Errorf("2: %v: %v", name, err)
 		return
 	}
-	if !kapi.Semantic.DeepEqual(originalItem, obj3) {
+	if !kapihelper.Semantic.DeepEqual(originalItem, obj3) {
 		t.Errorf("3: %v: diff: %v\nCodec: %v", name, diff.ObjectReflectDiff(originalItem, obj3), codec)
 		return
 	}
@@ -504,6 +556,7 @@ func TestSpecificRoundTrips(t *testing.T) {
 			t.Errorf("%d: unable to decode: %v", i, err)
 			continue
 		}
+		configapi.Scheme.Default(test.out)
 		if !reflect.DeepEqual(test.out, result) {
 			t.Errorf("%d: result did not match: %s", i, diff.ObjectReflectDiff(test.out, result))
 			continue

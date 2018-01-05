@@ -159,6 +159,15 @@
 	},
 	{
 	    "type": "bind",
+	    "source": "/etc/pki",
+	    "destination": "/etc/pki",
+	    "options": [
+		"bind",
+		"ro"
+	    ]
+	},
+	{
+	    "type": "bind",
 	    "source": "$ORIGIN_DATA_DIR",
 	    "destination": "/var/lib/origin",
 	    "options": [
@@ -201,14 +210,63 @@
     ],
     "hooks": {},
     "linux": {
-	"resources": {
-	    "devices": [
-		{
-		    "allow": false,
-		    "access": "rwm"
-		}
-	    ]
-	},
+        "resources": {
+            "devices": [
+                {
+                    "allow": false,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 1,
+                    "minor": 5,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 1,
+                    "minor": 3,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 1,
+                    "minor": 9,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 1,
+                    "minor": 8,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 5,
+                    "minor": 0,
+                    "access": "rwm"
+                },
+                {
+                    "allow": true,
+                    "type": "c",
+                    "major": 5,
+                    "minor": 1,
+                    "access": "rwm"
+                },
+                {
+                    "allow": false,
+                    "type": "c",
+                    "major": 10,
+                    "minor": 229,
+                    "access": "rwm"
+                }
+            ]
+        },
 	"namespaces": [
 	    {
 		"type": "mount"

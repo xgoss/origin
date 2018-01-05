@@ -6,9 +6,18 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// IgnorePolicyRulesAnnotation is a comma delimited list of rule names to omit from consideration
-// in a given namespace. Loaded from the namespace.
-const IgnorePolicyRulesAnnotation = "alpha.image.policy.openshift.io/ignore-rules"
+const (
+	// IgnorePolicyRulesAnnotation is a comma delimited list of rule names to omit from consideration
+	// in a given namespace. Loaded from the namespace.
+	IgnorePolicyRulesAnnotation = "alpha.image.policy.openshift.io/ignore-rules"
+	// ResolveNamesAnnotation when placed on an object template or object requests that all relevant
+	// image names be resolved by taking the name and tag and attempting to resolve a local image stream.
+	// This overrides the imageLookupPolicy on the image stream. If the object is not namespaced the
+	// annotation is ignored. The only valid value is '*'.
+	ResolveNamesAnnotation = "alpha.image.policy.openshift.io/resolve-names"
+)
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ImagePolicyConfig is the configuration for controlling how images are used in the cluster.
 type ImagePolicyConfig struct {
@@ -17,6 +26,13 @@ type ImagePolicyConfig struct {
 	// ResolveImages indicates what kind of image resolution should be done.  If a rewriting policy is chosen,
 	// then the image pull specs will be updated.
 	ResolveImages ImageResolutionType
+
+	// ResolutionRules allows more specific image resolution rules to be applied per resource. If
+	// empty, it defaults to allowing local image stream lookups - "mysql" will map to the image stream
+	// tag "mysql:latest" in the current namespace if the stream supports it. The default for this
+	// field is all known types that support image resolution, and the policy for those rules will be
+	// set to the overall resolution policy if an execution rule references the same resource.
+	ResolutionRules []ImageResolutionPolicyRule
 
 	// ExecutionRules determine whether the use of an image is allowed in an object with a pod spec.
 	// By default, these rules only apply to pods, but may be extended to other resource types.
@@ -38,6 +54,20 @@ var (
 	// don't attempt resolution
 	DoNotAttempt ImageResolutionType = "DoNotAttempt"
 )
+
+// ImageResolutionPolicyRule describes resolution rules based on resource.
+type ImageResolutionPolicyRule struct {
+	// Policy controls whether resolution will happen if the rule doesn't match local names. This value
+	// overrides the global image policy for all target resources.
+	Policy ImageResolutionType
+	// TargetResource is the identified group and resource. If Resource is *, this rule will apply
+	// to all resources in that group.
+	TargetResource metav1.GroupResource
+	// LocalNames will allow single segment names to be interpreted as namespace local image
+	// stream tags, but only if the target image stream tag has the "resolveLocalNames" field
+	// set.
+	LocalNames bool
+}
 
 // ImageExecutionPolicyRule determines whether a provided image may be used on the platform.
 type ImageExecutionPolicyRule struct {

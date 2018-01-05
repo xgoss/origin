@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	waitutil "k8s.io/apimachinery/pkg/util/wait"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/miekg/dns"
 	testutil "github.com/openshift/origin/test/util"
@@ -20,12 +20,11 @@ import (
 )
 
 func TestDNS(t *testing.T) {
-	testutil.RequireEtcd(t)
-	defer testutil.DumpEtcdOnFailure(t)
 	masterConfig, clientFile, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 
 	localAddr := ""
 	if ip, err := cmdutil.DefaultLocalIP4(); err == nil {

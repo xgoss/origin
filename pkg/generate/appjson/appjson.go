@@ -13,12 +13,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	utilerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	appsapi "github.com/openshift/origin/pkg/apps/apis/apps"
 	"github.com/openshift/origin/pkg/generate"
 	"github.com/openshift/origin/pkg/generate/app"
-	templateapi "github.com/openshift/origin/pkg/template/api"
+	templateapi "github.com/openshift/origin/pkg/template/apis/template"
 	"github.com/openshift/origin/pkg/util/docker/dockerfile"
 )
 
@@ -217,7 +218,7 @@ func (g *Generator) Generate(body []byte) (*templateapi.Template, error) {
 	image.ObjectName = name
 	image.Tag = "from"
 
-	pipeline, err := app.NewPipelineBuilder(name, nil, nil, false).To(name).NewBuildPipeline(name, image, repo)
+	pipeline, err := app.NewPipelineBuilder(name, nil, nil, false).To(name).NewBuildPipeline(name, image, repo, false)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +290,7 @@ func (g *Generator) Generate(body []byte) (*templateapi.Template, error) {
 		return nil, utilerrs.NewAggregate(errs)
 	}
 
-	acceptors := app.Acceptors{app.NewAcceptUnique(kapi.Scheme), app.AcceptNew}
+	acceptors := app.Acceptors{app.NewAcceptUnique(legacyscheme.Scheme), app.AcceptNew}
 	objects := app.Objects{}
 	accept := app.NewAcceptFirst()
 	for _, p := range pipelines {
@@ -304,7 +305,7 @@ func (g *Generator) Generate(body []byte) (*templateapi.Template, error) {
 	var services []*kapi.Service
 	for _, obj := range objects {
 		switch t := obj.(type) {
-		case *deployapi.DeploymentConfig:
+		case *appsapi.DeploymentConfig:
 			ports := app.UniqueContainerToServicePorts(app.AllContainerPorts(t.Spec.Template.Spec.Containers...))
 			if len(ports) == 0 {
 				continue

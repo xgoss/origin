@@ -10,7 +10,7 @@ import (
 
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/client-go/util/integer"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	oadmission "github.com/openshift/origin/pkg/cmd/server/admission"
 	configlatest "github.com/openshift/origin/pkg/cmd/server/api/latest"
@@ -19,18 +19,19 @@ import (
 	"github.com/openshift/origin/pkg/quota/admission/runonceduration/api/validation"
 )
 
-func init() {
-	admission.RegisterPlugin("RunOnceDuration", func(config io.Reader) (admission.Interface, error) {
-		pluginConfig, err := readConfig(config)
-		if err != nil {
-			return nil, err
-		}
-		if pluginConfig == nil {
-			glog.Infof("Admission plugin %q is not configured so it will be disabled.", "RunOnceDuration")
-			return nil, nil
-		}
-		return NewRunOnceDuration(pluginConfig), nil
-	})
+func Register(plugins *admission.Plugins) {
+	plugins.Register("RunOnceDuration",
+		func(config io.Reader) (admission.Interface, error) {
+			pluginConfig, err := readConfig(config)
+			if err != nil {
+				return nil, err
+			}
+			if pluginConfig == nil {
+				glog.Infof("Admission plugin %q is not configured so it will be disabled.", "RunOnceDuration")
+				return nil, nil
+			}
+			return NewRunOnceDuration(pluginConfig), nil
+		})
 }
 
 func readConfig(reader io.Reader) (*api.RunOnceDurationConfig, error) {
@@ -104,7 +105,7 @@ func (a *runOnceDuration) SetProjectCache(cache *projectcache.ProjectCache) {
 	a.cache = cache
 }
 
-func (a *runOnceDuration) Validate() error {
+func (a *runOnceDuration) ValidateInitialization() error {
 	if a.cache == nil {
 		return errors.New("RunOnceDuration plugin requires a project cache")
 	}

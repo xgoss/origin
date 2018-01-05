@@ -8,27 +8,28 @@ import (
 	"github.com/google/gofuzz"
 
 	"k8s.io/apimachinery/pkg/api/meta"
-	apitesting "k8s.io/apimachinery/pkg/api/testing"
+	"k8s.io/apimachinery/pkg/api/testing/fuzzer"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapitesting "k8s.io/kubernetes/pkg/api/testing"
 
-	"github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
-func fuzzImage(t *testing.T, image *api.Image, seed int64) *api.Image {
-	f := apitesting.FuzzerFor(apitesting.GenericFuzzerFuncs(t, kapi.Codecs), rand.NewSource(seed))
+func fuzzImage(t *testing.T, image *imageapi.Image, seed int64) *imageapi.Image {
+	f := fuzzer.FuzzerFor(kapitesting.FuzzerFuncs, rand.NewSource(seed), legacyscheme.Codecs)
 	f.Funcs(
-		func(j *api.Image, c fuzz.Continue) {
+		func(j *imageapi.Image, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			j.Annotations = make(map[string]string)
 			j.Labels = make(map[string]string)
-			j.Signatures = make([]api.ImageSignature, c.Rand.Intn(3)+2)
+			j.Signatures = make([]imageapi.ImageSignature, c.Rand.Intn(3)+2)
 			for i := range j.Signatures {
 				sign := &j.Signatures[i]
 				c.Fuzz(sign)
-				sign.Conditions = make([]api.SignatureCondition, c.Rand.Intn(3)+2)
+				sign.Conditions = make([]imageapi.SignatureCondition, c.Rand.Intn(3)+2)
 				for ci := range sign.Conditions {
 					cond := &sign.Conditions[ci]
 					c.Fuzz(cond)
@@ -41,7 +42,7 @@ func fuzzImage(t *testing.T, image *api.Image, seed int64) *api.Image {
 		},
 	)
 
-	updated := api.Image{}
+	updated := imageapi.Image{}
 	f.Fuzz(&updated)
 	updated.Namespace = image.Namespace
 	updated.Name = image.Name
@@ -59,7 +60,7 @@ func fuzzImage(t *testing.T, image *api.Image, seed int64) *api.Image {
 func TestStrategyPrepareForCreate(t *testing.T) {
 	ctx := apirequest.NewDefaultContext()
 
-	original := api.Image{
+	original := imageapi.Image{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "image",
 		},
@@ -67,11 +68,7 @@ func TestStrategyPrepareForCreate(t *testing.T) {
 
 	seed := int64(2703387474910584091) //rand.Int63()
 	fuzzed := fuzzImage(t, &original, seed)
-	obj, err := kapi.Scheme.DeepCopy(fuzzed)
-	if err != nil {
-		t.Fatalf("faild to deep copy fuzzed image: %v", err)
-	}
-	image := obj.(*api.Image)
+	image := fuzzed.DeepCopy()
 
 	if len(image.Signatures) == 0 {
 		t.Fatalf("fuzzifier failed to generate signatures")

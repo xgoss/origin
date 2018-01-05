@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/openshift/origin/pkg/image/admission/imagepolicy/api"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 func imageref(name string) imageapi.DockerImageReference {
@@ -36,7 +36,7 @@ func TestAccept(t *testing.T) {
 		"empty": {
 			matcher: nameSet{},
 			covers: map[schema.GroupResource]bool{
-				schema.GroupResource{}: false,
+				{}: false,
 			},
 		},
 		"accepts when rules are empty": {
@@ -265,11 +265,11 @@ func TestAccept(t *testing.T) {
 			},
 			matcher: nameSet{},
 			covers: map[schema.GroupResource]bool{
-				podResource:                                                true,
-				schema.GroupResource{Resource: "services"}:                 true,
-				schema.GroupResource{Group: "extra", Resource: "services"}: true,
-				schema.GroupResource{Group: "extra", Resource: "nodes"}:    true,
-				schema.GroupResource{Resource: "nodes"}:                    false,
+				podResource:                            true,
+				{Resource: "services"}:                 true,
+				{Group: "extra", Resource: "services"}: true,
+				{Group: "extra", Resource: "nodes"}:    true,
+				{Resource: "nodes"}:                    false,
 			},
 		},
 	}

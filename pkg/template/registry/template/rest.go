@@ -9,16 +9,19 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 
 	"github.com/openshift/origin/pkg/template"
-	"github.com/openshift/origin/pkg/template/api"
-	templatevalidation "github.com/openshift/origin/pkg/template/api/validation"
+	templateapi "github.com/openshift/origin/pkg/template/apis/template"
+	templatevalidation "github.com/openshift/origin/pkg/template/apis/template/validation"
 	"github.com/openshift/origin/pkg/template/generator"
 )
 
 // REST implements RESTStorage interface for processing Template objects.
 type REST struct {
 }
+
+var _ rest.Creater = &REST{}
 
 // NewREST creates new RESTStorage interface for processing Template objects. If
 // legacyReturn is used, a Config object is returned. Otherwise, a List is returned
@@ -31,17 +34,17 @@ func NewREST() *REST {
 // a rest.Storage object to vary its output or input types (not sure whether New()
 // should be input or output... probably input).
 func (s *REST) New() runtime.Object {
-	return &api.Template{}
+	return &templateapi.Template{}
 }
 
 // Create processes a Template and creates a new list of objects
-func (s *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Object, error) {
-	tpl, ok := obj.(*api.Template)
+func (s *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
+	tpl, ok := obj.(*templateapi.Template)
 	if !ok {
 		return nil, errors.NewBadRequest("not a template")
 	}
 	if errs := templatevalidation.ValidateProcessedTemplate(tpl); len(errs) > 0 {
-		return nil, errors.NewInvalid(api.Kind("Template"), tpl.Name, errs)
+		return nil, errors.NewInvalid(templateapi.Kind("Template"), tpl.Name, errs)
 	}
 
 	generators := map[string]generator.Generator{
@@ -50,7 +53,7 @@ func (s *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 	processor := template.NewProcessor(generators)
 	if errs := processor.Process(tpl); len(errs) > 0 {
 		glog.V(1).Infof(errs.ToAggregate().Error())
-		return nil, errors.NewInvalid(api.Kind("Template"), tpl.Name, errs)
+		return nil, errors.NewInvalid(templateapi.Kind("Template"), tpl.Name, errs)
 	}
 
 	// we know that we get back runtime.Unstructured objects from the Process call.  We need to encode those

@@ -7,15 +7,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgotesting "k8s.io/client-go/testing"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
-	"github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/client/testclient"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imagefake "github.com/openshift/origin/pkg/image/generated/internalclientset/fake"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
 )
 
-func testImageStreamClient(imageStreams *imageapi.ImageStreamList, images map[string]*imageapi.ImageStreamImage) client.Interface {
-	fake := &testclient.Fake{}
+func testImageStreamClient(imageStreams *imageapi.ImageStreamList, images map[string]*imageapi.ImageStreamImage) imageclient.ImageInterface {
+	fake := &imagefake.Clientset{}
 
 	fake.AddReactor("list", "imagestreams", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
 		return true, imageStreams, nil
@@ -24,7 +24,7 @@ func testImageStreamClient(imageStreams *imageapi.ImageStreamList, images map[st
 		return true, images[action.(clientgotesting.GetAction).GetName()], nil
 	})
 
-	return fake
+	return fake.Image()
 }
 
 func TestImageStreamByAnnotationSearcherAndResolver(t *testing.T) {

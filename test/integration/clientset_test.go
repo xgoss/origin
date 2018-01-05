@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"testing"
 
-	kapiv1 "k8s.io/kubernetes/pkg/api/v1"
+	kapiv1 "k8s.io/api/core/v1"
 
-	v1buildapi "github.com/openshift/origin/pkg/build/api/v1"
+	v1buildapi "github.com/openshift/api/build/v1"
 	buildclient "github.com/openshift/origin/pkg/build/client/clientset_generated/release_v1_5"
-	v1projectapi "github.com/openshift/origin/pkg/project/api/v1"
+	v1projectapi "github.com/openshift/api/project/v1"
 	projectclient "github.com/openshift/origin/pkg/project/client/clientset_generated/release_v1_5"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
@@ -20,12 +20,12 @@ import (
 
 func TestClientSet_v1_3(t *testing.T) {
 	const namespace = "test-clientset-v13"
-	testutil.RequireEtcd(t)
 
-	_, clusterAdminKubeConfig, err := testserver.StartTestMaster()
+	masterConfig, clusterAdminKubeConfig, err := testserver.StartTestMaster()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterConfig)
 	clusterAdminClientConfig, err := testutil.GetClusterAdminClientConfig(clusterAdminKubeConfig)
 	if err != nil {
 		t.Fatal(err)

@@ -6,31 +6,20 @@ source "$(dirname "${BASH_SOURCE}")/../../hack/lib/init.sh"
 os::cleanup::tmpdir
 os::util::environment::setup_all_server_vars
 
-function cleanup()
-{
-	out=$?
-	kill $OS_PID
-
-	os::test::junit::generate_oscmd_report
-
-	os::log::info "Exiting"
-	exit $out
+function cleanup() {
+	return_code=$?
+	os::test::junit::generate_report
+	os::cleanup::all
+	os::util::describe_return_code "${return_code}"
+	exit "${return_code}"
 }
-
-trap "exit" INT TERM
 trap "cleanup" EXIT
-
 
 os::log::info "Starting server as distinct processes"
 os::log::info "`openshift version`"
 os::log::info "Server logs will be at:    ${LOG_DIR}/openshift.log"
 os::log::info "Test artifacts will be in: ${ARTIFACT_DIR}"
 os::log::info "Config dir is:             ${SERVER_CONFIG_DIR}"
-
-# Allow setting $JUNIT_REPORT to toggle output behavior
-if [[ -n "${JUNIT_REPORT:-}" ]]; then
-	export JUNIT_REPORT_OUTPUT="${LOG_DIR}/raw_test_output.log"
-fi
 
 mkdir -p ${LOG_DIR}
 
@@ -43,8 +32,8 @@ pushd "${SERVER_CONFIG_DIR}"
 os::test::junit::declare_suite_start "extended/alternate_certs"
 
 # Make custom CA and server cert
-os::cmd::expect_success 'oadm ca create-signer-cert --overwrite=true --cert=master/custom-ca.crt --key=master/custom-ca.key --serial=master/custom-ca.txt --name=my-custom-ca@`date +%s`'
-os::cmd::expect_success 'oadm ca create-server-cert --cert=master/custom.crt --key=master/custom.key --hostnames=localhost,customhost.com --signer-cert=master/custom-ca.crt --signer-key=master/custom-ca.key --signer-serial=master/custom-ca.txt'
+os::cmd::expect_success 'oc adm ca create-signer-cert --overwrite=true --cert=master/custom-ca.crt --key=master/custom-ca.key --serial=master/custom-ca.txt --name=my-custom-ca@`date +%s`'
+os::cmd::expect_success 'oc adm ca create-server-cert --cert=master/custom.crt --key=master/custom.key --hostnames=localhost,customhost.com --signer-cert=master/custom-ca.crt --signer-key=master/custom-ca.key --signer-serial=master/custom-ca.txt'
 
 # Create master/node configs
 os::cmd::expect_success "openshift start --master=https://localhost:${API_PORT} --write-config=. --hostname=mynode --etcd-dir=./etcd --certificate-authority=master/custom-ca.crt"

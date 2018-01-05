@@ -1,17 +1,13 @@
 package oauthclient
 
 import (
-	"fmt"
-
-	"github.com/openshift/origin/pkg/oauth/api"
-	"github.com/openshift/origin/pkg/oauth/api/validation"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	"github.com/openshift/origin/pkg/oauth/apis/oauth/validation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kstorage "k8s.io/apiserver/pkg/storage"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 )
 
 // strategy implements behavior for OAuthClient objects
@@ -21,7 +17,13 @@ type strategy struct {
 
 // Strategy is the default logic that applies when creating or updating OAuthClient objects
 // objects via the REST API.
-var Strategy = strategy{kapi.Scheme}
+var Strategy = strategy{legacyscheme.Scheme}
+
+var _ rest.GarbageCollectionDeleteStrategy = strategy{}
+
+func (strategy) DefaultGarbageCollectionPolicy(ctx apirequest.Context) rest.GarbageCollectionPolicy {
+	return rest.Unsupported
+}
 
 func (strategy) PrepareForUpdate(ctx apirequest.Context, obj, old runtime.Object) {}
 
@@ -43,14 +45,14 @@ func (strategy) Canonicalize(obj runtime.Object) {
 
 // Validate validates a new client
 func (strategy) Validate(ctx apirequest.Context, obj runtime.Object) field.ErrorList {
-	token := obj.(*api.OAuthClient)
+	token := obj.(*oauthapi.OAuthClient)
 	return validation.ValidateClient(token)
 }
 
 // ValidateUpdate validates a client update
 func (strategy) ValidateUpdate(ctx apirequest.Context, obj runtime.Object, old runtime.Object) field.ErrorList {
-	client := obj.(*api.OAuthClient)
-	oldClient := old.(*api.OAuthClient)
+	client := obj.(*oauthapi.OAuthClient)
+	oldClient := old.(*oauthapi.OAuthClient)
 	return validation.ValidateClientUpdate(client, oldClient)
 }
 
@@ -61,27 +63,4 @@ func (strategy) AllowCreateOnUpdate() bool {
 
 func (strategy) AllowUnconditionalUpdate() bool {
 	return false
-}
-
-// GetAttrs returns labels and fields of a given object for filtering purposes
-func GetAttrs(o runtime.Object) (labels.Set, fields.Set, error) {
-	obj, ok := o.(*api.OAuthClient)
-	if !ok {
-		return nil, nil, fmt.Errorf("not a OAuthClient")
-	}
-	return labels.Set(obj.Labels), SelectableFields(obj), nil
-}
-
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) kstorage.SelectionPredicate {
-	return kstorage.SelectionPredicate{
-		Label:    label,
-		Field:    field,
-		GetAttrs: GetAttrs,
-	}
-}
-
-// SelectableFields returns a field set that can be used for filter selection
-func SelectableFields(obj *api.OAuthClient) fields.Set {
-	return api.OAuthClientToSelectableFields(obj)
 }

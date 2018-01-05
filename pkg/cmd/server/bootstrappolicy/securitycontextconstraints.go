@@ -3,7 +3,9 @@ package bootstrappolicy
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
 )
 
 const (
@@ -46,7 +48,7 @@ const (
 // GetBootstrapSecurityContextConstraints returns the slice of default SecurityContextConstraints
 // for system bootstrapping.  This method takes additional users and groups that should be added
 // to the strategies.  Use GetBoostrapSCCAccess to produce the default set of mappings.
-func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string][]string, sccNameToAdditionalUsers map[string][]string) []kapi.SecurityContextConstraints {
+func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string][]string, sccNameToAdditionalUsers map[string][]string) []*securityapi.SecurityContextConstraints {
 	// define priorities here and reference them below so it is easy to see, at a glance
 	// what we're setting
 	var (
@@ -55,7 +57,7 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 		securityContextConstraintsAnyUIDPriority = int32(10)
 	)
 
-	constraints := []kapi.SecurityContextConstraints{
+	constraints := []*securityapi.SecurityContextConstraints{
 		// SecurityContextConstraintPrivileged allows all access for every field
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -65,23 +67,23 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 				},
 			},
 			AllowPrivilegedContainer: true,
-			AllowedCapabilities:      []kapi.Capability{kapi.CapabilityAll},
-			Volumes:                  []kapi.FSType{kapi.FSTypeAll},
+			AllowedCapabilities:      []kapi.Capability{securityapi.AllowAllCapabilities},
+			Volumes:                  []securityapi.FSType{securityapi.FSTypeAll},
 			AllowHostNetwork:         true,
 			AllowHostPorts:           true,
 			AllowHostPID:             true,
 			AllowHostIPC:             true,
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
-				Type: kapi.SELinuxStrategyRunAsAny,
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
+				Type: securityapi.SELinuxStrategyRunAsAny,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
-				Type: kapi.RunAsUserStrategyRunAsAny,
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
+				Type: securityapi.RunAsUserStrategyRunAsAny,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyRunAsAny,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyRunAsAny,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
 			SeccompProfiles: []string{"*"},
 		},
@@ -94,24 +96,25 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 					DescriptionAnnotation: SecurityContextConstraintNonRootDesc,
 				},
 			},
-			Volumes: []kapi.FSType{kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim},
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			Volumes: []securityapi.FSType{securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSProjected},
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
 				// This strategy requires that the user request to run as a specific UID or that
 				// the docker file contain a USER directive.
-				Type: kapi.RunAsUserStrategyMustRunAsNonRoot,
+				Type: securityapi.RunAsUserStrategyMustRunAsNonRoot,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyRunAsAny,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyRunAsAny,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
+			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SETUID", "SETGID"},
 		},
 		// SecurityContextConstraintHostMountAndAnyUID is the same as the restricted scc but allows the use of the hostPath and NFS plugins, and running as any UID.
 		// Used by the PV recycler.
@@ -122,25 +125,26 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 					DescriptionAnnotation: SecurityContextConstraintHostMountAndAnyUIDDesc,
 				},
 			},
-			Volumes: []kapi.FSType{kapi.FSTypeHostPath, kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim, kapi.FSTypeNFS},
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			Volumes: []securityapi.FSType{securityapi.FSTypeHostPath, securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSTypeNFS, securityapi.FSProjected},
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.RunAsUserStrategyRunAsAny,
+				Type: securityapi.RunAsUserStrategyRunAsAny,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyRunAsAny,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyRunAsAny,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
+			RequiredDropCapabilities: []kapi.Capability{"MKNOD"},
 		},
 		// SecurityContextConstraintHostNS allows access to everything except privileged on the host
 		// but still allocates UIDs and SELinux.
@@ -151,29 +155,30 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 					DescriptionAnnotation: SecurityContextConstraintHostNSDesc,
 				},
 			},
-			Volumes:          []kapi.FSType{kapi.FSTypeHostPath, kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim},
+			Volumes:          []securityapi.FSType{securityapi.FSTypeHostPath, securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSProjected},
 			AllowHostNetwork: true,
 			AllowHostPorts:   true,
 			AllowHostPID:     true,
 			AllowHostIPC:     true,
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.RunAsUserStrategyMustRunAsRange,
+				Type: securityapi.RunAsUserStrategyMustRunAsRange,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyMustRunAs,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyMustRunAs,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
+			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SETUID", "SETGID"},
 		},
 		// SecurityContextConstraintRestricted allows no host access and allocates UIDs and SELinux.
 		{
@@ -183,27 +188,27 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 					DescriptionAnnotation: SecurityContextConstraintRestrictedDesc,
 				},
 			},
-			Volumes: []kapi.FSType{kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim},
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			Volumes: []securityapi.FSType{securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSProjected},
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.RunAsUserStrategyMustRunAsRange,
+				Type: securityapi.RunAsUserStrategyMustRunAsRange,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyMustRunAs,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyMustRunAs,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
 			// drops unsafe caps
-			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SYS_CHROOT", "SETUID", "SETGID"},
+			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SETUID", "SETGID"},
 		},
 		// SecurityContextConstraintsAnyUID allows no host access and allocates SELinux.
 		{
@@ -213,26 +218,26 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 					DescriptionAnnotation: SecurityContextConstraintsAnyUIDDesc,
 				},
 			},
-			Volumes: []kapi.FSType{kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim},
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			Volumes: []securityapi.FSType{securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSProjected},
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
-				Type: kapi.RunAsUserStrategyRunAsAny,
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
+				Type: securityapi.RunAsUserStrategyRunAsAny,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyRunAsAny,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyRunAsAny,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyRunAsAny,
 			},
 			// prefer the anyuid SCC over ones that force a uid
 			Priority: &securityContextConstraintsAnyUIDPriority,
 			// drops unsafe caps
-			RequiredDropCapabilities: []kapi.Capability{"MKNOD", "SYS_CHROOT"},
+			RequiredDropCapabilities: []kapi.Capability{"MKNOD"},
 		},
 		// SecurityContextConstraintsHostNetwork allows host network and host ports
 		{
@@ -244,27 +249,27 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 			},
 			AllowHostNetwork: true,
 			AllowHostPorts:   true,
-			Volumes:          []kapi.FSType{kapi.FSTypeEmptyDir, kapi.FSTypeSecret, kapi.FSTypeDownwardAPI, kapi.FSTypeConfigMap, kapi.FSTypePersistentVolumeClaim},
-			SELinuxContext: kapi.SELinuxContextStrategyOptions{
+			Volumes:          []securityapi.FSType{securityapi.FSTypeEmptyDir, securityapi.FSTypeSecret, securityapi.FSTypeDownwardAPI, securityapi.FSTypeConfigMap, securityapi.FSTypePersistentVolumeClaim, securityapi.FSProjected},
+			SELinuxContext: securityapi.SELinuxContextStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.SELinuxStrategyMustRunAs,
+				Type: securityapi.SELinuxStrategyMustRunAs,
 			},
-			RunAsUser: kapi.RunAsUserStrategyOptions{
+			RunAsUser: securityapi.RunAsUserStrategyOptions{
 				// This strategy requires that annotations on the namespace which will be populated
 				// by the admission controller.  If namespaces are not annotated creating the strategy
 				// will fail.
-				Type: kapi.RunAsUserStrategyMustRunAsRange,
+				Type: securityapi.RunAsUserStrategyMustRunAsRange,
 			},
-			FSGroup: kapi.FSGroupStrategyOptions{
-				Type: kapi.FSGroupStrategyMustRunAs,
+			FSGroup: securityapi.FSGroupStrategyOptions{
+				Type: securityapi.FSGroupStrategyMustRunAs,
 			},
-			SupplementalGroups: kapi.SupplementalGroupsStrategyOptions{
-				Type: kapi.SupplementalGroupsStrategyMustRunAs,
+			SupplementalGroups: securityapi.SupplementalGroupsStrategyOptions{
+				Type: securityapi.SupplementalGroupsStrategyMustRunAs,
 			},
 			// drops unsafe caps
-			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SYS_CHROOT", "SETUID", "SETGID"},
+			RequiredDropCapabilities: []kapi.Capability{"KILL", "MKNOD", "SETUID", "SETGID"},
 		},
 	}
 
@@ -283,7 +288,7 @@ func GetBootstrapSecurityContextConstraints(sccNameToAdditionalGroups map[string
 // GetBoostrapSCCAccess provides the default set of access that should be passed to GetBootstrapSecurityContextConstraints.
 func GetBoostrapSCCAccess(infraNamespace string) (map[string][]string, map[string][]string) {
 	groups := map[string][]string{
-		SecurityContextConstraintPrivileged: {ClusterAdminGroup, NodesGroup},
+		SecurityContextConstraintPrivileged: {ClusterAdminGroup, NodesGroup, MastersGroup},
 		SecurityContextConstraintsAnyUID:    {ClusterAdminGroup},
 		SecurityContextConstraintRestricted: {AuthenticatedGroup},
 	}
@@ -291,7 +296,7 @@ func GetBoostrapSCCAccess(infraNamespace string) (map[string][]string, map[strin
 	buildControllerUsername := serviceaccount.MakeUsername(infraNamespace, InfraBuildControllerServiceAccountName)
 	pvRecyclerControllerUsername := serviceaccount.MakeUsername(infraNamespace, InfraPersistentVolumeRecyclerControllerServiceAccountName)
 	users := map[string][]string{
-		SecurityContextConstraintPrivileged:         {buildControllerUsername},
+		SecurityContextConstraintPrivileged:         {SystemAdminUsername, buildControllerUsername},
 		SecurityContextConstraintHostMountAndAnyUID: {pvRecyclerControllerUsername},
 	}
 	return groups, users

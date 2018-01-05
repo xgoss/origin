@@ -8,6 +8,8 @@ import (
 
 type ExtendedArguments map[string][]string
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // NodeConfig is the fully specified config starting an OpenShift node
 type NodeConfig struct {
 	metav1.TypeMeta `json:",inline"`
@@ -52,6 +54,11 @@ type NodeConfig struct {
 	// the nameservers listed in /etc/resolv.conf. If you have configured dnsmasq or another DNS proxy on the
 	// system, this value should be set to the upstream nameservers dnsmasq resolves with.
 	DNSNameservers []string `json:"dnsNameservers"`
+
+	// DNSRecursiveResolvConf is a path to a resolv.conf file that contains settings for an upstream server.
+	// Only the nameservers and port fields are used. The file must exist and parse correctly. It adds extra
+	// nameservers to DNSNameservers if set.
+	DNSRecursiveResolvConf string `json:"dnsRecursiveResolvConf"`
 
 	// Deprecated and maintained for backward compatibility, use NetworkConfig.NetworkPluginName instead
 	DeprecatedNetworkPluginName string `json:"networkPluginName,omitempty"`
@@ -171,6 +178,8 @@ const (
 // FeatureList contains a set of features
 type FeatureList []string
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // MasterConfig holds the necessary configuration options for the OpenShift master
 type MasterConfig struct {
 	metav1.TypeMeta `json:",inline"`
@@ -181,6 +190,9 @@ type MasterConfig struct {
 	// AuthConfig configures authentication options in addition to the standard
 	// oauth token and client certificate authenticators
 	AuthConfig MasterAuthConfig `json:"authConfig"`
+
+	// AggregatorConfig has options for configuring the aggregator component of the API server.
+	AggregatorConfig AggregatorConfig `json:"aggregatorConfig"`
 
 	// CORSAllowedOrigins
 	CORSAllowedOrigins []string `json:"corsAllowedOrigins"`
@@ -197,12 +209,17 @@ type MasterConfig struct {
 	// values are recognized at this time.
 	Controllers string `json:"controllers"`
 	// PauseControllers instructs the master to not automatically start controllers, but instead
-	// to wait until a notification to the server is received before launching them.
+	// to wait until a notification to the server is received before launching them. This field is
+	// ignored if controllerConfig.lockServiceName is specified.
+	// Deprecated: Will be removed in 3.7.
 	PauseControllers bool `json:"pauseControllers"`
-	// ControllerLeaseTTL enables controller election, instructing the master to attempt to acquire
-	// a lease before controllers start and renewing it within a number of seconds defined by this value.
-	// Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or
-	// omitted) and controller election can be disabled with -1.
+	// ControllerLeaseTTL enables controller election against etcd, instructing the master to attempt to
+	// acquire a lease before controllers start and renewing it within a number of seconds defined by this
+	// value. Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or
+	// omitted) and controller election can be disabled with -1. This field is ignored if
+	// controllerConfig.lockServiceName is specified.
+	// Deprecated: use controllerConfig.lockServiceName to force leader election via config, and the
+	//   appropriate leader election flags in controllerArguments. Will be removed in 3.9.
 	ControllerLeaseTTL int `json:"controllerLeaseTTL"`
 
 	// AdmissionConfig contains admission control plugin configuration.
@@ -211,9 +228,7 @@ type MasterConfig struct {
 	// ControllerConfig holds configuration values for controllers
 	ControllerConfig ControllerConfig `json:"controllerConfig"`
 
-	// DisabledFeatures is a list of features that should not be started.  We
-	// omitempty here because its very unlikely that anyone will want to
-	// manually disable features and we don't want to encourage it.
+	// DisabledFeatures is a list of features that should not be started.
 	DisabledFeatures FeatureList `json:"disabledFeatures"`
 
 	// EtcdStorageConfig contains information about how API resources are
@@ -271,8 +286,9 @@ type MasterConfig struct {
 	// AuditConfig holds information related to auditing capabilities.
 	AuditConfig AuditConfig `json:"auditConfig"`
 
-	// EnableTemplateServiceBroker is a temporary switch which enables TemplateServiceBroker.
-	EnableTemplateServiceBroker bool `json:"enableTemplateServiceBroker"`
+	// DisableOpenAPI avoids starting the openapi endpoint because it is very expensive.
+	// This option will be removed at a later time.  It is never serialized.
+	DisableOpenAPI bool `json:"-"`
 }
 
 // MasterAuthConfig configures authentication options in addition to the standard
@@ -298,6 +314,32 @@ type RequestHeaderAuthenticationOptions struct {
 	ExtraHeaderPrefixes []string `json:"extraHeaderPrefixes"`
 }
 
+// AggregatorConfig holds information required to make the aggregator function.
+type AggregatorConfig struct {
+	// ProxyClientInfo specifies the client cert/key to use when proxying to aggregated API servers
+	ProxyClientInfo CertInfo `json:"proxyClientInfo"`
+}
+
+type LogFormatType string
+
+type WebHookModeType string
+
+const (
+	// LogFormatLegacy saves event in 1-line text format.
+	LogFormatLegacy LogFormatType = "legacy"
+	// LogFormatJson saves event in structured json format.
+	LogFormatJson LogFormatType = "json"
+
+	// WebHookModeBatch indicates that the webhook should buffer audit events
+	// internally, sending batch updates either once a certain number of
+	// events have been received or a certain amount of time has passed.
+	WebHookModeBatch WebHookModeType = "batch"
+	// WebHookModeBlocking causes the webhook to block on every attempt to process
+	// a set of events. This causes requests to the API server to wait for a
+	// round trip to the external audit service before sending a response.
+	WebHookModeBlocking WebHookModeType = "blocking"
+)
+
 // AuditConfig holds configuration for the audit capabilities
 type AuditConfig struct {
 	// If this flag is set, audit log will be printed in the logs.
@@ -311,6 +353,21 @@ type AuditConfig struct {
 	MaximumRetainedFiles int `json:"maximumRetainedFiles"`
 	// Maximum size in megabytes of the log file before it gets rotated. Defaults to 100MB.
 	MaximumFileSizeMegabytes int `json:"maximumFileSizeMegabytes"`
+
+	// PolicyFile is a path to the file that defines the audit policy configuration.
+	PolicyFile string `json:"policyFile"`
+	// PolicyConfiguration is an embedded policy configuration object to be used
+	// as the audit policy configuration. If present, it will be used instead of
+	// the path to the policy file.
+	PolicyConfiguration runtime.RawExtension `json:"policyConfiguration"`
+
+	// Format of saved audits (legacy or json).
+	LogFormat LogFormatType `json:"logFormat"`
+
+	// Path to a .kubeconfig formatted file that defines the audit webhook configuration.
+	WebHookKubeConfig string `json:"webHookKubeConfig"`
+	// Strategy for sending audit events (block or batch).
+	WebHookMode WebHookModeType `json:"webHookMode"`
 }
 
 // JenkinsPipelineConfig holds configuration for the Jenkins pipeline strategy
@@ -352,6 +409,16 @@ type ImagePolicyConfig struct {
 	// this policy - typically only administrators or system integrations will have those
 	// permissions.
 	AllowedRegistriesForImport *AllowedRegistries `json:"allowedRegistriesForImport,omitempty"`
+	// InternalRegistryHostname sets the hostname for the default internal image
+	// registry. The value must be in "hostname[:port]" format.
+	// For backward compatibility, users can still use OPENSHIFT_DEFAULT_REGISTRY
+	// environment variable but this setting overrides the environment variable.
+	InternalRegistryHostname string `json:"internalRegistryHostname,omitempty"`
+	// ExternalRegistryHostname sets the hostname for the default external image
+	// registry. The external hostname should be set only when the image registry
+	// is exposed externally. The value is used in 'publicDockerImageRepository'
+	// field in ImageStreams. The value must be in "hostname[:port]" format.
+	ExternalRegistryHostname string `json:"externalRegistryHostname,omitempty"`
 }
 
 // AllowedRegistries represents a list of registries allowed for the image import.
@@ -474,10 +541,12 @@ type RoutingConfig struct {
 type MasterNetworkConfig struct {
 	// NetworkPluginName is the name of the network plugin to use
 	NetworkPluginName string `json:"networkPluginName"`
-	// ClusterNetworkCIDR is the CIDR string to specify the global overlay network's L3 space
-	ClusterNetworkCIDR string `json:"clusterNetworkCIDR"`
-	// HostSubnetLength is the number of bits to allocate to each host's subnet e.g. 8 would mean a /24 network on the host
-	HostSubnetLength uint32 `json:"hostSubnetLength"`
+	// ClusterNetworkCIDR is the CIDR string to specify the global overlay network's L3 space.  Deprecated, but maintained for backwards compatibility, use ClusterNetworks instead.
+	DeprecatedClusterNetworkCIDR string `json:"clusterNetworkCIDR,omitempty"`
+	// ClusterNetworks is a list of ClusterNetwork objects that defines the global overlay network's L3 space by specifying a set of CIDR and netmasks that the SDN can allocate addressed from.  If this is specified, then ClusterNetworkCIDR and HostSubnetLength may not be set.
+	ClusterNetworks []ClusterNetworkEntry `json:"clusterNetworks"`
+	// HostSubnetLength is the number of bits to allocate to each host's subnet e.g. 8 would mean a /24 network on the host.  Deprecated, but maintained for backwards compatibility, use ClusterNetworks instead.
+	DeprecatedHostSubnetLength uint32 `json:"hostSubnetLength,omitempty"`
 	// ServiceNetwork is the CIDR string to specify the service networks
 	ServiceNetworkCIDR string `json:"serviceNetworkCIDR"`
 	// ExternalIPNetworkCIDRs controls what values are acceptable for the service external IP field. If empty, no externalIP
@@ -490,6 +559,14 @@ type MasterNetworkConfig struct {
 	// For security reasons, you should ensure that this range does not overlap with the CIDRs reserved for external ips,
 	// nodes, pods, or services.
 	IngressIPNetworkCIDR string `json:"ingressIPNetworkCIDR"`
+}
+
+// ClusterNetworkEntry defines an individual cluster network. The CIDRs cannot overlap with other cluster network CIDRs, CIDRs reserved for external ips, CIDRs reserved for service networks, and CIDRs reserved for ingress ips.
+type ClusterNetworkEntry struct {
+	// CIDR defines the total range of a cluster networks address space.
+	CIDR string `json:"cidr"`
+	// HostSubnetLength is the number of bits of the accompanying CIDR address to allocate to each node. eg, 8 would mean that each node would have a /24 slice of the overlay network for its pod.
+	HostSubnetLength uint32 `json:"hostSubnetLength"`
 }
 
 // ImageConfig holds the necessary configuration options for building image names for system components
@@ -636,8 +713,12 @@ type DNSConfig struct {
 	AllowRecursiveQueries bool `json:"allowRecursiveQueries"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // AssetConfig holds the necessary configuration options for serving assets
 type AssetConfig struct {
+	metav1.TypeMeta `json:",inline"`
+
 	// ServingInfo is the HTTP serving information for these assets
 	ServingInfo HTTPServingInfo `json:"servingInfo"`
 
@@ -771,6 +852,8 @@ type SessionConfig struct {
 	SessionName string `json:"sessionName"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // SessionSecrets list the secrets to use to sign/encrypt and authenticate/decrypt created sessions.
 type SessionSecrets struct {
 	metav1.TypeMeta `json:",inline"`
@@ -803,6 +886,8 @@ type IdentityProvider struct {
 	Provider runtime.RawExtension `json:"provider"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // BasicAuthPasswordIdentityProvider provides identities for users authenticating using HTTP basic auth credentials
 type BasicAuthPasswordIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
@@ -811,15 +896,21 @@ type BasicAuthPasswordIdentityProvider struct {
 	RemoteConnectionInfo `json:",inline"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // AllowAllPasswordIdentityProvider provides identities for users authenticating using non-empty passwords
 type AllowAllPasswordIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // DenyAllPasswordIdentityProvider provides no identities for users
 type DenyAllPasswordIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // HTPasswdPasswordIdentityProvider provides identities for users authenticating using htpasswd credentials
 type HTPasswdPasswordIdentityProvider struct {
@@ -828,6 +919,8 @@ type HTPasswdPasswordIdentityProvider struct {
 	// File is a reference to your htpasswd file
 	File string `json:"file"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // LDAPPasswordIdentityProvider provides identities for users authenticating using LDAP credentials
 type LDAPPasswordIdentityProvider struct {
@@ -868,6 +961,8 @@ type LDAPAttributeMapping struct {
 	Email []string `json:"email"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // KeystonePasswordIdentityProvider provides identities for users authenticating using keystone password credentials
 type KeystonePasswordIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
@@ -876,6 +971,8 @@ type KeystonePasswordIdentityProvider struct {
 	// Domain Name is required for keystone v3
 	DomainName string `json:"domainName"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // RequestHeaderIdentityProvider provides identities for users authenticating using request header credentials
 type RequestHeaderIdentityProvider struct {
@@ -912,6 +1009,8 @@ type RequestHeaderIdentityProvider struct {
 	EmailHeaders []string `json:"emailHeaders"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // GitHubIdentityProvider provides identities for users authenticating using GitHub credentials
 type GitHubIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
@@ -925,6 +1024,8 @@ type GitHubIdentityProvider struct {
 	// Teams optionally restricts which teams are allowed to log in. Format is <org>/<team>.
 	Teams []string `json:"teams"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // GitLabIdentityProvider provides identities for users authenticating using GitLab credentials
 type GitLabIdentityProvider struct {
@@ -941,6 +1042,8 @@ type GitLabIdentityProvider struct {
 	ClientSecret StringSource `json:"clientSecret"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // GoogleIdentityProvider provides identities for users authenticating using Google credentials
 type GoogleIdentityProvider struct {
 	metav1.TypeMeta `json:",inline"`
@@ -953,6 +1056,8 @@ type GoogleIdentityProvider struct {
 	// HostedDomain is the optional Google App domain (e.g. "mycompany.com") to restrict logins to
 	HostedDomain string `json:"hostedDomain"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // OpenIDIdentityProvider provides identities for users authenticating using OpenID credentials
 type OpenIDIdentityProvider struct {
@@ -1061,6 +1166,11 @@ type KubernetesMasterConfig struct {
 	// MasterCount is the number of expected masters that should be running. This value defaults to 1 and may be set to a positive integer,
 	// or if set to -1, indicates this is part of a cluster.
 	MasterCount int `json:"masterCount"`
+	// MasterEndpointReconcileTTL sets the time to live in seconds of an endpoint record recorded by each master. The endpoints are checked
+	// at an interval that is 2/3 of this value and this value defaults to 15s if unset. In very large clusters, this value may be increased to
+	// reduce the possibility that the master endpoint record expires (due to other load on the etcd server) and causes masters to drop in and
+	// out of the kubernetes service record. It is not recommended to set this value below 15s.
+	MasterEndpointReconcileTTL int `json:"masterEndpointReconcileTTL"`
 	// ServicesSubnet is the subnet to use for assigning service IPs
 	ServicesSubnet string `json:"servicesSubnet"`
 	// ServicesNodePortRange is the range to use for assigning service public ports on a host.
@@ -1149,6 +1259,8 @@ type StringSourceSpec struct {
 	// KeyFile references a file containing the key to use to decrypt the value.
 	KeyFile string `json:"keyFile"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // LDAPSyncConfig holds the necessary configuration options to define an LDAP group sync
 type LDAPSyncConfig struct {
@@ -1327,9 +1439,39 @@ type AdmissionConfig struct {
 
 // ControllerConfig holds configuration values for controllers
 type ControllerConfig struct {
+	// Controllers is a list of controllers to enable.  '*' enables all on-by-default controllers, 'foo' enables the controller "+
+	// named 'foo', '-foo' disables the controller named 'foo'.
+	// Defaults to "*".
+	Controllers []string `json:"controllers"`
+	// Election defines the configuration for electing a controller instance to make changes to
+	// the cluster. If unspecified, the ControllerTTL value is checked to determine whether the
+	// legacy direct etcd election code will be used.
+	Election *ControllerElectionConfig `json:"election"`
 	// ServiceServingCert holds configuration for service serving cert signer which creates cert/key pairs for
 	// pods fulfilling a service to serve with.
 	ServiceServingCert ServiceServingCert `json:"serviceServingCert"`
+}
+
+// ControllerElectionConfig contains configuration values for deciding how a controller
+// will be elected to act as leader.
+type ControllerElectionConfig struct {
+	// LockName is the resource name used to act as the lock for determining which controller
+	// instance should lead.
+	LockName string `json:"lockName"`
+	// LockNamespace is the resource namespace used to act as the lock for determining which
+	// controller instance should lead. It defaults to "kube-system"
+	LockNamespace string `json:"lockNamespace"`
+	// LockResource is the group and resource name to use to coordinate for the controller lock.
+	// If unset, defaults to "configmaps".
+	LockResource GroupResource `json:"lockResource"`
+}
+
+// GroupResource points to a resource by its name and API group.
+type GroupResource struct {
+	// Group is the name of an API group
+	Group string `json:"group"`
+	// Resource is the name of a resource.
+	Resource string `json:"resource"`
 }
 
 // ServiceServingCert holds configuration for service serving cert signer which creates cert/key pairs for
@@ -1339,6 +1481,8 @@ type ServiceServingCert struct {
 	// If this value is nil, then certs are not signed automatically.
 	Signer *CertInfo `json:"signer"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // DefaultAdmissionConfig can be used to enable or disable various admission plugins.
 // When this type is present as the `configuration` object under `pluginConfig` and *if* the admission plugin supports it,

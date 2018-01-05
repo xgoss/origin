@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	dockertypes "github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	dockernetwork "github.com/docker/docker/api/types/network"
+	dockerapi "github.com/docker/docker/client"
 	dockermessage "github.com/docker/docker/pkg/jsonmessage"
 	dockerstdcopy "github.com/docker/docker/pkg/stdcopy"
-	dockerapi "github.com/docker/engine-api/client"
-	dockertypes "github.com/docker/engine-api/types"
-	dockercontainer "github.com/docker/engine-api/types/container"
-	dockernetwork "github.com/docker/engine-api/types/network"
 	"github.com/docker/go-connections/tlsconfig"
 	"golang.org/x/net/context"
 
@@ -31,6 +31,7 @@ import (
 	s2ierr "github.com/openshift/source-to-image/pkg/errors"
 	s2itar "github.com/openshift/source-to-image/pkg/tar"
 	"github.com/openshift/source-to-image/pkg/util"
+	"github.com/openshift/source-to-image/pkg/util/fs"
 	"github.com/openshift/source-to-image/pkg/util/interrupt"
 )
 
@@ -49,6 +50,9 @@ const (
 	// The previous name of this label was 'io.s2i.scripts-url'. This is now
 	// deprecated.
 	ScriptsURLLabel = api.DefaultNamespace + "scripts-url"
+
+	// AssembleUserLabel is the User that will be used in the assemble process
+	AssembleUserLabel = api.DefaultNamespace + "assemble-user"
 	// DestinationLabel is the name of the Docker image LABEL that tells S2I where
 	// to place the artifacts (scripts, sources) in the builder image.
 	// The previous name of this label was 'io.s2i.destination'. This is now
@@ -128,8 +132,8 @@ type Docker interface {
 	GetImageUser(name string) (string, error)
 	GetImageEntrypoint(name string) ([]string, error)
 	GetLabels(name string) (map[string]string, error)
-	UploadToContainer(fs util.FileSystem, srcPath, destPath, container string) error
-	UploadToContainerWithTarWriter(fs util.FileSystem, srcPath, destPath, container string, makeTarWriter func(io.Writer) s2itar.Writer) error
+	UploadToContainer(fs fs.FileSystem, srcPath, destPath, container string) error
+	UploadToContainerWithTarWriter(fs fs.FileSystem, srcPath, destPath, container string, makeTarWriter func(io.Writer) s2itar.Writer) error
 	DownloadFromContainer(containerPath string, w io.Writer, container string) error
 	Version() (dockertypes.Version, error)
 	CheckReachable() error
@@ -138,19 +142,19 @@ type Docker interface {
 // Client contains all methods used when interacting directly with docker engine-api
 type Client interface {
 	ContainerAttach(ctx context.Context, container string, options dockertypes.ContainerAttachOptions) (dockertypes.HijackedResponse, error)
-	ContainerCommit(ctx context.Context, container string, options dockertypes.ContainerCommitOptions) (dockertypes.ContainerCommitResponse, error)
-	ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *dockernetwork.NetworkingConfig, containerName string) (dockertypes.ContainerCreateResponse, error)
-	ContainerInspect(ctx context.Context, containerID string) (dockertypes.ContainerJSON, error)
-	ContainerRemove(ctx context.Context, containerID string, options dockertypes.ContainerRemoveOptions) error
-	ContainerStart(ctx context.Context, containerID string) error
-	ContainerKill(ctx context.Context, containerID, signal string) error
-	ContainerWait(ctx context.Context, containerID string) (int, error)
+	ContainerCommit(ctx context.Context, container string, options dockertypes.ContainerCommitOptions) (dockertypes.IDResponse, error)
+	ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *dockernetwork.NetworkingConfig, containerName string) (dockercontainer.ContainerCreateCreatedBody, error)
+	ContainerInspect(ctx context.Context, container string) (dockertypes.ContainerJSON, error)
+	ContainerRemove(ctx context.Context, container string, options dockertypes.ContainerRemoveOptions) error
+	ContainerStart(ctx context.Context, container string, options dockertypes.ContainerStartOptions) error
+	ContainerKill(ctx context.Context, container, signal string) error
+	ContainerWait(ctx context.Context, container string, condition dockercontainer.WaitCondition) (<-chan dockercontainer.ContainerWaitOKBody, <-chan error)
 	CopyToContainer(ctx context.Context, container, path string, content io.Reader, opts dockertypes.CopyToContainerOptions) error
 	CopyFromContainer(ctx context.Context, container, srcPath string) (io.ReadCloser, dockertypes.ContainerPathStat, error)
 	ImageBuild(ctx context.Context, buildContext io.Reader, options dockertypes.ImageBuildOptions) (dockertypes.ImageBuildResponse, error)
-	ImageInspectWithRaw(ctx context.Context, imageID string, getSize bool) (dockertypes.ImageInspect, []byte, error)
+	ImageInspectWithRaw(ctx context.Context, image string) (dockertypes.ImageInspect, []byte, error)
 	ImagePull(ctx context.Context, ref string, options dockertypes.ImagePullOptions) (io.ReadCloser, error)
-	ImageRemove(ctx context.Context, imageID string, options dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDelete, error)
+	ImageRemove(ctx context.Context, image string, options dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDeleteResponseItem, error)
 	ServerVersion(ctx context.Context) (dockertypes.Version, error)
 }
 
@@ -163,7 +167,7 @@ type stiDocker struct {
 func (d stiDocker) InspectImage(name string) (*dockertypes.ImageInspect, error) {
 	ctx, cancel := getDefaultContext()
 	defer cancel()
-	resp, _, err := d.client.ImageInspectWithRaw(ctx, name, false)
+	resp, _, err := d.client.ImageInspectWithRaw(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +220,8 @@ type RunContainerOptions struct {
 	// 2) it only gets applied when Command equals to "assemble" or "usage" script
 	// AND script is inside of the tar archive.
 	CommandExplicit []string
+	// SecurityOpt is passed through as security options to the underlying container.
+	SecurityOpt []string
 }
 
 // asDockerConfig converts a RunContainerOptions into a Config understood by the
@@ -240,13 +246,12 @@ func (rco RunContainerOptions) asDockerHostConfig() dockercontainer.HostConfig {
 		PublishAllPorts: rco.TargetImage,
 		NetworkMode:     dockercontainer.NetworkMode(rco.NetworkMode),
 		Binds:           rco.Binds,
+		SecurityOpt:     rco.SecurityOpt,
 	}
 	if rco.CGroupLimits != nil {
 		hostConfig.Resources.Memory = rco.CGroupLimits.MemoryLimitBytes
 		hostConfig.Resources.MemorySwap = rco.CGroupLimits.MemorySwap
-		hostConfig.Resources.CPUShares = rco.CGroupLimits.CPUShares
-		hostConfig.Resources.CPUQuota = rco.CGroupLimits.CPUQuota
-		hostConfig.Resources.CPUPeriod = rco.CGroupLimits.CPUPeriod
+		hostConfig.Resources.CgroupParent = rco.CGroupLimits.Parent
 	}
 	return hostConfig
 }
@@ -373,7 +378,7 @@ func (d *stiDocker) GetImageEntrypoint(name string) ([]string, error) {
 }
 
 // UploadToContainer uploads artifacts to the container.
-func (d *stiDocker) UploadToContainer(fs util.FileSystem, src, dest, container string) error {
+func (d *stiDocker) UploadToContainer(fs fs.FileSystem, src, dest, container string) error {
 	makeWorldWritable := func(writer io.Writer) s2itar.Writer {
 		return s2itar.ChmodAdapter{Writer: tar.NewWriter(writer), NewFileMode: 0666, NewExecFileMode: 0666, NewDirMode: 0777}
 	}
@@ -386,7 +391,7 @@ func (d *stiDocker) UploadToContainer(fs util.FileSystem, src, dest, container s
 // the destination (which has to be directory as well).
 // If the source is a single file, then the file copied into destination (which
 // has to be full path to a file inside the container).
-func (d *stiDocker) UploadToContainerWithTarWriter(fs util.FileSystem, src, dest, container string, makeTarWriter func(io.Writer) s2itar.Writer) error {
+func (d *stiDocker) UploadToContainerWithTarWriter(fs fs.FileSystem, src, dest, container string, makeTarWriter func(io.Writer) s2itar.Writer) error {
 	path := filepath.Dir(dest)
 	r, w := io.Pipe()
 	go func() {
@@ -814,7 +819,7 @@ func determineCommandBaseDir(opts RunContainerOptions, imageMetadata *api.Image,
 }
 
 // dumpContainerInfo dumps information about a running container (port/IP/etc).
-func dumpContainerInfo(container dockertypes.ContainerCreateResponse, d *stiDocker, image string) {
+func dumpContainerInfo(container dockercontainer.ContainerCreateCreatedBody, d *stiDocker, image string) {
 	ctx, cancel := getDefaultContext()
 	defer cancel()
 
@@ -973,14 +978,7 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 	}
 
 	// Create a new container.
-
-	// First strip any inlined proxy credentials from the *proxy* env variables,
-	// before logging the env variables.
-	origEnv := createOpts.Config.Env
-	strippedEnv := util.StripProxyCredentials(origEnv)
-	createOpts.Config.Env = strippedEnv
-	glog.V(2).Infof("Creating container with options {Name:%q Config:%+v HostConfig:%+v} ...", createOpts.Name, createOpts.Config, createOpts.HostConfig)
-	createOpts.Config.Env = origEnv
+	glog.V(2).Infof("Creating container with options {Name:%q Config:%+v HostConfig:%+v} ...", createOpts.Name, *util.SafeForLoggingContainerConfig(createOpts.Config), createOpts.HostConfig)
 	ctx, cancel := getDefaultContext()
 	defer cancel()
 	container, err := d.client.ContainerCreate(ctx, createOpts.Config, createOpts.HostConfig, createOpts.NetworkingConfig, createOpts.Name)
@@ -990,15 +988,14 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 
 	// Container was created, so we defer its removal, and also remove it if we get a SIGINT/SIGTERM/SIGQUIT/SIGHUP.
 	removeContainer := func() {
-		glog.V(4).Infof("Killing container %q ...", container.ID)
-		if killErr := d.KillContainer(container.ID); killErr != nil {
-			glog.V(5).Infof("warning: Failed to kill container %q: %v", container.ID, killErr)
-		} else {
-			glog.V(4).Infof("Killed container %q", container.ID)
-		}
-
 		glog.V(4).Infof("Removing container %q ...", container.ID)
+
+		killErr := d.KillContainer(container.ID)
+
 		if removeErr := d.RemoveContainer(container.ID); removeErr != nil {
+			if killErr != nil {
+				glog.V(0).Infof("warning: Failed to kill container %q: %v", container.ID, killErr)
+			}
 			glog.V(0).Infof("warning: Failed to remove container %q: %v", container.ID, removeErr)
 		} else {
 			glog.V(4).Infof("Removed container %q", container.ID)
@@ -1027,7 +1024,7 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 		glog.V(2).Infof("Starting container %q ...", container.ID)
 		ctx, cancel = getDefaultContext()
 		defer cancel()
-		err = d.client.ContainerStart(ctx, container.ID)
+		err = d.client.ContainerStart(ctx, container.ID, dockertypes.ContainerStartOptions{})
 		if err != nil {
 			return err
 		}
@@ -1056,12 +1053,20 @@ func (d *stiDocker) RunContainer(opts RunContainerOptions) error {
 		// Return an error if the exit code of the container is
 		// non-zero.
 		glog.V(4).Infof("Waiting for container %q to stop ...", container.ID)
-		exitCode, err := d.client.ContainerWait(context.Background(), container.ID)
-		if err != nil {
+		waitC, errC := d.client.ContainerWait(context.Background(), container.ID, dockercontainer.WaitConditionNextExit)
+		select {
+		case result := <-waitC:
+			if result.StatusCode != 0 {
+				var output string
+				json, _ := d.client.ContainerInspect(ctx, container.ID)
+				if err == nil && json.ContainerJSONBase != nil && json.ContainerJSONBase.State != nil {
+					state := json.ContainerJSONBase.State
+					output = fmt.Sprintf("Status: %s, Error: %s, OOMKilled: %v, Dead: %v", state.Status, state.Error, state.OOMKilled, state.Dead)
+				}
+				return s2ierr.NewContainerError(container.ID, int(result.StatusCode), output)
+			}
+		case err := <-errC:
 			return fmt.Errorf("waiting for container %q to stop: %v", container.ID, err)
-		}
-		if exitCode != 0 {
-			return s2ierr.NewContainerError(container.ID, exitCode, "")
 		}
 
 		// OnStart must be done before we move on.
@@ -1106,14 +1111,7 @@ func (d *stiDocker) CommitContainer(opts CommitContainerOptions) (string, error)
 			User:       opts.User,
 		}
 		dockerOpts.Config = &config
-
-		// First strip any inlined proxy credentials from the *proxy* env variables,
-		// before logging the env variables.
-		origEnv := dockerOpts.Config.Env
-		strippedEnv := util.StripProxyCredentials(origEnv)
-		dockerOpts.Config.Env = strippedEnv
-		glog.V(2).Infof("Committing container with dockerOpts: %+v, config: %+v", dockerOpts, config)
-		dockerOpts.Config.Env = origEnv
+		glog.V(2).Infof("Committing container with dockerOpts: %+v, config: %+v", dockerOpts, *util.SafeForLoggingContainerConfig(&config))
 	}
 
 	resp, err := d.client.ContainerCommit(context.Background(), opts.ContainerID, dockerOpts)
@@ -1138,13 +1136,12 @@ func (d *stiDocker) BuildImage(opts BuildImageOptions) error {
 		NoCache:        true,
 		SuppressOutput: false,
 		Remove:         true,
+		ForceRemove:    true,
 	}
 	if opts.CGroupLimits != nil {
 		dockerOpts.Memory = opts.CGroupLimits.MemoryLimitBytes
 		dockerOpts.MemorySwap = opts.CGroupLimits.MemorySwap
-		dockerOpts.CPUShares = opts.CGroupLimits.CPUShares
-		dockerOpts.CPUPeriod = opts.CGroupLimits.CPUPeriod
-		dockerOpts.CPUQuota = opts.CGroupLimits.CPUQuota
+		dockerOpts.CgroupParent = opts.CGroupLimits.Parent
 	}
 	glog.V(2).Infof("Building container using config: %+v", dockerOpts)
 	resp, err := d.client.ImageBuild(context.Background(), opts.Stdin, dockerOpts)

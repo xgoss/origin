@@ -8,26 +8,26 @@ import (
 	"net/http"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/golang/glog"
-	"github.com/openshift/origin/pkg/build/api"
+	buildapi "github.com/openshift/origin/pkg/build/apis/build"
 	"github.com/openshift/origin/pkg/build/webhook"
 )
 
-// WebHook used for processing github webhook requests.
-type WebHook struct{}
+// WebHookPlugin used for processing github webhook requests.
+type WebHookPlugin struct{}
 
 // New returns github webhook plugin.
-func New() *WebHook {
-	return &WebHook{}
+func New() *WebHookPlugin {
+	return &WebHookPlugin{}
 }
 
 type commit struct {
-	ID        string                `json:"id,omitempty"`
-	Author    api.SourceControlUser `json:"author,omitempty"`
-	Committer api.SourceControlUser `json:"committer,omitempty"`
-	Message   string                `json:"message,omitempty"`
+	ID        string                     `json:"id,omitempty"`
+	Author    buildapi.SourceControlUser `json:"author,omitempty"`
+	Committer buildapi.SourceControlUser `json:"committer,omitempty"`
+	Message   string                     `json:"message,omitempty"`
 }
 
 type pushEvent struct {
@@ -37,17 +37,7 @@ type pushEvent struct {
 }
 
 // Extract services webhooks from github.com
-func (p *WebHook) Extract(buildCfg *api.BuildConfig, secret, path string, req *http.Request) (revision *api.SourceRevision, envvars []kapi.EnvVar, dockerStrategyOptions *api.DockerStrategyOptions, proceed bool, err error) {
-	triggers, err := webhook.FindTriggerPolicy(api.GitHubWebHookBuildTriggerType, buildCfg)
-	if err != nil {
-		return revision, envvars, dockerStrategyOptions, proceed, err
-	}
-	glog.V(4).Infof("Checking if the provided secret for BuildConfig %s/%s matches", buildCfg.Namespace, buildCfg.Name)
-
-	if _, err = webhook.ValidateWebHookSecret(triggers, secret); err != nil {
-		return revision, envvars, dockerStrategyOptions, proceed, err
-	}
-
+func (p *WebHookPlugin) Extract(buildCfg *buildapi.BuildConfig, trigger *buildapi.WebHookTrigger, req *http.Request) (revision *buildapi.SourceRevision, envvars []kapi.EnvVar, dockerStrategyOptions *buildapi.DockerStrategyOptions, proceed bool, err error) {
 	glog.V(4).Infof("Verifying build request for BuildConfig %s/%s", buildCfg.Namespace, buildCfg.Name)
 	if err = verifyRequest(req); err != nil {
 		return revision, envvars, dockerStrategyOptions, proceed, err
@@ -68,12 +58,12 @@ func (p *WebHook) Extract(buildCfg *api.BuildConfig, secret, path string, req *h
 		return revision, envvars, dockerStrategyOptions, proceed, errors.NewBadRequest(err.Error())
 	}
 	if !webhook.GitRefMatches(event.Ref, webhook.DefaultConfigRef, &buildCfg.Spec.Source) {
-		glog.V(2).Infof("Skipping build for BuildConfig %s/%s.  Branch reference from '%s' does not match configuration", buildCfg.Namespace, buildCfg, event)
+		glog.V(2).Infof("Skipping build for BuildConfig %s/%s.  Branch reference from '%s' does not match configuration", buildCfg.Namespace, buildCfg.Name, event)
 		return revision, envvars, dockerStrategyOptions, proceed, err
 	}
 
-	revision = &api.SourceRevision{
-		Git: &api.GitSourceRevision{
+	revision = &buildapi.SourceRevision{
+		Git: &buildapi.GitSourceRevision{
 			Commit:    event.HeadCommit.ID,
 			Author:    event.HeadCommit.Author,
 			Committer: event.HeadCommit.Committer,
@@ -81,6 +71,21 @@ func (p *WebHook) Extract(buildCfg *api.BuildConfig, secret, path string, req *h
 		},
 	}
 	return revision, envvars, dockerStrategyOptions, true, err
+}
+
+// GetTriggers retrieves the WebHookTriggers for this webhook type (if any)
+func (p *WebHookPlugin) GetTriggers(buildConfig *buildapi.BuildConfig) ([]*buildapi.WebHookTrigger, error) {
+	triggers := buildapi.FindTriggerPolicy(buildapi.GitHubWebHookBuildTriggerType, buildConfig)
+	webhookTriggers := []*buildapi.WebHookTrigger{}
+	for _, trigger := range triggers {
+		if trigger.GitHubWebHook != nil {
+			webhookTriggers = append(webhookTriggers, trigger.GitHubWebHook)
+		}
+	}
+	if len(webhookTriggers) == 0 {
+		return nil, webhook.ErrHookNotEnabled
+	}
+	return webhookTriggers, nil
 }
 
 func verifyRequest(req *http.Request) error {

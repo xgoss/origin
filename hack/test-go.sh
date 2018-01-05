@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# This script runs Go language unit tests for the Origin repository. Arguments to this script
+# This script runs Go language unit tests for the repository. Arguments to this script
 # are parsed as a list of packages to test until the first argument starting with '-' or '--' is
 # found. That argument and all following arguments are interpreted as flags to be passed directly
 # to `go test`. If no arguments are given, then "all" packages are tested.
@@ -19,31 +19,28 @@
 #  - JUNIT_REPORT:        toggles the creation of jUnit XML from the test output and changes this script's output behavior
 #                         to use the 'junitreport' tool for summarizing the tests.
 #  - DLV_DEBUG            toggles running tests using delve debugger
-function exit_trap() {
-    local return_code=$?
+function cleanup() {
+    return_code=$?
 
-    end_time=$(date +%s)
-
-    if [[ "${return_code}" -eq "0" ]]; then
-        verb="succeeded"
-    else
-        verb="failed"
+    os::test::junit::generate_report
+    if [[ "${JUNIT_REPORT_NUM_FAILED:-}" == "0 failed" ]]; then
+        if [[ "${return_code}" -ne "0" ]]; then
+            os::log::warning "While the jUnit report found no failed tests, the \`go test\` process failed."
+            os::log::warning "This usually means that the unit test suite failed to compile."
+        fi
     fi
 
-    echo "$0 ${verb} after $(( end_time - start_time )) seconds"
+    os::util::describe_return_code "${return_code}"
     exit "${return_code}"
 }
+trap "cleanup" EXIT
 
-trap exit_trap EXIT
-
-start_time=$(date +%s)
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 os::build::setup_env
 os::cleanup::tmpdir
 
 # Internalize environment variables we consume and default if they're not set
 dry_run="${DRY_RUN:-}"
-test_kube="${TEST_KUBE:-}"
 test_timeout="${TIMEOUT:-120s}"
 detect_races="${DETECT_RACES:-true}"
 coverage_output_dir="${COVERAGE_OUTPUT_DIR:-}"
@@ -87,25 +84,6 @@ if [[ -n "${test_timeout}" ]]; then
     gotest_flags+=" -timeout ${test_timeout}"
 fi
 
-# list_test_packages_under lists all packages containing Golang test files that we want to run as unit tests
-# under the given base dir in the OpenShift Origin tree
-function list_test_packages_under() {
-    local basedir=$*
-
-    # we do not quote ${basedir} to allow for multiple arguments to be passed in as well as to allow for
-    # arguments that use expansion, e.g. paths containing brace expansion or wildcards
-    find ${basedir} -not \(                   \
-        \(                                    \
-              -path 'vendor'                  \
-              -o -path '*_output'             \
-              -o -path '*.git'                \
-              -o -path '*openshift.local.*'   \
-              -o -path '*vendor/*'            \
-              -o -path '*assets/node_modules' \
-              -o -path '*test/*'              \
-        \) -prune                             \
-    \) -name '*_test.go' | xargs -n1 dirname | sort -u | xargs -n1 printf "${OS_GO_PACKAGE}/%s\n"
-}
 
 # Break up the positional arguments into packages that need to be tested and arguments that need to be passed to `go test`
 package_args=
@@ -135,31 +113,7 @@ if [[ -n "${package_args}" ]]; then
     done
 else
     # If no packages are given to test, we need to generate a list of all packages with unit tests
-    openshift_test_packages="$(list_test_packages_under '*')"
-
-    kubernetes_path="vendor/k8s.io/kubernetes"
-    mandatory_kubernetes_packages="./vendor/k8s.io/kubernetes/pkg/api ./vendor/k8s.io/kubernetes/pkg/api/v1"
-
-    test_packages="${openshift_test_packages} ${mandatory_kubernetes_packages}"
-
-    if [[ -n "${test_kube}" ]]; then
-        # we need to find all of the kubernetes test suites, excluding those we directly whitelisted before, the end-to-end suite, and
-        # the go2idl tests which we currently do not support
-        # etcd3 isn't supported yet and that test flakes upstream
-        optional_kubernetes_packages="$(find vendor/k8s.io/{apimachinery,apiserver,client-go,kubernetes} -not \(                             \
-          \(                                                                                          \
-            -path "${kubernetes_path}/staging"                                                        \
-            -o -path "${kubernetes_path}/pkg/api"                                                     \
-            -o -path "${kubernetes_path}/pkg/api/v1"                                                  \
-            -o -path "${kubernetes_path}/test"                                                        \
-            -o -path "${kubernetes_path}/cmd/libs/go2idl/client-gen/testoutput/testgroup/unversioned" \
-            -o -path "${kubernetes_path}/pkg/storage/etcd3"                                           \
-            -o -path "${kubernetes_path}/third_party/golang/go/build"                                 \
-          \) -prune                                                                                   \
-        \) -name '*_test.go' | cut -f 2- -d / | xargs -n1 dirname | sort -u | xargs -n1 printf "./vendor/%s\n")"
-
-        test_packages="${test_packages} ${optional_kubernetes_packages}"
-    fi
+    test_packages="$(os::util::list_test_packages_under '*')"
 fi
 
 if [[ -n "${dry_run}" ]]; then
@@ -175,47 +129,27 @@ fi
 # Run 'go test' with the accumulated arguments and packages:
 if [[ -n "${junit_report}" ]]; then
     # we need to generate jUnit xml
-    os::util::ensure::built_binary_exists 'junitreport'
 
-    test_output_file="${LOG_DIR}/test-go.log"
     test_error_file="${LOG_DIR}/test-go-err.log"
-    junit_report_file="${ARTIFACT_DIR}/report.xml"
 
     os::log::info "Running \`go test\`..."
     # we don't care if the `go test` fails in this pipe, as we want to generate the report and summarize the output anyway
     set +o pipefail
 
     go test -i ${gotest_flags} ${test_packages}
-    go test ${gotest_flags} ${test_packages} 2>"${test_error_file}" \
-        | tee "${test_output_file}"                                 \
-        | junitreport --type gotest                                 \
-                      --suites nested                               \
-                      --roots github.com/openshift/origin           \
-                      --stream                                      \
-                      --output "${junit_report_file}"
+    go test ${gotest_flags} ${test_packages} 2>"${test_error_file}" | tee "${JUNIT_REPORT_OUTPUT}"
 
     test_return_code="${PIPESTATUS[0]}"
 
     set -o pipefail
 
-    echo
-    summary="$( junitreport summarize < "${junit_report_file}" )"
-    echo "${summary}"
-
-    if echo "${summary}" | grep -q ', 0 failed,'; then
-        if [[ "${test_return_code}" -ne "0" ]]; then
-            os::log::warning "While the jUnit report found no failed tests, the \`go test\` process failed."
-            os::log::warning "This usually means that the unit test suite failed to compile."
-        fi
-    fi
-
     if [[ -s "${test_error_file}" ]]; then
-        os::log::warning "\`go test\` had the following output to stderr:"
-        cat "${test_error_file}"
+        os::log::warning "\`go test\` had the following output to stderr:
+$( cat "${test_error_file}") "
     fi
 
-    if grep -q 'WARNING: DATA RACE' "${test_output_file}"; then
-        locations=( $( sed -n '/WARNING: DATA RACE/=' "${test_output_file}") )
+    if grep -q 'WARNING: DATA RACE' "${JUNIT_REPORT_OUTPUT}"; then
+        locations=( $( sed -n '/WARNING: DATA RACE/=' "${JUNIT_REPORT_OUTPUT}") )
         if [[ "${#locations[@]}" -gt 1 ]]; then
             os::log::warning "\`go test\` detected data races."
             os::log::warning "Details can be found in the full output file at lines ${locations[*]}."
@@ -225,8 +159,6 @@ if [[ -n "${junit_report}" ]]; then
         fi
     fi
 
-    os::log::info "Full output from \`go test\` logged at ${test_output_file}"
-    os::log::info "jUnit XML report placed at ${junit_report_file}"
     exit "${test_return_code}"
 
 elif [[ -n "${coverage_output_dir}" ]]; then

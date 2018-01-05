@@ -11,6 +11,7 @@ trap os::test::junit::reconcile_output EXIT
   exit 0
 ) &>/dev/null
 
+os::util::environment::setup_time_vars
 
 os::test::junit::declare_suite_start "cmd/newapp"
 # This test validates the new-app command
@@ -24,10 +25,10 @@ os::cmd::expect_success 'oc new-app https://github.com/openshift/rails-ex --stra
 os::cmd::expect_success_and_text 'oc new-app mongo -o yaml' 'image:\s*mongo'
 # the local image repository takes precedence over the Docker Hub "mysql" image
 os::cmd::expect_success 'oc create -f examples/image-streams/image-streams-centos7.json'
-os::cmd::try_until_success 'oc get imagestreamtags mysql:latest'
-os::cmd::try_until_success 'oc get imagestreamtags mysql:5.5'
-os::cmd::try_until_success 'oc get imagestreamtags mysql:5.6'
-os::cmd::try_until_success 'oc get imagestreamtags mysql:5.7'
+os::cmd::try_until_success 'oc get imagestreamtags mysql:latest' $((2*TIME_MIN))
+os::cmd::try_until_success 'oc get imagestreamtags mysql:5.5'    $((2*TIME_MIN))
+os::cmd::try_until_success 'oc get imagestreamtags mysql:5.6'    $((2*TIME_MIN))
+os::cmd::try_until_success 'oc get imagestreamtags mysql:5.7'    $((2*TIME_MIN))
 os::cmd::expect_success_and_not_text 'oc new-app mysql -o yaml' 'image:\s*mysql'
 os::cmd::expect_success_and_not_text 'oc new-app mysql --dry-run' "runs as the 'root' user which may not be permitted by your cluster administrator"
 # trigger and output should say 5.6
@@ -36,6 +37,17 @@ os::cmd::expect_success_and_text 'oc new-app mysql --dry-run' 'tag "5.7" for "my
 # test deployments are created with the boolean flag and printed in the UI
 os::cmd::expect_success_and_text 'oc new-app mysql --dry-run --as-test' 'This image will be test deployed'
 os::cmd::expect_success_and_text 'oc new-app mysql -o yaml --as-test' 'test: true'
+os::cmd::expect_success_and_text 'oc new-app test/testdata/template-minimal-expose.json --as-test' 'Access your application via route'
+os::cmd::expect_success 'oc delete all -l app=expose-output'
+os::cmd::expect_success_and_text 'oc new-app mysql --as-test' 'Application is not exposed'
+os::cmd::expect_success 'oc delete all -l app=mysql'
+
+# test that imagestream references across imagestreams do not cause an error
+os::cmd::try_until_success 'oc get imagestreamtags ruby:2.3'
+os::cmd::expect_success 'oc create -f test/testdata/newapp/imagestream-ref.yaml'
+os::cmd::try_until_success 'oc get imagestreamtags myruby:latest'
+os::cmd::expect_success 'oc new-app myruby~https://github.com/openshift/ruby-hello-world.git --dry-run'
+os::cmd::expect_success 'oc delete is myruby'
 
 # docker strategy with repo that has no dockerfile
 os::cmd::expect_failure_and_text 'oc new-app https://github.com/openshift/nodejs-ex --strategy=docker' 'No Dockerfile was found'
@@ -45,10 +57,18 @@ os::cmd::expect_failure_and_text 'oc new-app mysql-persisten mysql' 'mysql-persi
 os::cmd::expect_failure_and_text 'oc new-app mysql-persisten mysql' 'mysql as a local directory'
 os::cmd::expect_failure_and_text 'oc new-app --strategy=docker https://192.30.253.113/openshift/ruby-hello-world.git' 'as a Git repository URL:  '
 os::cmd::expect_failure_and_text 'oc new-app https://www.google.com/openshift/nodejs-e' 'as a Git repository URL:  '
-os::cmd::expect_failure_and_text 'oc new-app https://githb.com/openshift/nodejs-e' 'as a Git repository URL:  '
+os::cmd::expect_failure_and_text 'oc new-app https://examplegit.com/openshift/nodejs-e' 'as a Git repository URL:  '
 os::cmd::expect_failure_and_text 'oc new-build --strategy=docker https://192.30.253.113/openshift/ruby-hello-world.git' 'as a Git repository URL:  '
 os::cmd::expect_failure_and_text 'oc new-build https://www.google.com/openshift/nodejs-e' 'as a Git repository URL:  '
-os::cmd::expect_failure_and_text 'oc new-build https://githb.com/openshift/nodejs-e' 'as a Git repository URL:  '
+os::cmd::expect_failure_and_text 'oc new-build https://examplegit.com/openshift/nodejs-e' 'as a Git repository URL:  '
+
+# setting source secret via the --source-secret flag
+os::cmd::expect_success_and_text 'oc new-app https://github.com/openshift/cakephp-ex --source-secret=mysecret -o yaml' 'name: mysecret'
+os::cmd::expect_success_and_text 'oc new-build https://github.com/openshift/cakephp-ex --source-secret=mynewsecret -o yaml' 'name: mynewsecret'
+os::cmd::expect_success_and_text 'oc new-app -f examples/quickstarts/cakephp-mysql.json --source-secret=mysecret -o yaml' 'name: mysecret'
+os::cmd::expect_success 'oc new-app https://github.com/openshift/cakephp-ex --source-secret=mysecret'
+os::cmd::expect_success 'oc delete all --selector="label=cakephp-ex"'
+
 
 # check label creation
 os::cmd::try_until_success 'oc get imagestreamtags php:latest'
@@ -71,6 +91,8 @@ os::cmd::expect_success_and_text 'oc new-app -f test/testdata/template-with-name
 # non-string parameterized values should be stripped
 os::cmd::expect_failure_and_text 'oc new-app -f test/testdata/template-with-namespaces.json -o jsonpath="{.items[?(@.metadata.name==\"route-edge-refstripped\")].metadata.namespace}"' 'namespace is not found'
 os::cmd::expect_failure_and_text 'oc new-app -f test/testdata/template-with-namespaces.json -o jsonpath="{.items[?(@.metadata.name==\"route-edge-prefix-refstripped\")].metadata.namespace}"' 'namespace is not found'
+# ensure --build-env environment variables get added to the buildconfig
+os::cmd::expect_success_and_text 'oc new-app -f test/testdata/template-with-app-label.json --build-env FOO=bar -o yaml' 'FOO'
 # ensure the objects can actually get created with a namespace specified
 project=$(oc project -q)
 os::cmd::expect_success 'oc new-project template-substitute'
@@ -92,6 +114,17 @@ os::cmd::expect_success_and_text 'oc new-app ruby-helloworld-sample -o yaml' 'MY
 os::cmd::expect_success_and_text 'oc new-app ruby-helloworld-sample --param MYSQL_PASSWORD=hello -o yaml' 'hello'
 os::cmd::expect_success_and_text  'oc new-app -e FOO=BAR -f examples/jenkins/jenkins-ephemeral-template.json -o jsonpath="{.items[?(@.kind==\"DeploymentConfig\")].spec.template.spec.containers[0].env[?(@.name==\"FOO\")].value}" ' '^BAR$'
 os::cmd::expect_success_and_text  'oc new-app -e OPENSHIFT_ENABLE_OAUTH=false -f examples/jenkins/jenkins-ephemeral-template.json -o jsonpath="{.items[?(@.kind==\"DeploymentConfig\")].spec.template.spec.containers[0].env[?(@.name==\"OPENSHIFT_ENABLE_OAUTH\")].value}" ' 'false'
+
+# check that multiple resource groups are printed with their respective external version
+os::cmd::expect_success_and_text 'oc new-app -f test/testdata/template_multiple_resource_gvs.yaml -o yaml' 'apiVersion: apps/v1beta1'
+# check that if an --output-version is requested on a list of varying resource kinds, an error is returned if
+# at least one of the resource groups does not support the given version
+os::cmd::expect_failure_and_text 'oc new-app -f test/testdata/template_multiple_resource_gvs.yaml -o yaml --output-version=v1' 'extensions.Deployment is not suitable for converting'
+os::cmd::expect_failure_and_text 'oc new-app -f test/testdata/template_multiple_resource_gvs.yaml -o yaml --output-version=extensions/v1beta1' 'core.Secret is not suitable for converting'
+os::cmd::expect_failure_and_not_text 'oc new-app -f test/testdata/template_multiple_resource_gvs.yaml -o yaml --output-version=apps/v1beta1' 'extensions.Deployment is not suitable for converting'
+
+# check that an error is produced when using --context-dir with a template
+os::cmd::expect_failure_and_text 'oc new-app -f examples/sample-app/application-template-stibuild.json --context-dir=example' '\-\-context-dir is not supported when using a template'
 
 # check that values are not split on commas
 os::cmd::expect_success_and_text 'oc new-app ruby-helloworld-sample --param MYSQL_DATABASE=hello,MYSQL_USER=fail -o yaml' 'value: hello,MYSQL_USER=fail'
@@ -123,6 +156,9 @@ os::cmd::expect_success "oc new-app ruby-helloworld-sample --param-file /dev/nul
 os::cmd::expect_success "oc new-app ruby-helloworld-sample --param-file /dev/null --param-file ${param_file} -o yaml"
 os::cmd::expect_failure_and_text "echo 'fo%(o=bar' | oc new-app ruby-helloworld-sample --param-file -" 'invalid parameter assignment'
 os::cmd::expect_failure_and_text "echo 'S P A C E S=test' | oc new-app ruby-helloworld-sample --param-file -" 'invalid parameter assignment'
+
+os::cmd::expect_failure_and_text 'oc new-app ruby-helloworld-sample --param ABSENT_PARAMETER=absent -o yaml' 'unexpected parameter name'
+os::cmd::expect_success 'oc new-app ruby-helloworld-sample --param ABSENT_PARAMETER=absent -o yaml --ignore-unknown-parameters'
 
 # check that we can set environment variables from env file
 env_file="${OS_ROOT}/test/testdata/test-cmd-newapp-env.env"
@@ -214,8 +250,8 @@ os::cmd::expect_success_and_text 'oc new-app --search ruby-helloworld-sample' 'r
 os::cmd::expect_success_and_text 'oc new-app --search ruby-hellow' 'ruby-helloworld-sample'
 os::cmd::expect_success_and_text 'oc new-app --search --template=ruby-hel' 'ruby-helloworld-sample'
 os::cmd::expect_success_and_text 'oc new-app --search --template=ruby-helloworld-sam -o yaml' 'ruby-helloworld-sample'
-os::cmd::expect_success_and_text 'oc new-app --search rub' "Tags:\s+2.2, 2.3, latest"
-os::cmd::expect_success_and_text 'oc new-app --search --image-stream=rub' "Tags:\s+2.2, 2.3, latest"
+os::cmd::expect_success_and_text 'oc new-app --search rub' "Tags:\s+2.2, 2.3, 2.4, latest"
+os::cmd::expect_success_and_text 'oc new-app --search --image-stream=rub' "Tags:\s+2.2, 2.3, 2.4, latest"
 # check search - check correct usage of filters
 os::cmd::expect_failure_and_not_text 'oc new-app --search --image-stream=ruby-heloworld-sample' 'application-template-stibuild'
 os::cmd::expect_failure 'oc new-app --search --template=php'
@@ -250,6 +286,7 @@ os::cmd::try_until_success 'oc get imagestreamtags python:2.7'
 os::cmd::try_until_success 'oc get imagestreamtags python:3.3'
 os::cmd::try_until_success 'oc get imagestreamtags python:3.4'
 os::cmd::try_until_success 'oc get imagestreamtags python:3.5'
+os::cmd::try_until_success 'oc get imagestreamtags python:3.6'
 os::cmd::try_until_success 'oc get imagestreamtags ruby:latest'
 os::cmd::try_until_success 'oc get imagestreamtags ruby:2.0'
 os::cmd::try_until_success 'oc get imagestreamtags ruby:2.2'
@@ -262,12 +299,12 @@ os::cmd::try_until_success 'oc get imagestreamtags wildfly:8.1'
 
 os::cmd::expect_success_and_text 'oc new-app --search --image-stream=mongodb' "Tags:\s+2.6, 3.2, latest"
 os::cmd::expect_success_and_text 'oc new-app --search --image-stream=mysql' "Tags:\s+5.6, 5.7, latest"
-os::cmd::expect_success_and_text 'oc new-app --search --image-stream=nodejs' "Tags:\s+4, latest"
+os::cmd::expect_success_and_text 'oc new-app --search --image-stream=nodejs' "Tags:\s+4, 6, latest"
 os::cmd::expect_success_and_text 'oc new-app --search --image-stream=perl' "Tags:\s+5.20, 5.24, latest"
 os::cmd::expect_success_and_text 'oc new-app --search --image-stream=php' "Tags:\s+5.6, 7.0, latest"
 os::cmd::expect_success_and_text 'oc new-app --search --image-stream=postgresql' "Tags:\s+9.4, 9.5, latest"
-os::cmd::expect_success_and_text 'oc new-app -S --image-stream=python' "Tags:\s+2.7, 3.4, 3.5, latest"
-os::cmd::expect_success_and_text 'oc new-app -S --image-stream=ruby' "Tags:\s+2.2, 2.3, latest"
+os::cmd::expect_success_and_text 'oc new-app -S --image-stream=python' "Tags:\s+2.7, 3.4, 3.5, 3.6, latest"
+os::cmd::expect_success_and_text 'oc new-app -S --image-stream=ruby' "Tags:\s+2.2, 2.3, 2.4, latest"
 os::cmd::expect_success_and_text 'oc new-app -S --image-stream=wildfly' "Tags:\s+10.0, 10.1, 8.1, 9.0, latest"
 os::cmd::expect_success_and_text 'oc new-app --search --template=ruby-helloworld-sample' 'ruby-helloworld-sample'
 # check search - no matches
@@ -303,6 +340,9 @@ os::cmd::expect_failure_and_text 'oc new-app --dry-run mysq' 'error: only a part
 os::cmd::expect_failure_and_text 'oc new-app --dry-run mysq' 'The argument "mysq" only partially matched'
 os::cmd::expect_failure_and_text 'oc new-app --dry-run mysq' "Image stream \"mysql\" \\(tag \"5.7\"\\) in project"
 
+# ensure new-app with pr ref does not fail
+os::cmd::expect_success 'oc new-app https://github.com/openshift/ruby-hello-world#refs/pull/58/head --dry-run'
+
 # verify image streams with no tags are reported correctly and that --allow-missing-imagestream-tags works
 # new-app
 os::cmd::expect_success 'printf "apiVersion: v1\nkind: ImageStream\nmetadata:\n  name: emptystream\n" | oc create -f -'
@@ -329,16 +369,29 @@ os::cmd::expect_success_and_text 'oc new-build --binary --image=ruby --strategy=
 # latest tag, new-app should fail.
 # when latest exists, we default to it and match it.
 os::cmd::expect_success 'oc new-app --image-stream ruby https://github.com/openshift/rails-ex --dry-run'
-# when latest does not exist, there are multiple partial matches (2.2, 2.3)
+# when latest does not exist, there are multiple partial matches (2.2, 2.3, 2.4)
 os::cmd::expect_success 'oc delete imagestreamtag ruby:latest'
 os::cmd::expect_failure_and_text 'oc new-app --image-stream ruby https://github.com/openshift/rails-ex --dry-run' 'error: multiple images or templates matched \"ruby\":'
 # when only 2.3 exists, there is a single partial match (2.3)
 os::cmd::expect_success 'oc delete imagestreamtag ruby:2.2'
+os::cmd::expect_success 'oc delete imagestreamtag ruby:2.3'
 os::cmd::expect_failure_and_text 'oc new-app --image-stream ruby https://github.com/openshift/rails-ex --dry-run' 'error: only a partial match was found for \"ruby\":'
 # when the tag is specified explicitly, the operation is successful
-os::cmd::expect_success 'oc new-app --image-stream ruby:2.3 https://github.com/openshift/rails-ex --dry-run'
-
+os::cmd::expect_success 'oc new-app --image-stream ruby:2.4 https://github.com/openshift/rails-ex --dry-run'
 os::cmd::expect_success 'oc delete imagestreams --all'
+
+# newapp does not attempt to create an imagestream that already exists for a Docker image
+os::cmd::expect_success_and_text 'oc new-app docker.io/ruby:latest~https://github.com/openshift/ruby-ex.git --name=testapp1 --strategy=docker' 'imagestream "ruby" created'
+os::cmd::expect_success_and_not_text 'oc new-app docker.io/ruby:latest~https://github.com/openshift/ruby-ex.git --name=testapp2 --strategy=docker' '"ruby" already exists'
+os::cmd::expect_success 'oc delete all -l app=testapp2'
+os::cmd::expect_success 'oc delete all -l app=testapp1'
+os::cmd::expect_success 'oc delete all -l app=ruby --ignore-not-found'
+os::cmd::expect_success 'oc delete imagestreams --all --ignore-not-found'
+# newapp does not attempt to create an imagestream that already exists for a Docker image
+os::cmd::expect_success 'oc new-app docker.io/ruby:2.2'
+# the next one technically fails cause the DC is already created, but we should still see the ist created
+os::cmd::expect_failure_and_text 'oc new-app docker.io/ruby:2.4' 'imagestreamtag "ruby:2.4" created'
+os::cmd::expect_success 'oc delete imagestreams --all --ignore-not-found'
 
 # check that we can create from the template without errors
 os::cmd::expect_success_and_text 'oc new-app ruby-helloworld-sample -l app=helloworld' 'service "frontend" created'
@@ -347,8 +400,6 @@ os::cmd::expect_success 'oc delete secret dbsecret'
 os::cmd::expect_success_and_text 'oc new-app ruby-helloworld-sample -l app=helloworld -o name' 'service/frontend'
 os::cmd::expect_success 'oc delete all -l app=helloworld'
 os::cmd::expect_success 'oc delete secret dbsecret'
-# create from template with code explicitly set is not supported
-os::cmd::expect_failure 'oc new-app ruby-helloworld-sample~git@github.com:mfojtik/sinatra-app-example'
 os::cmd::expect_success 'oc delete template ruby-helloworld-sample'
 # override component names
 os::cmd::expect_success_and_text 'oc new-app mysql --name=db' 'db'

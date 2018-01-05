@@ -6,7 +6,6 @@ import (
 	"path"
 	"testing"
 
-	oclient "github.com/openshift/origin/pkg/client"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	restclient "k8s.io/client-go/rest"
@@ -14,6 +13,7 @@ import (
 	"github.com/openshift/origin/pkg/cmd/server/admin"
 	"github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/tokencmd"
+	userclient "github.com/openshift/origin/pkg/user/generated/internalclientset/typed/user/internalversion"
 	testutil "github.com/openshift/origin/test/util"
 	testserver "github.com/openshift/origin/test/util/server"
 )
@@ -34,17 +34,16 @@ func TestOAuthCertFallback(t *testing.T) {
 		tokenUser = "user"
 		certUser  = "system:admin"
 
-		unauthorizedError = "the server has asked for the client to provide credentials (get users ~)"
-		anonymousError    = `User "system:anonymous" cannot get users at the cluster scope`
+		unauthorizedError = "Unauthorized"
+		anonymousError    = `users.user.openshift.io "~" is forbidden: User "system:anonymous" cannot get users.user.openshift.io at the cluster scope: User "system:anonymous" cannot get users.user.openshift.io at the cluster scope`
 	)
 
-	testutil.RequireEtcd(t)
-	defer testutil.DumpEtcdOnFailure(t)
 	// Build master config
 	masterOptions, err := testserver.DefaultMasterOptions()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer testserver.CleanupMasterEtcd(t, masterOptions)
 
 	// Start server
 	clusterAdminKubeConfig, err := testserver.StartConfiguredMaster(masterOptions)
@@ -166,9 +165,8 @@ func TestOAuthCertFallback(t *testing.T) {
 		config.TLSClientConfig = test.cert
 		config.CAData = adminConfig.CAData
 
-		client := oclient.NewOrDie(&config)
-
-		user, err := client.Users().Get("~", metav1.GetOptions{})
+		userClient := userclient.NewForConfigOrDie(&config)
+		user, err := userClient.Users().Get("~", metav1.GetOptions{})
 
 		if user.Name != test.expectedUser {
 			t.Errorf("%s: unexpected user %q", k, user.Name)
@@ -178,11 +176,11 @@ func TestOAuthCertFallback(t *testing.T) {
 			if err == nil {
 				t.Errorf("%s: expected error but got nil", k)
 			} else if err.Error() != test.errorString {
-				t.Errorf("%s: unexpected error string %q", k, err.Error())
+				t.Errorf("%s: unexpected error string '%s'", k, err.Error())
 			}
 		} else {
 			if err != nil {
-				t.Errorf("%s: unexpected error %q", k, err.Error())
+				t.Errorf("%s: unexpected error '%s'", k, err.Error())
 			}
 		}
 	}

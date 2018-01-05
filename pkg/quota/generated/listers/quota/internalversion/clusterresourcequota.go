@@ -3,9 +3,8 @@
 package internalversion
 
 import (
-	api "github.com/openshift/origin/pkg/quota/api"
+	quota "github.com/openshift/origin/pkg/quota/apis/quota"
 	"k8s.io/apimachinery/pkg/api/errors"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 )
@@ -13,9 +12,9 @@ import (
 // ClusterResourceQuotaLister helps list ClusterResourceQuotas.
 type ClusterResourceQuotaLister interface {
 	// List lists all ClusterResourceQuotas in the indexer.
-	List(selector labels.Selector) (ret []*api.ClusterResourceQuota, err error)
+	List(selector labels.Selector) (ret []*quota.ClusterResourceQuota, err error)
 	// Get retrieves the ClusterResourceQuota from the index for a given name.
-	Get(name string) (*api.ClusterResourceQuota, error)
+	Get(name string) (*quota.ClusterResourceQuota, error)
 	ClusterResourceQuotaListerExpansion
 }
 
@@ -30,22 +29,21 @@ func NewClusterResourceQuotaLister(indexer cache.Indexer) ClusterResourceQuotaLi
 }
 
 // List lists all ClusterResourceQuotas in the indexer.
-func (s *clusterResourceQuotaLister) List(selector labels.Selector) (ret []*api.ClusterResourceQuota, err error) {
+func (s *clusterResourceQuotaLister) List(selector labels.Selector) (ret []*quota.ClusterResourceQuota, err error) {
 	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*api.ClusterResourceQuota))
+		ret = append(ret, m.(*quota.ClusterResourceQuota))
 	})
 	return ret, err
 }
 
 // Get retrieves the ClusterResourceQuota from the index for a given name.
-func (s *clusterResourceQuotaLister) Get(name string) (*api.ClusterResourceQuota, error) {
-	key := &api.ClusterResourceQuota{ObjectMeta: v1.ObjectMeta{Name: name}}
-	obj, exists, err := s.indexer.Get(key)
+func (s *clusterResourceQuotaLister) Get(name string) (*quota.ClusterResourceQuota, error) {
+	obj, exists, err := s.indexer.GetByKey(name)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
-		return nil, errors.NewNotFound(api.Resource("clusterresourcequota"), name)
+		return nil, errors.NewNotFound(quota.Resource("clusterresourcequota"), name)
 	}
-	return obj.(*api.ClusterResourceQuota), nil
+	return obj.(*quota.ClusterResourceQuota), nil
 }

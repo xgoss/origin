@@ -8,17 +8,18 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
 )
 
 type personalSARRequestInfoResolver struct {
 	// infoFactory is used to determine info for the request
-	infoFactory RequestInfoFactory
+	infoFactory apirequest.RequestInfoResolver
 }
 
-func NewPersonalSARRequestInfoResolver(infoFactory RequestInfoFactory) RequestInfoFactory {
+func NewPersonalSARRequestInfoResolver(infoFactory apirequest.RequestInfoResolver) apirequest.RequestInfoResolver {
 	return &personalSARRequestInfoResolver{
 		infoFactory: infoFactory,
 	}
@@ -82,7 +83,7 @@ func isPersonalAccessReviewFromRequest(req *http.Request, requestInfo *request.R
 		defaultGVK.Kind = "LocalSubjectAccessReview"
 	}
 
-	obj, _, err := kapi.Codecs.UniversalDecoder().Decode(body, &defaultGVK, nil)
+	obj, _, err := legacyscheme.Codecs.UniversalDecoder().Decode(body, &defaultGVK, nil)
 	if err != nil {
 		return false, err
 	}

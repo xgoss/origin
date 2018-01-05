@@ -5,18 +5,17 @@ import (
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kadmission "k8s.io/apiserver/pkg/admission"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kquota "k8s.io/kubernetes/pkg/quota"
 	"k8s.io/kubernetes/pkg/quota/generic"
 
-	osclient "github.com/openshift/origin/pkg/client"
-	oscache "github.com/openshift/origin/pkg/client/cache"
-	imageapi "github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
+	imageclient "github.com/openshift/origin/pkg/image/generated/internalclientset/typed/image/internalversion"
+	imageinternalversion "github.com/openshift/origin/pkg/image/generated/listers/image/internalversion"
 )
 
 var imageStreamTagResources = []kapi.ResourceName{
@@ -24,16 +23,16 @@ var imageStreamTagResources = []kapi.ResourceName{
 }
 
 type imageStreamTagEvaluator struct {
-	store         *oscache.StoreToImageStreamLister
-	istNamespacer osclient.ImageStreamTagsNamespacer
+	store     imageinternalversion.ImageStreamLister
+	istGetter imageclient.ImageStreamTagsGetter
 }
 
 // NewImageStreamTagEvaluator computes resource usage of ImageStreamsTags. Its sole purpose is to handle
 // UPDATE admission operations on imageStreamTags resource.
-func NewImageStreamTagEvaluator(store *oscache.StoreToImageStreamLister, istNamespacer osclient.ImageStreamTagsNamespacer) kquota.Evaluator {
+func NewImageStreamTagEvaluator(store imageinternalversion.ImageStreamLister, istGetter imageclient.ImageStreamTagsGetter) kquota.Evaluator {
 	return &imageStreamTagEvaluator{
-		store:         store,
-		istNamespacer: istNamespacer,
+		store:     store,
+		istGetter: istGetter,
 	}
 }
 
@@ -45,11 +44,12 @@ func (i *imageStreamTagEvaluator) Constraints(required []kapi.ResourceName, obje
 	return nil
 }
 
-func (i *imageStreamTagEvaluator) GroupKind() schema.GroupKind {
-	return imageapi.Kind("ImageStreamTag")
+func (i *imageStreamTagEvaluator) GroupResource() schema.GroupResource {
+	return imageapi.Resource("imagestreamtags")
 }
 
-func (i *imageStreamTagEvaluator) Handles(operation kadmission.Operation) bool {
+func (i *imageStreamTagEvaluator) Handles(a kadmission.Attributes) bool {
+	operation := a.GetOperation()
 	return operation == kadmission.Create || operation == kadmission.Update
 }
 
@@ -77,7 +77,7 @@ func (i *imageStreamTagEvaluator) Usage(item runtime.Object) (kapi.ResourceList,
 		return kapi.ResourceList{}, err
 	}
 
-	is, err := i.store.ImageStreams(ist.Namespace).Get(isName, metav1.GetOptions{})
+	is, err := i.store.ImageStreams(ist.Namespace).Get(isName)
 	if err != nil && !kerrors.IsNotFound(err) {
 		utilruntime.HandleError(fmt.Errorf("failed to get image stream %s/%s: %v", ist.Namespace, isName, err))
 	}

@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	admission "k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 
 	"github.com/openshift/origin/pkg/api/meta"
@@ -27,18 +27,19 @@ var kindsToIgnore = []schema.GroupKind{
 	extensions.Kind("DaemonSet"),
 }
 
-func init() {
-	admission.RegisterPlugin("PodNodeConstraints", func(config io.Reader) (admission.Interface, error) {
-		pluginConfig, err := readConfig(config)
-		if err != nil {
-			return nil, err
-		}
-		if pluginConfig == nil {
-			glog.Infof("Admission plugin %q is not configured so it will be disabled.", "PodNodeConstraints")
-			return nil, nil
-		}
-		return NewPodNodeConstraints(pluginConfig), nil
-	})
+func Register(plugins *admission.Plugins) {
+	plugins.Register("PodNodeConstraints",
+		func(config io.Reader) (admission.Interface, error) {
+			pluginConfig, err := readConfig(config)
+			if err != nil {
+				return nil, err
+			}
+			if pluginConfig == nil {
+				glog.Infof("Admission plugin %q is not configured so it will be disabled.", "PodNodeConstraints")
+				return nil, nil
+			}
+			return NewPodNodeConstraints(pluginConfig), nil
+		})
 }
 
 // NewPodNodeConstraints creates a new admission plugin to prevent objects that contain pod templates
@@ -165,7 +166,7 @@ func (o *podNodeConstraints) SetAuthorizer(a authorizer.Authorizer) {
 	o.authorizer = a
 }
 
-func (o *podNodeConstraints) Validate() error {
+func (o *podNodeConstraints) ValidateInitialization() error {
 	if o.authorizer == nil {
 		return fmt.Errorf("PodNodeConstraints needs an Openshift Authorizer")
 	}
@@ -186,6 +187,6 @@ func (o *podNodeConstraints) checkPodsBindAccess(attr admission.Attributes) (boo
 	if attr.GetResource().GroupResource() == kapi.Resource("pods") {
 		authzAttr.Name = attr.GetName()
 	}
-	allow, _, err := o.authorizer.Authorize(authzAttr)
-	return allow, err
+	authorized, _, err := o.authorizer.Authorize(authzAttr)
+	return authorized == authorizer.DecisionAllow, err
 }

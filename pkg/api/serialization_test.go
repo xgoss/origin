@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -8,37 +9,44 @@ import (
 	"time"
 
 	"github.com/google/gofuzz"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+
 	apitesting "k8s.io/apimachinery/pkg/api/testing"
+	"k8s.io/apimachinery/pkg/api/testing/fuzzer"
+	"k8s.io/apimachinery/pkg/api/testing/roundtrip"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	kapi "k8s.io/kubernetes/pkg/api"
 	kapitesting "k8s.io/kubernetes/pkg/api/testing"
-	"k8s.io/kubernetes/pkg/api/validation"
+	"k8s.io/kubernetes/pkg/apis/componentconfig"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/v1"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
+	"k8s.io/kubernetes/pkg/apis/extensions"
+	extensionsv1beta1 "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
 
-	_ "github.com/openshift/origin/pkg/api/latest"
-	authorizationapi "github.com/openshift/origin/pkg/authorization/api"
-	build "github.com/openshift/origin/pkg/build/api"
-	deploy "github.com/openshift/origin/pkg/deploy/api"
-	image "github.com/openshift/origin/pkg/image/api"
-	oauthapi "github.com/openshift/origin/pkg/oauth/api"
-	route "github.com/openshift/origin/pkg/route/api"
-	securityapi "github.com/openshift/origin/pkg/security/api"
-	template "github.com/openshift/origin/pkg/template/api"
-	uservalidation "github.com/openshift/origin/pkg/user/api/validation"
+	buildv1 "github.com/openshift/api/build/v1"
+	apps "github.com/openshift/origin/pkg/apps/apis/apps"
+	authorizationapi "github.com/openshift/origin/pkg/authorization/apis/authorization"
+	build "github.com/openshift/origin/pkg/build/apis/build"
+	image "github.com/openshift/origin/pkg/image/apis/image"
+	oauthapi "github.com/openshift/origin/pkg/oauth/apis/oauth"
+	routeapi "github.com/openshift/origin/pkg/route/apis/route"
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
+	templateapi "github.com/openshift/origin/pkg/template/apis/template"
+	uservalidation "github.com/openshift/origin/pkg/user/apis/user/validation"
 
 	// install all APIs
 	_ "github.com/openshift/origin/pkg/api/install"
-	_ "github.com/openshift/origin/pkg/quota/api/install"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
-	_ "k8s.io/kubernetes/pkg/api/install"
-	"k8s.io/kubernetes/pkg/apis/componentconfig"
+	_ "github.com/openshift/origin/pkg/api/latest"
+	_ "github.com/openshift/origin/pkg/quota/apis/quota/install"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
 )
 
 func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
-	f := apitesting.FuzzerFor(apitesting.GenericFuzzerFuncs(t, kapi.Codecs), rand.NewSource(seed))
-	f.Funcs(kapitesting.FuzzerFuncs(t, kapi.Codecs)...)
+	f := fuzzer.FuzzerFor(kapitesting.FuzzerFuncs, rand.NewSource(seed), legacyscheme.Codecs)
 	f.Funcs(
 		// Roles and RoleBindings maps are never nil
 		func(j *authorizationapi.Policy, c fuzz.Continue) {
@@ -168,11 +176,48 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				j.Subjects[i].FieldPath = ""
 			}
 		},
-		func(j *template.Template, c fuzz.Continue) {
-			c.Fuzz(&j.ObjectMeta)
-			c.Fuzz(&j.Parameters)
-			// TODO: replace with structured type definition
-			j.Objects = []runtime.Object{}
+		func(j *templateapi.Template, c fuzz.Continue) {
+			c.FuzzNoCustom(j)
+			j.Objects = nil
+
+			objs := []runtime.Object{
+				&kapi.Pod{},
+				&extensions.Deployment{},
+				&kapi.Service{},
+				&build.BuildConfig{},
+			}
+
+			for _, obj := range objs {
+				c.Fuzz(obj)
+
+				var codec runtime.Codec
+				switch obj.(type) {
+				case *extensions.Deployment:
+					codec = apitesting.TestCodec(legacyscheme.Codecs, extensionsv1beta1.SchemeGroupVersion)
+				case *build.BuildConfig:
+					codec = apitesting.TestCodec(legacyscheme.Codecs, buildv1.SchemeGroupVersion)
+				default:
+					codec = apitesting.TestCodec(legacyscheme.Codecs, v1.SchemeGroupVersion)
+				}
+
+				b, err := runtime.Encode(codec, obj)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+
+				j.Objects = append(j.Objects,
+					&runtime.Unknown{
+						ContentType: "application/json",
+						Raw:         bytes.TrimRight(b, "\n"),
+					},
+				)
+			}
+
+			j.Objects = append(j.Objects, &runtime.Unknown{
+				ContentType: "application/json",
+				Raw:         []byte(`{"kind":"Foo","apiVersion":"mygroup/v1","complex":{"a":true},"list":["item"],"bool":true,"int":1,"string":"hello"}`),
+			})
 		},
 		func(j *image.Image, c fuzz.Continue) {
 			c.Fuzz(&j.ObjectMeta)
@@ -295,21 +340,21 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				j.To.Name = strings.Replace(j.To.Name, ":", "-", -1)
 			}
 		},
-		func(j *route.RouteTargetReference, c fuzz.Continue) {
+		func(j *routeapi.RouteTargetReference, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			j.Kind = "Service"
 			j.Weight = new(int32)
 			*j.Weight = 100
 		},
-		func(j *route.TLSConfig, c fuzz.Continue) {
+		func(j *routeapi.TLSConfig, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			if len(j.Termination) == 0 && len(j.DestinationCACertificate) == 0 {
-				j.Termination = route.TLSTerminationEdge
+				j.Termination = routeapi.TLSTerminationEdge
 			}
 		},
-		func(j *deploy.DeploymentConfig, c fuzz.Continue) {
+		func(j *apps.DeploymentConfig, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
-			j.Spec.Triggers = []deploy.DeploymentTriggerPolicy{{Type: deploy.DeploymentTriggerOnConfigChange}}
+			j.Spec.Triggers = []apps.DeploymentTriggerPolicy{{Type: apps.DeploymentTriggerOnConfigChange}}
 			if j.Spec.Template != nil && len(j.Spec.Template.Spec.Containers) == 1 {
 				containerName := j.Spec.Template.Spec.Containers[0].Name
 				if p := j.Spec.Strategy.RecreateParams; p != nil {
@@ -323,55 +368,55 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				}
 			}
 		},
-		func(j *deploy.DeploymentStrategy, c fuzz.Continue) {
+		func(j *apps.DeploymentStrategy, c fuzz.Continue) {
 			randInt64 := func() *int64 {
 				p := int64(c.RandUint64())
 				return &p
 			}
 			c.FuzzNoCustom(j)
 			j.RecreateParams, j.RollingParams, j.CustomParams = nil, nil, nil
-			strategyTypes := []deploy.DeploymentStrategyType{deploy.DeploymentStrategyTypeRecreate, deploy.DeploymentStrategyTypeRolling, deploy.DeploymentStrategyTypeCustom}
+			strategyTypes := []apps.DeploymentStrategyType{apps.DeploymentStrategyTypeRecreate, apps.DeploymentStrategyTypeRolling, apps.DeploymentStrategyTypeCustom}
 			j.Type = strategyTypes[c.Rand.Intn(len(strategyTypes))]
 			j.ActiveDeadlineSeconds = randInt64()
 			switch j.Type {
-			case deploy.DeploymentStrategyTypeRecreate:
-				params := &deploy.RecreateDeploymentStrategyParams{}
+			case apps.DeploymentStrategyTypeRecreate:
+				params := &apps.RecreateDeploymentStrategyParams{}
 				c.Fuzz(params)
 				if params.TimeoutSeconds == nil {
 					s := int64(120)
 					params.TimeoutSeconds = &s
 				}
 				j.RecreateParams = params
-			case deploy.DeploymentStrategyTypeRolling:
-				params := &deploy.RollingDeploymentStrategyParams{}
+			case apps.DeploymentStrategyTypeRolling:
+				params := &apps.RollingDeploymentStrategyParams{}
 				params.TimeoutSeconds = randInt64()
 				params.IntervalSeconds = randInt64()
 				params.UpdatePeriodSeconds = randInt64()
 
-				policyTypes := []deploy.LifecycleHookFailurePolicy{
-					deploy.LifecycleHookFailurePolicyRetry,
-					deploy.LifecycleHookFailurePolicyAbort,
-					deploy.LifecycleHookFailurePolicyIgnore,
+				policyTypes := []apps.LifecycleHookFailurePolicy{
+					apps.LifecycleHookFailurePolicyRetry,
+					apps.LifecycleHookFailurePolicyAbort,
+					apps.LifecycleHookFailurePolicyIgnore,
 				}
 				if c.RandBool() {
-					params.Pre = &deploy.LifecycleHook{
+					params.Pre = &apps.LifecycleHook{
 						FailurePolicy: policyTypes[c.Rand.Intn(len(policyTypes))],
-						ExecNewPod: &deploy.ExecNewPodHook{
+						ExecNewPod: &apps.ExecNewPodHook{
 							ContainerName: c.RandString(),
 						},
 					}
 				}
 				if c.RandBool() {
-					params.Post = &deploy.LifecycleHook{
+					params.Post = &apps.LifecycleHook{
 						FailurePolicy: policyTypes[c.Rand.Intn(len(policyTypes))],
-						ExecNewPod: &deploy.ExecNewPodHook{
+						ExecNewPod: &apps.ExecNewPodHook{
 							ContainerName: c.RandString(),
 						},
 					}
 				}
 				if c.RandBool() {
-					params.MaxUnavailable = intstr.FromInt(c.Rand.Int())
-					params.MaxSurge = intstr.FromInt(c.Rand.Int())
+					params.MaxUnavailable = intstr.FromInt(int(c.Rand.Int31()))
+					params.MaxSurge = intstr.FromInt(int(c.Rand.Int31()))
 				} else {
 					params.MaxSurge = intstr.FromString(fmt.Sprintf("%d%%", c.RandUint64()))
 					params.MaxUnavailable = intstr.FromString(fmt.Sprintf("%d%%", c.RandUint64()))
@@ -379,7 +424,7 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				j.RollingParams = params
 			}
 		},
-		func(j *deploy.DeploymentCauseImageTrigger, c fuzz.Continue) {
+		func(j *apps.DeploymentCauseImageTrigger, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			specs := []string{"", "a/b", "a/b/c", "a:5000/b/c", "a/b", "a/b"}
 			tags := []string{"stuff", "other"}
@@ -388,7 +433,7 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				j.From.Name = image.JoinImageStreamTag(j.From.Name, tags[c.Intn(len(tags))])
 			}
 		},
-		func(j *deploy.DeploymentTriggerImageChangeParams, c fuzz.Continue) {
+		func(j *apps.DeploymentTriggerImageChangeParams, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			specs := []string{"a/b", "a/b/c", "a:5000/b/c", "a/b:latest", "a/b@test"}
 			j.From.Kind = "DockerImage"
@@ -426,16 +471,16 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 				j.Scopes = append(j.Scopes, "user:full")
 			}
 		},
-		func(j *route.RouteSpec, c fuzz.Continue) {
+		func(j *routeapi.RouteSpec, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			if len(j.WildcardPolicy) == 0 {
-				j.WildcardPolicy = route.WildcardPolicyNone
+				j.WildcardPolicy = routeapi.WildcardPolicyNone
 			}
 		},
-		func(j *route.RouteIngress, c fuzz.Continue) {
+		func(j *routeapi.RouteIngress, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
 			if len(j.WildcardPolicy) == 0 {
-				j.WildcardPolicy = route.WildcardPolicyNone
+				j.WildcardPolicy = routeapi.WildcardPolicyNone
 			}
 		},
 
@@ -454,11 +499,45 @@ func originFuzzer(t *testing.T, seed int64) *fuzz.Fuzzer {
 			// TODO: uint64's are NOT handled right.
 			*u64 = c.RandUint64() >> 8
 		},
+
+		func(scc *securityapi.SecurityContextConstraints, c fuzz.Continue) {
+			c.FuzzNoCustom(scc) // fuzz self without calling this function again
+			userTypes := []securityapi.RunAsUserStrategyType{securityapi.RunAsUserStrategyMustRunAsNonRoot, securityapi.RunAsUserStrategyMustRunAs, securityapi.RunAsUserStrategyRunAsAny, securityapi.RunAsUserStrategyMustRunAsRange}
+			scc.RunAsUser.Type = userTypes[c.Rand.Intn(len(userTypes))]
+			seLinuxTypes := []securityapi.SELinuxContextStrategyType{securityapi.SELinuxStrategyRunAsAny, securityapi.SELinuxStrategyMustRunAs}
+			scc.SELinuxContext.Type = seLinuxTypes[c.Rand.Intn(len(seLinuxTypes))]
+			supGroupTypes := []securityapi.SupplementalGroupsStrategyType{securityapi.SupplementalGroupsStrategyMustRunAs, securityapi.SupplementalGroupsStrategyRunAsAny}
+			scc.SupplementalGroups.Type = supGroupTypes[c.Rand.Intn(len(supGroupTypes))]
+			fsGroupTypes := []securityapi.FSGroupStrategyType{securityapi.FSGroupStrategyMustRunAs, securityapi.FSGroupStrategyRunAsAny}
+			scc.FSGroup.Type = fsGroupTypes[c.Rand.Intn(len(fsGroupTypes))]
+
+			// when fuzzing the volume types ensure it is set to avoid the defaulter's expansion.
+			// Do not use FSTypeAll or host dir setting to steer clear of defaulting mechanics
+			// which are covered in specific unit tests.
+			volumeTypes := []securityapi.FSType{securityapi.FSTypeAWSElasticBlockStore,
+				securityapi.FSTypeAzureFile,
+				securityapi.FSTypeCephFS,
+				securityapi.FSTypeCinder,
+				securityapi.FSTypeDownwardAPI,
+				securityapi.FSTypeEmptyDir,
+				securityapi.FSTypeFC,
+				securityapi.FSTypeFlexVolume,
+				securityapi.FSTypeFlocker,
+				securityapi.FSTypeGCEPersistentDisk,
+				securityapi.FSTypeGitRepo,
+				securityapi.FSTypeGlusterfs,
+				securityapi.FSTypeISCSI,
+				securityapi.FSTypeNFS,
+				securityapi.FSTypePersistentVolumeClaim,
+				securityapi.FSTypeRBD,
+				securityapi.FSTypeSecret}
+			scc.Volumes = []securityapi.FSType{volumeTypes[c.Rand.Intn(len(volumeTypes))]}
+		},
 	)
 	return f
 }
 
-func defaultHookContainerName(hook *deploy.LifecycleHook, containerName string) {
+func defaultHookContainerName(hook *apps.LifecycleHook, containerName string) {
 	if hook == nil {
 		return
 	}
@@ -481,14 +560,14 @@ func TestSpecificKind(t *testing.T) {
 	seed := int64(2703387474910584091)
 	fuzzer := originFuzzer(t, seed)
 
-	kapi.Scheme.Log(t)
-	defer kapi.Scheme.Log(nil)
+	legacyscheme.Scheme.Log(t)
+	defer legacyscheme.Scheme.Log(nil)
 
 	gvk := authorizationapi.SchemeGroupVersion.WithKind("ClusterRole")
 	// TODO: make upstream CodecFactory customizable
-	codecs := serializer.NewCodecFactory(kapi.Scheme)
+	codecs := serializer.NewCodecFactory(legacyscheme.Scheme)
 	for i := 0; i < fuzzIters; i++ {
-		apitesting.RoundTripSpecificKindWithoutProtobuf(t, gvk, kapi.Scheme, codecs, fuzzer, nil)
+		roundtrip.RoundTripSpecificKindWithoutProtobuf(t, gvk, legacyscheme.Scheme, codecs, fuzzer, nil)
 	}
 }
 
@@ -509,7 +588,7 @@ func TestRoundTripTypes(t *testing.T) {
 		componentconfig.SchemeGroupVersion.WithKind("KubeSchedulerConfiguration"): true,
 	}
 
-	apitesting.RoundTripTypes(t, kapi.Scheme, kapi.Codecs, fuzzer, mergeGvks(kubeExceptions, dockerImageTypes))
+	roundtrip.RoundTripTypes(t, legacyscheme.Scheme, legacyscheme.Codecs, fuzzer, mergeGvks(kubeExceptions, dockerImageTypes))
 }
 
 // TestRoundTripDockerImage tests DockerImage whether it serializes from/into docker's registry API.
@@ -518,8 +597,8 @@ func TestRoundTripDockerImage(t *testing.T) {
 	fuzzer := originFuzzer(t, seed)
 
 	for gvk := range dockerImageTypes {
-		apitesting.RoundTripSpecificKindWithoutProtobuf(t, gvk, kapi.Scheme, kapi.Codecs, fuzzer, nil)
-		apitesting.RoundTripSpecificKindWithoutProtobuf(t, gvk, kapi.Scheme, kapi.Codecs, fuzzer, nil)
+		roundtrip.RoundTripSpecificKindWithoutProtobuf(t, gvk, legacyscheme.Scheme, legacyscheme.Codecs, fuzzer, nil)
+		roundtrip.RoundTripSpecificKindWithoutProtobuf(t, gvk, legacyscheme.Scheme, legacyscheme.Codecs, fuzzer, nil)
 	}
 }
 

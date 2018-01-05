@@ -8,17 +8,16 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 
-	oclient "github.com/openshift/origin/pkg/client"
 	cmdutil "github.com/openshift/origin/pkg/cmd/util"
 	"github.com/openshift/origin/pkg/cmd/util/variable"
-	routeapi "github.com/openshift/origin/pkg/route/api"
+	projectclient "github.com/openshift/origin/pkg/project/generated/internalclientset/typed/project/internalversion"
+	routeapi "github.com/openshift/origin/pkg/route/apis/route"
+	routeinternalclientset "github.com/openshift/origin/pkg/route/generated/internalclientset"
 	"github.com/openshift/origin/pkg/router/controller"
 	controllerfactory "github.com/openshift/origin/pkg/router/controller/factory"
 )
@@ -32,9 +31,7 @@ type RouterSelection struct {
 	OverrideHostname bool
 
 	LabelSelector string
-	Labels        labels.Selector
 	FieldSelector string
-	Fields        fields.Selector
 
 	Namespace              string
 	NamespaceLabelSelector string
@@ -62,7 +59,7 @@ type RouterSelection struct {
 
 // Bind sets the appropriate labels
 func (o *RouterSelection) Bind(flag *pflag.FlagSet) {
-	flag.DurationVar(&o.ResyncInterval, "resync-interval", 10*time.Minute, "The interval at which the route list should be fully refreshed")
+	flag.DurationVar(&o.ResyncInterval, "resync-interval", controllerfactory.DefaultResyncInterval, "The interval at which the route list should be fully refreshed")
 	flag.StringVar(&o.HostnameTemplate, "hostname-template", cmdutil.Env("ROUTER_SUBDOMAIN", ""), "If specified, a template that should be used to generate the hostname for a route without spec.host (e.g. '${name}-${namespace}.myapps.mycompany.com')")
 	flag.BoolVar(&o.OverrideHostname, "override-hostname", cmdutil.Env("ROUTER_OVERRIDE_HOSTNAME", "") == "true", "Override the spec.host value for a route with --hostname-template")
 	flag.StringVar(&o.LabelSelector, "labels", cmdutil.Env("ROUTE_LABELS", ""), "A label selector to apply to the routes to watch")
@@ -75,7 +72,7 @@ func (o *RouterSelection) Bind(flag *pflag.FlagSet) {
 	flag.BoolVar(&o.AllowWildcardRoutes, "allow-wildcard-routes", cmdutil.Env("ROUTER_ALLOW_WILDCARD_ROUTES", "") == "true", "Allow wildcard host names for routes")
 	flag.BoolVar(&o.DisableNamespaceOwnershipCheck, "disable-namespace-ownership-check", cmdutil.Env("ROUTER_DISABLE_NAMESPACE_OWNERSHIP_CHECK", "") == "true", "Disables the namespace ownership checks for a route host with different paths or for overlapping host names in the case of wildcard routes. Please be aware that if namespace ownership checks are disabled, routes in a different namespace can use this mechanism to 'steal' sub-paths for existing domains. This is only safe if route creation privileges are restricted, or if all the users can be trusted.")
 	flag.BoolVar(&o.EnableIngress, "enable-ingress", cmdutil.Env("ROUTER_ENABLE_INGRESS", "") == "true", "Enable configuration via ingress resources")
-	flag.StringVar(&o.ListenAddr, "listen-addr", cmdutil.Env("ROUTER_LISTEN_ADDR", ""), "The name of an interface to listen on to expose metrics and health checking. If not specified, will not listen.")
+	flag.StringVar(&o.ListenAddr, "listen-addr", cmdutil.Env("ROUTER_LISTEN_ADDR", ""), "The name of an interface to listen on to expose metrics and health checking. If not specified, will not listen. Overrides stats port.")
 }
 
 // RouteSelectionFunc returns a func that identifies the host for a route.
@@ -164,23 +161,15 @@ func (o *RouterSelection) Complete() error {
 		return fmt.Errorf("--override-hostname requires that --hostname-template be specified")
 	}
 	if len(o.LabelSelector) > 0 {
-		s, err := labels.Parse(o.LabelSelector)
-		if err != nil {
+		if _, err := labels.Parse(o.LabelSelector); err != nil {
 			return fmt.Errorf("label selector is not valid: %v", err)
 		}
-		o.Labels = s
-	} else {
-		o.Labels = labels.Everything()
 	}
 
 	if len(o.FieldSelector) > 0 {
-		s, err := fields.ParseSelector(o.FieldSelector)
-		if err != nil {
+		if _, err := fields.ParseSelector(o.FieldSelector); err != nil {
 			return fmt.Errorf("field selector is not valid: %v", err)
 		}
-		o.Fields = s
-	} else {
-		o.Fields = fields.Everything()
 	}
 
 	if len(o.ProjectLabelSelector) > 0 {
@@ -220,61 +209,25 @@ func (o *RouterSelection) Complete() error {
 }
 
 // NewFactory initializes a factory that will watch the requested routes
-func (o *RouterSelection) NewFactory(oc oclient.Interface, kc kclientset.Interface) *controllerfactory.RouterControllerFactory {
-	factory := controllerfactory.NewDefaultRouterControllerFactory(oc, kc)
-	factory.Labels = o.Labels
-	factory.Fields = o.Fields
+func (o *RouterSelection) NewFactory(routeclient routeinternalclientset.Interface, projectclient projectclient.ProjectResourceInterface, kc kclientset.Interface) *controllerfactory.RouterControllerFactory {
+	factory := controllerfactory.NewDefaultRouterControllerFactory(routeclient, projectclient, kc)
+	factory.LabelSelector = o.LabelSelector
+	factory.FieldSelector = o.FieldSelector
 	factory.Namespace = o.Namespace
 	factory.ResyncInterval = o.ResyncInterval
 	switch {
 	case o.NamespaceLabels != nil:
 		glog.Infof("Router is only using routes in namespaces matching %s", o.NamespaceLabels)
-		factory.Namespaces = namespaceNames{kc.Core().Namespaces(), o.NamespaceLabels}
+		factory.NamespaceLabels = o.NamespaceLabels
 	case o.ProjectLabels != nil:
 		glog.Infof("Router is only using routes in projects matching %s", o.ProjectLabels)
-		factory.Namespaces = projectNames{oc.Projects(), o.ProjectLabels}
+		factory.ProjectLabels = o.ProjectLabels
 	case len(factory.Namespace) > 0:
 		glog.Infof("Router is only using resources in namespace %s", factory.Namespace)
 	default:
 		glog.Infof("Router is including routes in all namespaces")
 	}
 	return factory
-}
-
-// projectNames returns the names of projects matching the label selector
-type projectNames struct {
-	client   oclient.ProjectInterface
-	selector labels.Selector
-}
-
-func (n projectNames) NamespaceNames() (sets.String, error) {
-	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
-	if err != nil {
-		return nil, err
-	}
-	names := make(sets.String, len(all.Items))
-	for i := range all.Items {
-		names.Insert(all.Items[i].Name)
-	}
-	return names, nil
-}
-
-// namespaceNames returns the names of namespaces matching the label selector
-type namespaceNames struct {
-	client   kcoreclient.NamespaceInterface
-	selector labels.Selector
-}
-
-func (n namespaceNames) NamespaceNames() (sets.String, error) {
-	all, err := n.client.List(metav1.ListOptions{LabelSelector: n.selector.String()})
-	if err != nil {
-		return nil, err
-	}
-	names := make(sets.String, len(all.Items))
-	for i := range all.Items {
-		names.Insert(all.Items[i].Name)
-	}
-	return names, nil
 }
 
 func envVarAsStrings(name, defaultValue, separator string) []string {

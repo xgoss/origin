@@ -6,16 +6,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apiserver/pkg/registry/rest"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kcoreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 
-	"github.com/openshift/origin/pkg/image/api"
+	imageapi "github.com/openshift/origin/pkg/image/apis/image"
 )
 
 // REST implements the RESTStorage interface for ImageStreamImport
 type REST struct {
 	secrets kcoreclient.SecretsGetter
 }
+
+var _ rest.GetterWithOptions = &REST{}
 
 // NewREST returns a new REST.
 func NewREST(secrets kcoreclient.SecretsGetter) *REST {
@@ -51,7 +54,7 @@ func (r *REST) Get(ctx apirequest.Context, _ string, options runtime.Object) (ru
 	}
 	filtered := make([]kapi.Secret, 0, len(secrets.Items))
 	for i := range secrets.Items {
-		if secrets.Items[i].Annotations[api.ExcludeImageSecretAnnotation] == "true" {
+		if secrets.Items[i].Annotations[imageapi.ExcludeImageSecretAnnotation] == "true" {
 			continue
 		}
 		switch secrets.Items[i].Type {

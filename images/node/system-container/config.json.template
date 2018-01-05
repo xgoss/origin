@@ -227,7 +227,7 @@
 		"soft": 1024
 	    }
 	],
-	"noNewPrivileges": true
+	"noNewPrivileges": false
     },
     "root": {
 	"path": "rootfs",
@@ -236,13 +236,11 @@
     "mounts": [
 	{
 	    "destination": "/dev",
-	    "type": "tmpfs",
-	    "source": "tmpfs",
+	    "type": "bind",
+	    "source": "/dev",
 	    "options": [
-		"nosuid",
-		"strictatime",
-		"mode=755",
-		"size=65536k"
+		"rbind",
+		"rslave"
 	    ]
 	},
 	{
@@ -268,16 +266,6 @@
 		"nodev",
 		"mode=1777",
 		"size=65536k"
-	    ]
-	},
-	{
-	    "destination": "/dev/mqueue",
-	    "type": "mqueue",
-	    "source": "mqueue",
-	    "options": [
-		"nosuid",
-		"noexec",
-		"nodev"
 	    ]
 	},
         {
@@ -375,6 +363,28 @@
         },
         {
             "type": "bind",
+            "source": "/etc/cni/net.d",
+            "destination": "/etc/cni/net.d",
+            "options": [
+                "bind",
+                "slave",
+                "rw",
+                "mode=777"
+            ]
+        },
+        {
+            "type": "bind",
+            "source": "/var/lib/dockershim",
+            "destination": "/var/lib/dockershim",
+            "options": [
+                "bind",
+                "slave",
+                "rw",
+                "mode=777"
+            ]
+        },
+        {
+            "type": "bind",
             "source": "/var/lib/cni",
             "destination": "/var/lib/cni",
             "options": [
@@ -404,10 +414,11 @@
         },
         {
 	    "type": "bind",
-	    "source": "/var/lib/docker",
-	    "destination": "/var/lib/docker",
+	    "source": "/var/lib/docker/containers",
+	    "destination": "/var/lib/docker/containers",
 	    "options": [
 		"bind",
+                "slave",
 		"rw",
 		"mode=755"
 	    ]
@@ -463,6 +474,15 @@
 	    ]
         },
 	{
+	    "type": "bind",
+	    "source": "/etc/pki",
+	    "destination": "/etc/pki",
+	    "options": [
+		"bind",
+		"ro"
+	    ]
+	},
+	{
 	    "destination": "/tmp",
 	    "type": "tmpfs",
 	    "source": "tmpfs",
@@ -478,7 +498,7 @@
 	"resources": {
 	    "devices": [
 		{
-		    "allow": false,
+		    "allow": true,
 		    "access": "rwm"
 		}
 	    ]

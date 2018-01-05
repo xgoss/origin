@@ -43,21 +43,26 @@ var (
 	// exposed externally.
 	DeadOpenShiftStorageVersionLevels = []string{"v1beta1", "v1beta3"}
 
-	APIGroupKube              = ""
-	APIGroupExtensions        = "extensions"
-	APIGroupApps              = "apps"
-	APIGroupAuthentication    = "authentication.k8s.io"
-	APIGroupAuthorization     = "authorization.k8s.io"
-	APIGroupImagePolicy       = "imagepolicy.k8s.io"
-	APIGroupAutoscaling       = "autoscaling"
-	APIGroupBatch             = "batch"
-	APIGroupCertificates      = "certificates.k8s.io"
-	APIGroupFederation        = "federation"
-	APIGroupPolicy            = "policy"
-	APIGroupStorage           = "storage.k8s.io"
-	APIGroupComponentConfig   = "componentconfig"
-	APIGroupAuthorizationRbac = "rbac.authorization.k8s.io"
-	APIGroupSettings          = "settings.k8s.io"
+	APIGroupKube                  = ""
+	APIGroupApps                  = "apps"
+	APIGroupAdmissionRegistration = "admissionregistration.k8s.io"
+	APIGroupAPIExtensions         = "apiextensions.k8s.io"
+	APIGroupAPIRegistration       = "apiregistration.k8s.io"
+	APIGroupAuthentication        = "authentication.k8s.io"
+	APIGroupAuthorization         = "authorization.k8s.io"
+	APIGroupExtensions            = "extensions"
+	APIGroupEvents                = "events.k8s.io"
+	APIGroupImagePolicy           = "imagepolicy.k8s.io"
+	APIGroupAutoscaling           = "autoscaling"
+	APIGroupBatch                 = "batch"
+	APIGroupCertificates          = "certificates.k8s.io"
+	APIGroupNetworking            = "networking.k8s.io"
+	APIGroupPolicy                = "policy"
+	APIGroupStorage               = "storage.k8s.io"
+	APIGroupComponentConfig       = "componentconfig"
+	APIGroupAuthorizationRbac     = "rbac.authorization.k8s.io"
+	APIGroupSettings              = "settings.k8s.io"
+	APIGroupScheduling            = "scheduling.k8s.io"
 
 	OriginAPIGroupCore                = ""
 	OriginAPIGroupAuthorization       = "authorization.openshift.io"
@@ -76,18 +81,24 @@ var (
 
 	// Map of group names to allowed REST API versions
 	KubeAPIGroupsToAllowedVersions = map[string][]string{
-		APIGroupKube:              {"v1"},
-		APIGroupExtensions:        {"v1beta1"},
-		APIGroupApps:              {"v1beta1"},
-		APIGroupAuthentication:    {"v1", "v1beta1"},
-		APIGroupAuthorization:     {"v1", "v1beta1"},
-		APIGroupAuthorizationRbac: {"v1beta1"},
-		APIGroupAutoscaling:       {"v1", "v2alpha1"},
-		APIGroupBatch:             {"v1", "v2alpha1"},
-		APIGroupCertificates:      {"v1beta1"},
-		APIGroupPolicy:            {"v1beta1"},
-		APIGroupStorage:           {"v1", "v1beta1"},
-		APIGroupSettings:          {"v1alpha1"},
+		APIGroupKube:                  {"v1"},
+		APIGroupExtensions:            {"v1beta1"},
+		APIGroupEvents:                {"v1beta1"},
+		APIGroupApps:                  {"v1", "v1beta1", "v1beta2"},
+		APIGroupAdmissionRegistration: {"v1beta1"},
+		APIGroupAPIExtensions:         {"v1beta1"},
+		APIGroupAPIRegistration:       {"v1beta1"},
+		APIGroupAuthentication:        {"v1", "v1beta1"},
+		APIGroupAuthorization:         {"v1", "v1beta1"},
+		APIGroupAuthorizationRbac:     {"v1", "v1beta1"},
+		APIGroupAutoscaling:           {"v1", "v2beta1"},
+		APIGroupBatch:                 {"v1", "v1beta1", "v2alpha1"}, // v2alpha1 has to stay on to keep cronjobs on for backwards compatibility
+		APIGroupCertificates:          {"v1beta1"},
+		APIGroupNetworking:            {"v1"},
+		APIGroupPolicy:                {"v1beta1"},
+		APIGroupStorage:               {"v1", "v1beta1"},
+		APIGroupSettings:              {}, // list the group, but don't enable any versions.  alpha disabled by default, but enablable via arg
+		APIGroupScheduling:            {}, // alpha disabled by default
 		// TODO: enable as part of a separate binary
 		//APIGroupFederation:  {"v1beta1"},
 	}
@@ -107,15 +118,19 @@ var (
 		OriginAPIGroupSecurity:      {"v1"},
 	}
 
-	// Map of group names to known, but disallowed REST API versions
-	KubeAPIGroupsToDeadVersions = map[string][]string{
-		APIGroupKube:              {"v1beta3"},
-		APIGroupExtensions:        {},
-		APIGroupAutoscaling:       {},
-		APIGroupBatch:             {},
-		APIGroupPolicy:            {},
-		APIGroupApps:              {},
-		APIGroupAuthorizationRbac: {"v1alpha1"},
+	// Map of group names to known, but disabled REST API versions
+	KubeDefaultDisabledVersions = map[string][]string{
+		APIGroupKube:                  {"v1beta3"},
+		APIGroupExtensions:            {},
+		APIGroupAutoscaling:           {"v2alpha1"},
+		APIGroupBatch:                 {},
+		APIGroupPolicy:                {},
+		APIGroupApps:                  {},
+		APIGroupAdmissionRegistration: {"v1alpha1"},
+		APIGroupAuthorizationRbac:     {"v1alpha1"},
+		APIGroupSettings:              {"v1alpha1"},
+		APIGroupScheduling:            {"v1alpha1"},
+		APIGroupStorage:               {"v1alpha1"},
 	}
 	KnownKubeAPIGroups   = sets.StringKeySet(KubeAPIGroupsToAllowedVersions)
 	KnownOriginAPIGroups = sets.StringKeySet(OriginAPIGroupsToAllowedVersions)
@@ -138,8 +153,8 @@ var (
 	// part of the domain name.
 	DefaultAllowedRegistriesForImport = &AllowedRegistries{
 		{DomainName: "docker.io"},
-		{DomainName: "*.docker.io"}, // registry-1.docker.io
-		{DomainName: "registry.access.redhat.com"},
+		{DomainName: "*.docker.io"},  // registry-1.docker.io
+		{DomainName: "*.redhat.com"}, // registry.connect.redhat.com and registry.access.redhat.com
 		{DomainName: "gcr.io"},
 		{DomainName: "quay.io"},
 		// FIXME: Probably need to have more fine-tuned pattern defined
@@ -148,6 +163,8 @@ var (
 )
 
 type ExtendedArguments map[string][]string
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // NodeConfig is the fully specified config starting an OpenShift node
 type NodeConfig struct {
@@ -193,6 +210,11 @@ type NodeConfig struct {
 	// the nameservers listed in /etc/resolv.conf. If you have configured dnsmasq or another DNS proxy on the
 	// system, this value should be set to the upstream nameservers dnsmasq resolves with.
 	DNSNameservers []string
+
+	// DNSRecursiveResolvConf is a path to a resolv.conf file that contains settings for an upstream server.
+	// Only the nameservers and port fields are used. The file must exist and parse correctly. It adds extra
+	// nameservers to DNSNameservers if set.
+	DNSRecursiveResolvConf string
 
 	// NetworkConfig provides network options for the node
 	NetworkConfig NodeNetworkConfig
@@ -308,6 +330,8 @@ const (
 
 type FeatureList []string
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type MasterConfig struct {
 	metav1.TypeMeta
 
@@ -317,6 +341,9 @@ type MasterConfig struct {
 	// AuthConfig configures authentication options in addition to the standard
 	// oauth token and client certificate authenticators
 	AuthConfig MasterAuthConfig
+
+	// AggregatorConfig has options for configuring the aggregator component of the API server.
+	AggregatorConfig AggregatorConfig
 
 	// CORSAllowedOrigins
 	CORSAllowedOrigins []string
@@ -334,12 +361,14 @@ type MasterConfig struct {
 	Controllers string
 	// PauseControllers instructs the master to not automatically start controllers, but instead
 	// to wait until a notification to the server is received before launching them.
-	// TODO: will be disabled in function for 1.1.
+	// Deprecated: Will be removed in 3.7.
 	PauseControllers bool
-	// ControllerLeaseTTL enables controller election, instructing the master to attempt to acquire
-	// a lease before controllers start and renewing it within a number of seconds defined by this value.
-	// Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or
+	// ControllerLeaseTTL enables controller election against etcd, instructing the master to attempt to
+	// acquire a lease before controllers start and renewing it within a number of seconds defined by this
+	// value. Setting this value non-negative forces pauseControllers=true. This value defaults off (0, or
 	// omitted) and controller election can be disabled with -1.
+	// Deprecated: use controllerConfig.lockServiceName to force leader election via config, and the
+	//   appropriate leader election flags in controllerArguments. Will be removed in 3.9.
 	ControllerLeaseTTL int
 	// TODO: the next field added to controllers must be added to a new controllers struct
 
@@ -407,8 +436,9 @@ type MasterConfig struct {
 	// AuditConfig holds information related to auditing capabilities.
 	AuditConfig AuditConfig
 
-	// EnableTemplateServiceBroker is a temporary switch which enables TemplateServiceBroker.
-	EnableTemplateServiceBroker bool
+	// DisableOpenAPI avoids starting the openapi endpoint because it is very expensive.
+	// This option will be removed at a later time.  It is never serialized.
+	DisableOpenAPI bool
 }
 
 // MasterAuthConfig configures authentication options in addition to the standard
@@ -434,10 +464,35 @@ type RequestHeaderAuthenticationOptions struct {
 	ExtraHeaderPrefixes []string
 }
 
+// AggregatorConfig holds information required to make the aggregator function.
+type AggregatorConfig struct {
+	// ProxyClientInfo specifies the client cert/key to use when proxying to aggregated API servers
+	ProxyClientInfo CertInfo
+}
+
+type LogFormatType string
+
+type WebHookModeType string
+
+const (
+	// LogFormatLegacy saves event in 1-line text format.
+	LogFormatLegacy LogFormatType = "legacy"
+	// LogFormatJson saves event in structured json format.
+	LogFormatJson LogFormatType = "json"
+
+	// WebHookModeBatch indicates that the webhook should buffer audit events
+	// internally, sending batch updates either once a certain number of
+	// events have been received or a certain amount of time has passed.
+	WebHookModeBatch WebHookModeType = "batch"
+	// WebHookModeBlocking causes the webhook to block on every attempt to process
+	// a set of events. This causes requests to the API server to wait for a
+	// round trip to the external audit service before sending a response.
+	WebHookModeBlocking WebHookModeType = "blocking"
+)
+
 // AuditConfig holds configuration for the audit capabilities
 type AuditConfig struct {
 	// If this flag is set, audit log will be printed in the logs.
-	// The logs contains, method, user and a requested URL.
 	Enabled bool
 	// All requests coming to the apiserver will be logged to this file.
 	AuditFilePath string
@@ -447,6 +502,21 @@ type AuditConfig struct {
 	MaximumRetainedFiles int
 	// Maximum size in megabytes of the log file before it gets rotated. Defaults to 100MB.
 	MaximumFileSizeMegabytes int
+
+	// PolicyFile is a path to the file that defines the audit policy configuration.
+	PolicyFile string
+	// PolicyConfiguration is an embedded policy configuration object to be used
+	// as the audit policy configuration. If present, it will be used instead of
+	// the path to the policy file.
+	PolicyConfiguration runtime.Object
+
+	// Format of saved audits (legacy or json).
+	LogFormat LogFormatType
+
+	// Path to a .kubeconfig formatted file that defines the audit webhook configuration.
+	WebHookKubeConfig string
+	// Strategy for sending audit events (block or batch).
+	WebHookMode WebHookModeType
 }
 
 // JenkinsPipelineConfig holds configuration for the Jenkins pipeline strategy
@@ -487,6 +557,16 @@ type ImagePolicyConfig struct {
 	// this policy - typically only administrators or system integrations will have those
 	// permissions.
 	AllowedRegistriesForImport *AllowedRegistries
+	// InternalRegistryHostname sets the hostname for the default internal image
+	// registry. The value must be in "hostname[:port]" format.
+	// For backward compatibility, users can still use OPENSHIFT_DEFAULT_REGISTRY
+	// environment variable but this setting overrides the environment variable.
+	InternalRegistryHostname string
+	// ExternalRegistryHostname sets the hostname for the default external image
+	// registry. The external hostname should be set only when the image registry
+	// is exposed externally. The value is used in 'publicDockerImageRepository'
+	// field in ImageStreams. The value must be in "hostname[:port]" format.
+	ExternalRegistryHostname string
 }
 
 // AllowedRegistries represents a list of registries allowed for the image import.
@@ -592,10 +672,12 @@ type UserAgentDenyRule struct {
 
 // MasterNetworkConfig to be passed to the compiled in network plugin
 type MasterNetworkConfig struct {
-	NetworkPluginName  string
-	ClusterNetworkCIDR string
-	HostSubnetLength   uint32
-	ServiceNetworkCIDR string
+	NetworkPluginName            string
+	DeprecatedClusterNetworkCIDR string
+	// ClusterNetworks contains a list of cluster networks that defines the global overlay networks L3 space.
+	ClusterNetworks            []ClusterNetworkEntry
+	DeprecatedHostSubnetLength uint32
+	ServiceNetworkCIDR         string
 	// ExternalIPNetworkCIDRs controls what values are acceptable for the service external IP field. If empty, no externalIP
 	// may be set. It may contain a list of CIDRs which are checked for access. If a CIDR is prefixed with !, IPs in that
 	// CIDR will be rejected. Rejections will be applied first, then the IP checked against one of the allowed CIDRs. You
@@ -606,6 +688,15 @@ type MasterNetworkConfig struct {
 	// For security reasons, you should ensure that this range does not overlap with the CIDRs reserved for external ips,
 	// nodes, pods, or services.
 	IngressIPNetworkCIDR string
+}
+
+// ClusterNetworkEntry defines an individual cluster network. The CIDRs cannot overlap with other cluster network CIDRs, CIDRs
+// reserved for external ips, CIDRs reserved for service networks, and CIDRs reserved for ingress ips.
+type ClusterNetworkEntry struct {
+	// CIDR defines the total range of a cluster networks address space.
+	CIDR string
+	// HostSubnetLength gives the number of address bits reserved for pod IPs on each node.
+	HostSubnetLength uint32
 }
 
 type ImageConfig struct {
@@ -737,7 +828,11 @@ type DNSConfig struct {
 	AllowRecursiveQueries bool
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type AssetConfig struct {
+	metav1.TypeMeta
+
 	ServingInfo HTTPServingInfo
 
 	// PublicURL is where you can find the asset server (TODO do we really need this?)
@@ -866,6 +961,8 @@ type SessionConfig struct {
 	SessionName string
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // SessionSecrets list the secrets to use to sign/encrypt and authenticate/decrypt created sessions.
 type SessionSecrets struct {
 	metav1.TypeMeta
@@ -896,6 +993,8 @@ type IdentityProvider struct {
 	Provider runtime.Object
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type BasicAuthPasswordIdentityProvider struct {
 	metav1.TypeMeta
 
@@ -903,13 +1002,19 @@ type BasicAuthPasswordIdentityProvider struct {
 	RemoteConnectionInfo RemoteConnectionInfo
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type AllowAllPasswordIdentityProvider struct {
 	metav1.TypeMeta
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type DenyAllPasswordIdentityProvider struct {
 	metav1.TypeMeta
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type HTPasswdPasswordIdentityProvider struct {
 	metav1.TypeMeta
@@ -917,6 +1022,8 @@ type HTPasswdPasswordIdentityProvider struct {
 	// File is a reference to your htpasswd file
 	File string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type LDAPPasswordIdentityProvider struct {
 	metav1.TypeMeta
@@ -955,6 +1062,8 @@ type LDAPAttributeMapping struct {
 	Email []string
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type KeystonePasswordIdentityProvider struct {
 	metav1.TypeMeta
 	// RemoteConnectionInfo contains information about how to connect to the keystone server
@@ -962,6 +1071,8 @@ type KeystonePasswordIdentityProvider struct {
 	// Domain Name is required for keystone v3
 	DomainName string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type RequestHeaderIdentityProvider struct {
 	metav1.TypeMeta
@@ -997,6 +1108,8 @@ type RequestHeaderIdentityProvider struct {
 	EmailHeaders []string
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type GitHubIdentityProvider struct {
 	metav1.TypeMeta
 
@@ -1009,6 +1122,8 @@ type GitHubIdentityProvider struct {
 	// Teams optionally restricts which teams are allowed to log in. Format is <org>/<team>.
 	Teams []string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type GitLabIdentityProvider struct {
 	metav1.TypeMeta
@@ -1024,6 +1139,8 @@ type GitLabIdentityProvider struct {
 	ClientSecret StringSource
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 type GoogleIdentityProvider struct {
 	metav1.TypeMeta
 
@@ -1035,6 +1152,8 @@ type GoogleIdentityProvider struct {
 	// HostedDomain is the optional Google App domain (e.g. "mycompany.com") to restrict logins to
 	HostedDomain string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type OpenIDIdentityProvider struct {
 	metav1.TypeMeta
@@ -1132,6 +1251,11 @@ type KubernetesMasterConfig struct {
 	// MasterCount is the number of expected masters that should be running. This value defaults to 1 and may be set to a positive integer,
 	// or if set to -1, indicates this is part of a cluster.
 	MasterCount int
+	// MasterEndpointReconcileTTL sets the time to live in seconds of an endpoint record recorded by each master. The endpoints are checked
+	// at an interval that is 2/3 of this value and this value defaults to 15s if unset. In very large clusters, this value may be increased to
+	// reduce the possibility that the master endpoint record expires (due to other load on the etcd server) and causes masters to drop in and
+	// out of the kubernetes service record. It is not recommended to set this value below 15s.
+	MasterEndpointReconcileTTL int
 	// ServicesSubnet is the subnet to use for assigning service IPs
 	ServicesSubnet string
 	// ServicesNodePortRange is the range to use for assigning service public ports on a host.
@@ -1225,6 +1349,8 @@ type StringSourceSpec struct {
 	// KeyFile references a file containing the key to use to decrypt the value.
 	KeyFile string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type LDAPSyncConfig struct {
 	metav1.TypeMeta
@@ -1393,9 +1519,39 @@ type AdmissionConfig struct {
 
 // ControllerConfig holds configuration values for controllers
 type ControllerConfig struct {
+	// Controllers is a list of controllers to enable.  '*' enables all on-by-default controllers, 'foo' enables the controller "+
+	// named 'foo', '-foo' disables the controller named 'foo'.
+	// Defaults to "*".
+	Controllers []string
+	// Election defines the configuration for electing a controller instance to make changes to
+	// the cluster. If unspecified, the ControllerTTL value is checked to determine whether the
+	// legacy direct etcd election code will be used.
+	Election *ControllerElectionConfig
 	// ServiceServingCert holds configuration for service serving cert signer which creates cert/key pairs for
 	// pods fulfilling a service to serve with.
 	ServiceServingCert ServiceServingCert
+}
+
+// ControllerElectionConfig contains configuration values for deciding how a controller
+// will be elected to act as leader.
+type ControllerElectionConfig struct {
+	// LockName is the resource name used to act as the lock for determining which controller
+	// instance should lead.
+	LockName string
+	// LockNamespace is the resource namespace used to act as the lock for determining which
+	// controller instance should lead. It defaults to "kube-system"
+	LockNamespace string
+	// LockResource is the group and resource name to use to coordinate for the controller lock.
+	// If unset, defaults to "endpoints".
+	LockResource GroupResource
+}
+
+// GroupResource points to a resource by its name and API group.
+type GroupResource struct {
+	// Group is the name of an API group
+	Group string
+	// Resource is the name of a resource.
+	Resource string
 }
 
 // ServiceServingCert holds configuration for service serving cert signer which creates cert/key pairs for
@@ -1405,6 +1561,8 @@ type ServiceServingCert struct {
 	// If this value is nil, then certs are not signed automatically.
 	Signer *CertInfo
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // DefaultAdmissionConfig can be used to enable or disable various admission plugins.
 // When this type is present as the `configuration` object under `pluginConfig` and *if* the admission plugin supports it,

@@ -10,27 +10,29 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/apiserver/pkg/registry/rest"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kcorelisters "k8s.io/kubernetes/pkg/client/listers/core/internalversion"
-	kscc "k8s.io/kubernetes/pkg/securitycontextconstraints"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
-	securityapi "github.com/openshift/origin/pkg/security/api"
-	securityvalidation "github.com/openshift/origin/pkg/security/api/validation"
+	securityapi "github.com/openshift/origin/pkg/security/apis/security"
+	securityvalidation "github.com/openshift/origin/pkg/security/apis/security/validation"
 	"github.com/openshift/origin/pkg/security/registry/podsecuritypolicysubjectreview"
-	oscc "github.com/openshift/origin/pkg/security/scc"
+	scc "github.com/openshift/origin/pkg/security/securitycontextconstraints"
 )
 
 // REST implements the RESTStorage interface in terms of an Registry.
 type REST struct {
-	sccMatcher oscc.SCCMatcher
+	sccMatcher scc.SCCMatcher
 	saCache    kcorelisters.ServiceAccountLister
 	client     clientset.Interface
 }
 
+var _ rest.Creater = &REST{}
+
 // NewREST creates a new REST for policies..
-func NewREST(m oscc.SCCMatcher, saCache kcorelisters.ServiceAccountLister, c clientset.Interface) *REST {
+func NewREST(m scc.SCCMatcher, saCache kcorelisters.ServiceAccountLister, c clientset.Interface) *REST {
 	return &REST{sccMatcher: m, saCache: saCache, client: c}
 }
 
@@ -40,7 +42,7 @@ func (r *REST) New() runtime.Object {
 }
 
 // Create registers a given new PodSecurityPolicyReview instance to r.registry.
-func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Object, error) {
+func (r *REST) Create(ctx apirequest.Context, obj runtime.Object, _ rest.ValidateObjectFunc, _ bool) (runtime.Object, error) {
 	pspr, ok := obj.(*securityapi.PodSecurityPolicyReview)
 	if !ok {
 		return nil, kapierrors.NewBadRequest(fmt.Sprintf("not a PodSecurityPolicyReview: %#v", obj))
@@ -71,16 +73,16 @@ func (r *REST) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Objec
 			errs = append(errs, fmt.Errorf("unable to find SecurityContextConstraints for ServiceAccount %s: %v", sa.Name, err))
 			continue
 		}
-		oscc.DeduplicateSecurityContextConstraints(saConstraints)
-		sort.Sort(oscc.ByPriority(saConstraints))
+		scc.DeduplicateSecurityContextConstraints(saConstraints)
+		sort.Sort(scc.ByPriority(saConstraints))
 		var namespace *kapi.Namespace
 		for _, constraint := range saConstraints {
 			var (
-				provider kscc.SecurityContextConstraintsProvider
+				provider scc.SecurityContextConstraintsProvider
 				err      error
 			)
 			pspsrs := securityapi.PodSecurityPolicySubjectReviewStatus{}
-			if provider, namespace, err = oscc.CreateProviderFromConstraint(ns, namespace, constraint, r.client); err != nil {
+			if provider, namespace, err = scc.CreateProviderFromConstraint(ns, namespace, constraint, r.client); err != nil {
 				errs = append(errs, fmt.Errorf("unable to create provider for service account %s: %v", sa.Name, err))
 				continue
 			}

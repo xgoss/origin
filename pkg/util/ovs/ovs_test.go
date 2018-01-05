@@ -5,11 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/util/exec"
+	"k8s.io/utils/exec"
+	fakeexec "k8s.io/utils/exec/testing"
 )
 
-func normalSetup() *exec.FakeExec {
-	return &exec.FakeExec{
+func normalSetup() *fakeexec.FakeExec {
+	return &fakeexec.FakeExec{
 		LookPathFunc: func(prog string) (string, error) {
 			if prog == "ovs-ofctl" || prog == "ovs-vsctl" {
 				return "/sbin/" + prog, nil
@@ -20,17 +21,17 @@ func normalSetup() *exec.FakeExec {
 	}
 }
 
-func missingSetup() *exec.FakeExec {
-	return &exec.FakeExec{
+func missingSetup() *fakeexec.FakeExec {
+	return &fakeexec.FakeExec{
 		LookPathFunc: func(prog string) (string, error) {
 			return "", fmt.Errorf("%s not found", prog)
 		},
 	}
 }
 
-func addTestResult(t *testing.T, fexec *exec.FakeExec, command string, output string, err error) {
-	fcmd := exec.FakeCmd{
-		CombinedOutputScript: []exec.FakeCombinedOutputAction{
+func addTestResult(t *testing.T, fexec *fakeexec.FakeExec, command string, output string, err error) {
+	fcmd := fakeexec.FakeCmd{
+		CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 			func() ([]byte, error) { return []byte(output), err },
 		},
 	}
@@ -40,11 +41,11 @@ func addTestResult(t *testing.T, fexec *exec.FakeExec, command string, output st
 			if execCommand != command {
 				t.Fatalf("Unexpected command: wanted %q got %q", command, execCommand)
 			}
-			return exec.InitFakeCmd(&fcmd, cmd, args...)
+			return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
 		})
 }
 
-func ensureTestResults(t *testing.T, fexec *exec.FakeExec) {
+func ensureTestResults(t *testing.T, fexec *fakeexec.FakeExec) {
 	if fexec.CommandCalls != len(fexec.CommandScript) {
 		t.Fatalf("Only used %d of %d expected commands", fexec.CommandCalls, len(fexec.CommandScript))
 	}
@@ -190,7 +191,19 @@ func TestAddPort(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Unexpectedly failed to get error")
 	}
-	if err.Error() != "Allocated ofport (3) did not match request (5)" {
+	if err.Error() != "allocated ofport (3) did not match request (5)" {
+		t.Fatalf("Got wrong error: %v", err)
+	}
+	ensureTestResults(t, fexec)
+
+	addTestResult(t, fexec, "ovs-vsctl --may-exist add-port br0 veth0 -- set Interface veth0 ofport_request=5", "", nil)
+	addTestResult(t, fexec, "ovs-vsctl get Interface veth0 ofport", "-1\n", nil)
+	addTestResult(t, fexec, "ovs-vsctl get Interface veth0 error", "could not open network device veth0 (No such device)\n", nil)
+	_, err = ovsif.AddPort("veth0", 5)
+	if err == nil {
+		t.Fatalf("Unexpectedly failed to get error")
+	}
+	if err.Error() != "error on port veth0: could not open network device veth0 (No such device)" {
 		t.Fatalf("Got wrong error: %v", err)
 	}
 	ensureTestResults(t, fexec)

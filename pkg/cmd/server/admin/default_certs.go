@@ -15,6 +15,8 @@ const (
 	CAFilePrefix     = "ca"
 	CABundlePrefix   = "ca-bundle"
 	MasterFilePrefix = "master"
+
+	FrontProxyCAFilePrefix = "frontproxy-ca"
 )
 
 type ClientCertInfo struct {
@@ -119,6 +121,18 @@ func DefaultOpenshiftLoopbackClientCertInfo(certDir string) ClientCertInfo {
 	}
 }
 
+func DefaultAggregatorClientCertInfo(certDir string) ClientCertInfo {
+	return ClientCertInfo{
+		CertLocation: configapi.CertInfo{
+			CertFile: DefaultCertFilename(certDir, bootstrappolicy.AggregatorUnqualifiedUsername),
+			KeyFile:  DefaultKeyFilename(certDir, bootstrappolicy.AggregatorUnqualifiedUsername),
+		},
+		UnqualifiedUser: bootstrappolicy.AggregatorUnqualifiedUsername,
+		User:            bootstrappolicy.AggregatorUsername,
+		Groups:          sets.String{},
+	}
+}
+
 func DefaultClusterAdminClientCertInfo(certDir string) ClientCertInfo {
 	return ClientCertInfo{
 		CertLocation: configapi.CertInfo{
@@ -127,7 +141,7 @@ func DefaultClusterAdminClientCertInfo(certDir string) ClientCertInfo {
 		},
 		UnqualifiedUser: "admin",
 		User:            "system:admin",
-		Groups:          sets.NewString(bootstrappolicy.ClusterAdminGroup),
+		Groups:          sets.NewString(bootstrappolicy.ClusterAdminGroup, bootstrappolicy.MastersGroup),
 	}
 }
 

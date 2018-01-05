@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/openshift/origin/pkg/cmd/templates"
 	"github.com/spf13/cobra"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 
 	"github.com/openshift/origin/pkg/gitserver"
@@ -96,7 +96,7 @@ func NewCommandRepositoryBuildConfigs(name string, out io.Writer) *cobra.Command
 		Long:  repositoryBuildConfigsDesc,
 		Run: func(c *cobra.Command, args []string) {
 			if len(args) != 1 {
-				err := cmdutil.UsageError(c, "This command takes a single argument - the name of the repository")
+				err := cmdutil.UsageErrorf(c, "This command takes a single argument - the name of the repository")
 				cmdutil.CheckErr(err)
 			}
 			repoName := args[0]
