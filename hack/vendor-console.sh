@@ -10,7 +10,8 @@
 #                        a sibling to this repository.
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
-CONSOLE_REPO_PATH=${CONSOLE_REPO_PATH:-$OS_ROOT/../origin-web-console}
+#CONSOLE_REPO_PATH=${CONSOLE_REPO_PATH:-$OS_ROOT/../origin-web-console}
+CONSOLE_REPO_PATH=/opt/origin-web-console
 if [[ ! -d "$CONSOLE_REPO_PATH" ]]; then
   echo "The console repo at path $CONSOLE_REPO_PATH does not exist."
   echo "Make sure you have cloned the web console repo locally:  git@github.com:openshift/origin-web-console.git"
